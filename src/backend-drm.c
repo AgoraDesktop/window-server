@@ -25,6 +25,10 @@
  *   AND IT PUTS THE PREVIOUS MODE BACK when it stops. What was scanning out before this started is remembered
  *   and restored, so leaving is not a screen left in a state only a reboot fixes.
  *
+ * AND IT DOES NOT CURRENTLY PUT ANYTHING ON A SCREEN ON THIS DRIVER — SEE THE NOTE ON THE LEGACY PATH AT
+ * `drmModeSetCrtc` BELOW. It is built, it enumerates, it allocates and it accepts its own calls; it does not
+ * light a pixel, and that is recorded rather than implied.
+ *
  * WHEN IT FAILS HERE, IT SAYS WHAT TO DO. The usual reason on a machine with a proprietary NVIDIA driver is
  * that modesetting is off in the KERNEL module (`nvidia_drm.modeset=1`), and the symptom is a device with no
  * connectors at all — a card that can render and cannot display. The message below names that case rather than
@@ -280,6 +284,28 @@ int aws_backend_drm_start(struct aws_server *server)
 	}
 	/* WHAT WAS THERE BEFORE, so that stopping puts it back. */
 	drm->saved_crtc = drmModeGetCrtc(drm->fd, drm->crtc_id);
+	/* **THE LEGACY MODESET IS ACCEPTED AND INERT ON A DRIVER THAT USES ATOMIC, AND THAT IS MEASURED.** On this
+	 * machine's nvidia-drm the call below returns 0 and `drmModeGetCrtc` afterwards reports this framebuffer on
+	 * this CRTC — while NOTHING APPEARS ON ANY MONITOR. The reason is visible in the driver's own state:
+	 *
+	 *     connector 77: CONNECTED, encoder_id=0        encoder 76: crtc_id=0
+	 *     connector 79: CONNECTED, encoder_id=0        encoder 78: crtc_id=0
+	 *
+	 * NOTHING IS BOUND TO ANYTHING in the legacy model — no encoder on a connector, no CRTC on an encoder, no
+	 * framebuffer on a CRTC — and yet a desktop is on the screen, which means the live path is the ATOMIC API
+	 * and the legacy ioctls are only being recorded. A successful ioctl and a lit pixel are not the same thing,
+	 * and confusing them is how this backend came to claim a display it never drove.
+	 *
+	 * THE FIX IS `drmModeAtomicCommit`: a property request setting the connector's CRTC_ID, the CRTC's MODE_ID
+	 * (a blob) and ACTIVE, and the primary plane's FB_ID, CRTC_ID and SRC/CRTC rectangles, committed with
+	 * ALLOW_MODESET. That is a real piece of work — property enumeration per object, a primary-plane lookup by
+	 * `possible_crtcs`, and a mode blob — and it is the correct API for this driver regardless of whether the
+	 * legacy one happens to work elsewhere, so it is the way this backend should be finished rather than a
+	 * workaround for this machine.
+	 *
+	 * AND A DUMB BUFFER LIKELY NEEDS `drmModeDirtyFB` AFTER EVERY COMPOSITE besides: it is what tells a driver
+	 * that the memory it is scanning out has changed. That belongs in `present`, which this backend leaves NULL.
+	 */
 	if (drmModeSetCrtc(drm->fd, drm->crtc_id, drm->fb_id, 0, 0, &drm->connector_id, 1, &mode) != 0) {
 		fprintf(stderr, "window-server: could not set the mode on the display: %s\n", strerror(errno));
 		drmModeFreeConnector(connector);

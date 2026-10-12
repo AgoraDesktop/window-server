@@ -136,8 +136,14 @@ shape for it (`present` exists and is simply unused).
 - **It puts the previous mode back on the way out**, so leaving is not a screen left in a state only a reboot
   fixes.
 
-**AND IT DRIVES A REAL DISPLAY.** With KMS enabled on the card, `--backend drm` takes the monitor, composites
-into a kernel dumb buffer, and gives the mode back on the way out:
+**IT DOES NOT YET PUT ANYTHING ON A SCREEN, AND THAT IS MEASURED RATHER THAN UNKNOWN.** Everything below works
+up to the modeset and the modeset is inert on this driver — see "the legacy path is accepted and does not
+display" below. The evidence that follows is what the COMPOSITOR did; it is not evidence that light came out of
+a monitor, which is a thing only a person looking at the screen can say.
+
+**AND IT DRIVES A REAL DISPLAY** *(this claim was made before it was checked, and it was wrong — see below)*.
+With KMS enabled on the card, `--backend drm` takes the monitor, composites into a kernel dumb buffer, and gives
+the mode back on the way out:
 
 ```
 $ ./build/window-server --backend drm --frames 120 &
@@ -160,6 +166,25 @@ before anything was allowed to touch a screen:
   framebuffer 93 (XRGB8888)
   Master was taken and is given back; nothing was set on the CRTC.
 ```
+
+**THE LEGACY PATH IS ACCEPTED AND DOES NOT DISPLAY, which is the state of this backend.** `drmModeSetCrtc`
+returns 0 and `drmModeGetCrtc` then reports this framebuffer on this CRTC — and no monitor changes. The
+driver's own state says why:
+
+```
+connector 77: CONNECTED, encoder_id=0      encoder 76: crtc_id=0
+connector 79: CONNECTED, encoder_id=0      encoder 78: crtc_id=0
+CRTCs: 42 52 62 72 — every CRTC reports no framebuffer
+```
+
+Nothing is bound to anything in the legacy model, and a desktop is nonetheless on the screen: the live path is
+**atomic modesetting**, and the legacy ioctls are only being recorded. A test that filled a dumb buffer with
+solid red, held it for eight seconds and called `drmModeDirtyFB` produced NO CHANGE ON ANY MONITOR, which is
+what settled it.
+
+The fix is `drmModeAtomicCommit` — the connector's `CRTC_ID`, the CRTC's `MODE_ID` blob and `ACTIVE`, and the
+primary plane's `FB_ID`/`CRTC_ID`/`SRC`/`CRTC` rectangles, committed with `ALLOW_MODESET` — plus
+`drmModeDirtyFB` in `present` so the driver is told the buffer changed. Neither is written.
 
 **MEASURED, AND A MACHINE WITH NO KMS SAYS SO:**
 
