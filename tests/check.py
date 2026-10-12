@@ -1,39 +1,48 @@
 #!/usr/bin/env python3
-"""Read the window server's own screenshot and assert what the test client put there.
+"""Read the window server's own screenshot and assert what the two test clients put there.
 
-The assertion is a PLACE rather than a picture: the client drew one flat colour, so what is checked is that the
-colour is where the compositor's cascade says the first window goes, that it has the size the client asked for,
-and that everything else is the compositor's own background.
+THE ASSERTION IS AN ORDER, NOT A PICTURE. Two clients draw flat colours and OVERLAP, and THE ONE THAT ASKED FOR
+THE HIGHER LEVEL IS ON TOP — while being the one that was created FIRST. That disagreement is deliberate: with
+the levels agreeing with the creation order this would pass whether the server ordered by level or not, which is
+the difference between a test and a decoration.
 """
 import sys
 from PIL import Image
 
-BACKGROUND = (48, 51, 56)      # aws_output.c's AWS_BACKGROUND
-FRAME = (100, 80)              # what tests/client.c asks for with agora_window.set_frame
+BACKGROUND = (48, 51, 56)        # aws_output.c's AWS_BACKGROUND
+TOP_AT = (100, 80)               # the first client's frame, asked for with agora_window.set_frame
+BOTTOM_AT = (150, 110)           # the second's — created LATER and at a LOWER level
+WINDOW = (320, 200)
 
 
 def main():
-    if len(sys.argv) < 4:
-        print("usage: check.py SHOT.ppm EXPECTED-RRGGBB WxH")
+    if len(sys.argv) < 5:
+        print("usage: check.py SHOT.ppm TOP-RRGGBB BOTTOM-RRGGBB WxH")
         return 2
-    path, colour, size = sys.argv[1], int(sys.argv[2], 16), sys.argv[3]
-    want = ((colour >> 16) & 0xFF, (colour >> 8) & 0xFF, colour & 0xFF)
+    path, top, bottom, size = sys.argv[1], int(sys.argv[2], 16), int(sys.argv[3], 16), sys.argv[4]
+    ctop = ((top >> 16) & 0xFF, (top >> 8) & 0xFF, top & 0xFF)
+    cbot = ((bottom >> 16) & 0xFF, (bottom >> 8) & 0xFF, bottom & 0xFF)
     w, h = (int(v) for v in size.lower().split("x"))
 
     im = Image.open(path).convert("RGB")
     px = im.load()
-    checks = []
+    # a point inside both windows: the second client's frame is offset into the first's
+    over = (BOTTOM_AT[0] + 10, BOTTOM_AT[1] + 10)
 
-    checks.append((f"the output is {im.size[0]}x{im.size[1]}", im.size == (1280, 720)))
-    checks.append((f"THE SERVER HONOURED set_frame: the colour is at ({FRAME[0]},{FRAME[1]})",
-                   px[FRAME[0] + 2, FRAME[1] + 2] == want))
-    checks.append((f"the window is {w}x{h}",
-                   px[FRAME[0] + w - 2, FRAME[1] + h - 2] == want))
-    checks.append(("and NOTHING is at the origin, where a cascade would have put it",
-                   px[2, 2] == BACKGROUND and px[42, 42] == BACKGROUND))
-    checks.append(("nothing of the client is outside it", px[FRAME[0] + w + 5, FRAME[1] + 5] == BACKGROUND))
-    checks.append(("and the rest is the compositor's own background", px[5, 5] == BACKGROUND and
-                   px[1275, 715] == BACKGROUND))
+    checks = [
+        (f"the output is {im.size[0]}x{im.size[1]}", im.size == (1280, 720)),
+        (f"the high-level client is at its frame ({TOP_AT[0]},{TOP_AT[1]})",
+         px[TOP_AT[0] + 2, TOP_AT[1] + 2] == ctop),
+        (f"the low-level client is at ITS frame ({BOTTOM_AT[0]},{BOTTOM_AT[1]})",
+         px[BOTTOM_AT[0] + w - 2, BOTTOM_AT[1] + h - 2] == cbot),
+        (f"THE HIGHER LEVEL IS ON TOP at {over}, and it was created FIRST",
+         px[over[0], over[1]] == ctop),
+        ("and it is not the later window showing through", px[over[0], over[1]] != cbot),
+        ("nothing is at the origin, where a cascade would have put them",
+         px[2, 2] == BACKGROUND and px[42, 42] == BACKGROUND),
+        ("and the rest is the compositor's own background", px[5, 5] == BACKGROUND and
+         px[1275, 715] == BACKGROUND),
+    ]
 
     failed = 0
     for name, ok in checks:

@@ -41,6 +41,7 @@ struct client {
 	struct wl_surface *surface;
 	struct agora_window *window;
 	int frame_x, frame_y;
+	int level;			/* the NSWindow level to ask for, so two clients can be ordered */
 	struct wl_buffer *buffer;
 	uint32_t *pixels;
 
@@ -173,6 +174,7 @@ int main(int argc, char **argv)
 	client.max_frames = 3;
 	client.frame_x = 100;
 	client.frame_y = 80;
+	client.level = 0;
 
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
@@ -183,6 +185,12 @@ int main(int argc, char **argv)
 			client.max_frames = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--colour") == 0 && i + 1 < argc) {
 			client.colour = (uint32_t)strtoul(argv[++i], NULL, 16);
+		} else if (strcmp(argv[i], "--x") == 0 && i + 1 < argc) {
+			client.frame_x = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "--y") == 0 && i + 1 < argc) {
+			client.frame_y = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "--level") == 0 && i + 1 < argc) {
+			client.level = atoi(argv[++i]);
 		}
 	}
 
@@ -206,6 +214,7 @@ int main(int argc, char **argv)
 	 * exactly there, which is the whole claim being made. */
 	client.window = agora_shell_get_window(client.shell, client.surface);
 	agora_window_set_frame(client.window, client.frame_x, client.frame_y, client.width, client.height);
+	agora_window_set_level(client.window, client.level);
 	agora_window_set_title(client.window, "window server test client");
 	agora_window_set_app_id(client.window, "org.agora.test-client");
 
