@@ -65,6 +65,10 @@ struct aws_surface {
 	 * per composite. */
 	struct wl_resource *pending_buffer;	/* attached since the last commit */
 	struct wl_resource *current_buffer;	/* what the last commit presented */
+	/* **WHETHER AN ATTACH HAPPENED, WHICH IS NOT THE SAME AS WHETHER THERE IS A BUFFER.** Wayland's attach
+	 * SETS the buffer; not calling it leaves the previous one alone. Without this the two were one thing and a
+	 * commit that simply did not re-attach took the window's buffer away — see `surface_commit`. */
+	int pending_attached;
 	struct wl_listener buffer_listener;	/* fires when the CLIENT destroys the committed buffer */
 	int has_buffer_listener;
 

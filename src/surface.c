@@ -159,6 +159,9 @@ static void surface_attach(struct wl_client *client, struct wl_resource *resourc
 	}
 	/* ATTACHING NOTHING IS HOW A SURFACE IS HIDDEN, and it is a real state rather than an error: the commit
 	 * that follows it takes the surface off the screen. */
+	/* AN ATTACH HAPPENED EITHER WAY — with a buffer, or with nothing, which is how a surface is hidden. What
+	 * must not happen is a commit that does not attach at all being read as one of those. */
+	surface->pending_attached = 1;
 	if (buffer_resource != NULL && !aws_buffer_is_supported(buffer_resource)) {
 		surface->pending_buffer = NULL;	/* the client has already been told */
 		return;
@@ -220,6 +223,7 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
 
 	(void)client;
 	if (surface == NULL) {
+		fprintf(stderr, "DBG commit: NO surface\n");
 		return;
 	}
 	server = surface->server;
@@ -245,17 +249,31 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
 		return;
 	}
 
-	/* THE COMMIT ITSELF: pending becomes current, and a surface that has something to show is placed. */
-	if (surface->has_buffer_listener) {
-		wl_list_remove(&surface->buffer_listener.link);
-		surface->has_buffer_listener = 0;
+	/* **A COMMIT THAT DOES NOT ATTACH KEEPS THE BUFFER IT HAD.** Wayland's `attach` is what SETS a surface's
+	 * buffer, and NOT CALLING IT is not the same as calling it with nothing: the second detaches the buffer and
+	 * the first leaves it where it is. This file used to treat them as one thing, and it cost a window —
+	 * MEASURED, a client that commits twice, once to give the surface its role and once to show it, had its
+	 * buffer taken away by the second commit and was never composited at all.
+	 *
+	 * (That client commits twice because `AGWindowShow` commits and `-orderFront:` calls it after
+	 * `-cg_ensureWindow` already has. That redundancy is worth removing and is NOT the bug: any client may
+	 * commit without attaching, and a compositor that unmaps it is wrong about the protocol.) */
+	if (surface->pending_attached) {
+		if (surface->has_buffer_listener) {
+			wl_list_remove(&surface->buffer_listener.link);
+			surface->has_buffer_listener = 0;
+		}
+		surface->current_buffer = surface->pending_buffer;
+		surface->pending_buffer = NULL;
+		surface->pending_attached = 0;
+		if (surface->current_buffer != NULL) {
+			surface->buffer_listener.notify = buffer_destroyed;
+			wl_resource_add_destroy_listener(surface->current_buffer, &surface->buffer_listener);
+			surface->has_buffer_listener = 1;
+		}
 	}
-	surface->current_buffer = surface->pending_buffer;
-	surface->pending_buffer = NULL;
+	/* AND A SURFACE THAT HAS A BUFFER IS SHOWN, WHETHER THAT BUFFER ARRIVED NOW OR EARLIER. */
 	if (surface->current_buffer != NULL) {
-		surface->buffer_listener.notify = buffer_destroyed;
-		wl_resource_add_destroy_listener(surface->current_buffer, &surface->buffer_listener);
-		surface->has_buffer_listener = 1;
 		if (!surface->mapped) {
 			/* **THERE IS NO CASCADE HERE, AND THAT IS THE POINT.** A cascade is a PLACEMENT POLICY, and on
 			 * the Mac the application's frame is honoured — the only thing that adjusts it is the
@@ -274,11 +292,10 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
 			wl_list_remove(&surface->link);
 			wl_list_insert(server->surfaces.prev, &surface->link);
 		}
-		aws_server_schedule_render(server);
 	} else {
 		surface->mapped = 0;
-		aws_server_schedule_render(server);
 	}
+	aws_server_schedule_render(server);
 }
 
 static void surface_set_buffer_transform(struct wl_client *client, struct wl_resource *resource, int32_t transform)
