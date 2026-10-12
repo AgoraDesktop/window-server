@@ -17,6 +17,14 @@
  * grab the host's input is exactly how a desktop is left with a dead mouse; a compositor that has nothing to
  * route has nothing to grab, and that stays true until input arrives on purpose.
  *
+ * INPUT COMES FROM THE SAME WINDOW, AND WITHOUT GRABBING ANYTHING. A nested compositor's input IS its host
+ * window's input: the host window manager gives this window the pointer when it is under it and the keyboard
+ * when it is focused, and the events arrive through `XNextEvent` like any other client's. NOTHING HERE CALLS
+ * XGrabPointer OR XGrabKeyboard — a window that takes input when it is given it cannot leave a desktop with a
+ * dead mouse, which is what a grab is for and what this does not need. The X keycode is converted to evdev by
+ * SUBTRACTING 8, the same offset a client adds back, so the code a client receives is the code its own
+ * keymap expects.
+ *
  * THE PRESENT IS AN XPutImage OF THE WHOLE FRAME. That is 3.5 MB over the X connection per frame at 1280x720,
  * which is why it is a development backend and not a fast one — XShm would remove the copy and is a change to
  * this file alone, because nothing above it knows how the pixels get there.
@@ -78,6 +86,42 @@ static int x11_dispatch(int fd, uint32_t mask, void *data)
 			if ((Atom)event.xclient.data.l[0] == x11->wm_delete) {
 				server->running = 0;
 			}
+			break;
+		case MotionNotify:
+			aws_seat_pointer_motion(server, event.xmotion.x, event.xmotion.y);
+			break;
+		case EnterNotify:
+			aws_seat_pointer_enter(server, event.xcrossing.x, event.xcrossing.y);
+			break;
+		case LeaveNotify:
+			/* THE POINTER LEFT THE WINDOW, so it left the output: the client under it is told, because a
+			 * client that never hears `leave` keeps drawing a hover it no longer has. */
+			aws_seat_pointer_leave(server);
+			break;
+		case ButtonPress:
+		case ButtonRelease: {
+			/* X BUTTON NUMBERS ARE NOT EVDEV CODES. 1, 2 and 3 are the left, middle and right buttons and
+			 * the rest are "other"; the client is told what a device would have said. */
+			uint32_t button;
+			int pressed = event.type == ButtonPress;
+
+			switch (event.xbutton.button) {
+			case Button1: button = 0x110; break;	/* BTN_LEFT */
+			case Button2: button = 0x112; break;	/* BTN_MIDDLE */
+			case Button3: button = 0x111; break;	/* BTN_RIGHT */
+			default:      button = 0x113 + (event.xbutton.button - 4); break;
+			}
+			/* THE POSITION FIRST: a button can arrive without a motion, and focus is decided by where the
+			 * pointer IS, not by where it last moved to. */
+			aws_seat_pointer_motion(server, event.xbutton.x, event.xbutton.y);
+			aws_seat_pointer_button(server, button, pressed);
+			break;
+		}
+		case KeyPress:
+		case KeyRelease:
+			/* MINUS 8 IS THE WHOLE CONVERSION: an X keycode is an evdev code plus 8, and a Wayland client's
+			 * keymap is indexed by the evdev code. */
+			aws_seat_key(server, (uint32_t)(event.xkey.keycode - 8), event.type == KeyPress);
 			break;
 		case ConfigureNotify:
 			/* THE HOST WINDOW MANAGER MAY RESIZE THIS WINDOW AND THE OUTPUT DOES NOT FOLLOW IT: the output's
@@ -152,7 +196,12 @@ int aws_backend_x11_start(struct aws_server *server)
 					  BlackPixel(x11->display, x11->screen),
 					  WhitePixel(x11->display, x11->screen));
 	XStoreName(x11->display, x11->window, "Agora Window Server");
-	XSelectInput(x11->display, x11->window, ExposureMask | StructureNotifyMask);
+	/* THE INPUT MASKS ARE THE HOST'S PERMISSION SLIP: these are the events this window is given, and there is
+	 * no grab among them. PointerMotionMask delivers a motion only while the pointer is inside the window,
+	 * which is exactly the reach of a nested output. */
+	XSelectInput(x11->display, x11->window,
+		     ExposureMask | StructureNotifyMask | KeyPressMask | KeyReleaseMask | ButtonPressMask |
+		     ButtonReleaseMask | PointerMotionMask | EnterWindowMask | LeaveWindowMask);
 	/* THE CLOSE BOX ASKS RATHER THAN KILLS, which is what makes the close path this process's to run. */
 	x11->wm_delete = XInternAtom(x11->display, "WM_DELETE_WINDOW", False);
 	XSetWMProtocols(x11->display, x11->window, &x11->wm_delete, 1);
@@ -167,6 +216,12 @@ int aws_backend_x11_start(struct aws_server *server)
 		return -1;
 	}
 	XMapWindow(x11->display, x11->window);
+	/* **AND IT ASKS TO BE ON TOP, WHICH A NESTED OUTPUT DOES BECAUSE IT IS SOMEBODY'S SCREEN.** Without this
+	 * the window is mapped underneath whatever the desktop already had, and a compositor whose screen is
+	 * buried receives no pointer input at all — MEASURED: a synthetic click aimed at its own geometry landed on
+	 * another application, because that application was above it. This is a raise and NOT a grab: the window
+	 * manager is still free to put something else in front. */
+	XRaiseWindow(x11->display, x11->window);
 	XFlush(x11->display);
 
 	x11->source = wl_event_loop_add_fd(server->loop, ConnectionNumber(x11->display), WL_EVENT_READABLE,

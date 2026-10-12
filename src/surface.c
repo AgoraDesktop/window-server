@@ -268,6 +268,12 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
 				surface->y = 40;
 			}
 			surface->mapped = 1;
+			/* **A NEW WINDOW TAKES THE KEYBOARD IF NOTHING HAS IT.** A window that is mapped but never
+			 * clicked would otherwise receive no key at all — a person could see it and not type into it.
+			 * This is the initial-focus half of the policy; `aws_seat_set_keyboard_focus` carries the rest. */
+			if (server->keyboard_focus == NULL) {
+				aws_seat_set_keyboard_focus(server, surface);
+			}
 			/* MAPPED SURFACES ARE COMPOSITED IN MAPPING ORDER — the list is the stacking, and this version
 			 * has no other: raising and lowering arrive with the window-management policy. */
 			wl_list_remove(&surface->link);

@@ -54,6 +54,7 @@ void aws_server_destroy(struct aws_server *server)
 	wl_display_destroy_clients(server->display);
 	wl_display_destroy(server->display);
 	aws_backend_shutdown(server);
+	aws_seat_finish(server);
 	free(server);
 }
 

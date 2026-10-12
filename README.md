@@ -67,7 +67,27 @@ A compositor that has nothing to route has nothing to grab, and that stays true 
 X *clients*; this is a development backend, which is why it is **optional** — the core links no `libX11` at all
 unless it is built in (`-DWITH_X11` is not needed: it is taken if `pkg-config` finds it).
 
-### 3. It is tested without the AppKit
+### 3. Input travels the whole way
+
+The seat is driven by the nested backend, and the input was sent STRAIGHT TO THE WINDOW (`XSendEvent`) rather
+than by moving the real pointer — a synthetic pointer lands on whatever the window manager stacked on top, and
+on a busy desktop that is not this window. An AppKit client on the other end:
+
+```
+window: pointer entered at 260,160     the injected motion, in SURFACE coordinates (300,200 less the
+window: key 30 down text="a"           window's cascade at 40,40)
+window: key 30 up text="a"
+```
+
+The keycode that went in was the X keycode 38; the client saw evdev **30** and translated it to `"a"` through
+the keymap this compositor sent it. That is the whole chain: X keycode → evdev → compositor → `wl_keyboard` →
+the client's own xkbcommon.
+
+**THE FOCUS POLICY IS TWO HALVES AND BOTH ARE NEEDED**: a window takes the keyboard when it is MAPPED, so a
+person can type into the first thing that appears, and a CLICK moves it. The first half was missing and it
+showed: keys arrived with the focus nil and went nowhere.
+
+### 4. It is tested without the AppKit
 
 `ctest` — the server, a client that is nothing but the protocol, and a check that reads the server's own
 screenshot:
@@ -93,10 +113,14 @@ that is written down is a decision and one that is not is a surprise.
   this process, and `x11` is a nested window on an X server. A **DRM/KMS** backend is the real one and is not
   written. A backend is a place to put pixels — a width, a height and a buffer — which is what makes a new one
   a file (`src/backend-*.c`) rather than a change to the compositor.
-- **No input devices.** `libinput` is the dependency that would bring them and it is not taken yet. The seat
-  advertises a keyboard and sends the **keymap** — so a client's key translation is exercised against a
-  compositor-supplied map — but generates no key or pointer events. The pointer is not advertised at all: a
-  capability is a promise.
+- **No input *devices*, which is not the same as no input.** The seat is real — `wl_pointer` and `wl_keyboard`
+  are advertised, focus is decided and events are delivered — and the events come from the **host** through the
+  nested backend, which is what a nested compositor's input is (weston's x11 backend works the same way).
+  What is missing is reading a device directly: `libinput` has no development headers on the build machine and
+  `/dev/input` is not readable by an ordinary user, so that path is blocked until one of those changes. A
+  server with no host — the headless one — has a seat nobody can press.
+- **No cursor.** `wl_pointer.set_cursor` is accepted and does nothing: a nested output's pointer is the HOST's,
+  and a second cursor drawn into the window is one the person did not ask for.
 - **No drawing of its own.** The menu bar, the dock and the window frames are the window server's to draw in
   a Mac-like desktop, and this owns none of them yet — which is the honest reason there is no drawing library
   in the build. The compositing is a row copy.

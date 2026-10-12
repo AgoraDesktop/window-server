@@ -21,9 +21,12 @@
  *     target is Wayland on real hardware, and Xwayland exists for X CLIENTS. This backend is a development
  *     one, the same thing weston's `--backend=x11` and mutter's `--nested` are. It is also OPTIONAL — the core
  *     does not link libX11 at all unless it is built in.
- *   - NO INPUT DEVICES. `libinput` is the dependency that would bring them, and it is not taken yet. The seat
- *     therefore advertises a keyboard and sends the KEYMAP (so a client's key translation is exercised against
- *     a compositor-supplied map) but generates no key or pointer events.
+ *   - NO INPUT *DEVICES*, WHICH IS NOT THE SAME AS NO INPUT. The seat is real: wl_pointer and wl_keyboard are
+ *     advertised, focus is decided, and events are delivered — but the events come from the HOST through the
+ *     nested backend (a nested compositor's input is its host window's input; that is what weston's x11 backend
+ *     does). What is missing is reading a device directly: `libinput` needs its development headers, which are
+ *     not installed, and /dev/input is not readable by an ordinary user. So a server with no host — the
+ *     headless one — has a seat nobody can press.
  *   - NO DRAWING OF ITS OWN. A Mac-like window server owns the menu bar, the dock and the window frames, and
  *     this owns none of them: it composites client buffers and paints a background. That is why it takes no
  *     drawing library yet — the row copy below is the whole of its drawing. A drawing library arrives with the
@@ -129,7 +132,18 @@ struct aws_server {
 	struct aws_backend backend;
 	struct aws_output output;
 
-	struct wl_resource *keyboard_focus;	/* the wl_keyboard resource that has focus, or NULL */
+	/* ---- THE SEAT. Which surfaces have the pointer and the keyboard, where the pointer is, and the xkb state
+	 * that turns a key into the MODIFIER STATE a client needs to translate it. ---- */
+	struct wl_list pointers;		/* struct aws_pointer, one per client that asked */
+	struct wl_list keyboards;		/* struct aws_keyboard */
+	struct aws_surface *pointer_focus;	/* the surface the pointer is over, or NULL */
+	struct aws_surface *keyboard_focus;	/* the surface the keyboard goes to, or NULL */
+	int pointer_x;				/* the pointer, in OUTPUT coordinates */
+	int pointer_y;
+	int pointer_inside;			/* the pointer is inside the output at all */
+	struct xkb_context *xkb_context;
+	struct xkb_keymap *xkb_keymap;
+	struct xkb_state *xkb_state;
 
 	int render_pending;
 	int frames;
@@ -163,8 +177,24 @@ int aws_backend_headless_start(struct aws_server *server);
 int aws_backend_x11_start(struct aws_server *server);
 
 
-/* seat.c — the seat, and the keymap this version can honestly supply */
+/* seat.c — the seat: the devices, the focus, and the keymap. */
 void aws_seat_init(struct aws_server *server);
+void aws_seat_finish(struct aws_server *server);
+
+/* THE FOUR THINGS A BACKEND CAN SAY ABOUT INPUT. Each is what an input device would have reported, and the
+ * only caller is a backend — which is what keeps "where input comes from" out of everything above. */
+void aws_seat_pointer_enter(struct aws_server *server, int x, int y);
+void aws_seat_pointer_leave(struct aws_server *server);
+void aws_seat_pointer_motion(struct aws_server *server, int x, int y);
+void aws_seat_pointer_button(struct aws_server *server, uint32_t evdev_button, int pressed);
+void aws_seat_key(struct aws_server *server, uint32_t evdev_keycode, int pressed);
+
+/* GIVE THE KEYBOARD TO A SURFACE (or to nothing, with NULL). The compositor's focus POLICY lives in one place,
+ * and this is the door it uses — a new window takes the focus and a click moves it. */
+void aws_seat_set_keyboard_focus(struct aws_server *server, struct aws_surface *surface);
+
+/* THE SURFACE AT A POINT, topmost first — the compositor's own hit test, and the thing focus is decided by. */
+struct aws_surface *aws_surface_at(struct aws_server *server, int x, int y);
 
 /* SEND A SURFACE ITS FRAME CALLBACKS, which is how a client learns its frame was taken. */
 void aws_surface_frame_done(struct aws_surface *surface, uint32_t time);
