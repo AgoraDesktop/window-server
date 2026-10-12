@@ -136,7 +136,13 @@ shape for it (`present` exists and is simply unused).
 - **It puts the previous mode back on the way out**, so leaving is not a screen left in a state only a reboot
   fixes.
 
-**IT USES THE ATOMIC API, AND THAT REPLACEMENT IS NOT YET CONFIRMED ON A SCREEN.** The legacy path was measured
+**IT DOUBLE-BUFFERS AND FLIPS AT VBLANK, WHICH IS WHAT PAGES ARE** — one buffer is scanned while the compositor
+draws into the other, and the new one is handed over at the next vblank, so the display never shows a frame that
+is half drawn. It then WAITS for the flip: with two buffers there is exactly one to draw into and it is only free
+once the previous flip has completed, so drawing early would be the tear it was avoiding. Waiting also paces the
+compositor to the display's refresh rather than to how fast it can paint.
+
+**THE ATOMIC REPLACEMENT IS NOT YET CONFIRMED ON A SCREEN.** The legacy path was measured
 to be inert on this driver (see below) and has been replaced by `drmModeAtomicCommit`. Everything up to the
 commit is verified by the dry run; **the commit itself has not been run**, because its failure mode is the
 display of the person running it.
@@ -191,6 +197,14 @@ shows one frame and never another. The dry run reports all of it:
 connector   77 (DVI-D), 11 mode(s)      mode  1920x1080 (PREFERRED)      crtc  42
 plane       36 (PRIMARY)                framebuffer 92 (XRGB8888), mode blob 94
 ```
+
+**AND THE ONE OBSTACLE ON THIS MACHINE IS THE DRIVER, NOT THE CODE**: X holds the GPU through the proprietary
+NVIDIA driver's own interface, so a DRM/KMS modeset has nothing to take. The evidence is in X's log —
+`(II) NVIDIA(0): NVIDIA GPU GeForce GTX 1060 6GB` and a validated MetaMode for both DFP outputs — which is why
+`drmSetMaster` succeeds, why the legacy state shows nothing bound, and why an accepted atomic commit changes no
+pixel. **Verifying this backend therefore needs a display nobody else is driving**: a text VT with the display
+manager stopped. `Ctrl+C` is then the way out, and it runs the teardown because signals stop the event loop
+rather than killing the process.
 
 **RELEASING THE DISPLAY IS PART OF THE MODESET AND HAS THE SAME RISK.** On the way out the CRTC is turned off
 and the connector detached — before the framebuffer and the buffer under it are destroyed, because a CRTC still

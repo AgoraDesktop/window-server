@@ -5,41 +5,37 @@
  * SPDX-License-Identifier: MIT
  *
  * THIS IS THE SHIPPING BACKEND. The headless one is for tests and the X11 one is for development; this is the
- * one a person's screen is attached to, and it is the only backend that needs the kernel's permission rather
- * than a window from somebody else.
+ * one a person's screen is attached to, and the only backend that needs the kernel's permission rather than a
+ * window from somebody else.
  *
  * IT USES THE ATOMIC API, BECAUSE THE LEGACY ONE IS INERT ON AN ATOMIC DRIVER. That is measured rather than
- * preferred. `drmModeSetCrtc` on this machine's nvidia-drm returns 0 and lights nothing, while the driver's own
- * state says why:
+ * preferred: `drmModeSetCrtc` on nvidia-drm returns 0 and lights nothing, because the driver's own state shows
+ * no encoder bound to a connector and no CRTC bound to an encoder — the legacy model is RECORDED while the
+ * atomic one programmes the hardware. A successful ioctl and a lit pixel are not the same thing, and a
+ * compositor that confused the two claimed a display it never drove.
  *
- *     connector 77: CONNECTED, encoder_id=0        encoder 76: crtc_id=0
- *     connector 79: CONNECTED, encoder_id=0        encoder 78: crtc_id=0
+ * IT DOUBLE-BUFFERS AND FLIPS AT VBLANK, WHICH IS WHAT PAGES ARE. One buffer is being scanned out while the
+ * compositor draws into the other, and `drmModeAtomicCommit` with DRM_MODE_PAGE_FLIP_EVENT hands the new one
+ * over AT THE NEXT VBLANK — so the display never shows a frame that is half drawn. The alternative, which is
+ * what this backend did first, is to draw straight into the memory being scanned and accept the tear.
  *
- * NOTHING IS BOUND TO ANYTHING in the legacy model — no encoder on a connector, no CRTC on an encoder, no
- * framebuffer on a CRTC — and a desktop is nonetheless on the screen, so the legacy model is being RECORDED
- * while the atomic one programmes the hardware. A successful ioctl and a lit pixel are not the same thing, and
- * a compositor that confused the two claimed a display it never drove.
- *
- * IT IS A DUMB-BUFFER SCANOUT AND NOT A PAGE-FLIPPING RENDERER, which is the first version on purpose. The
- * kernel allocates the pixels, this process maps them, and the plane is pointed at them once — so the
- * compositing loop writes straight into the memory the display is scanning out. What that costs is TEARING:
- * a frame is visible while it is still being drawn. What it buys is a bring-up path with no GBM, no EGL and no
- * GPU driver in the picture. Page flipping (`DRM_MODE_PAGE_FLIP_EVENT` on a second buffer) is the next
- * refinement and the backend interface already has the shape for it.
+ * AND IT WAITS FOR THE FLIP, WHICH IS THE PART THAT IS EASY TO GET WRONG. With two buffers there is exactly one
+ * to draw into, and it is only free once the PREVIOUS flip has completed — a compositor that draws into it
+ * early is drawing into a buffer the display may still be reading, which is the tear it was trying to avoid
+ * wearing a different hat. Waiting also PACES the compositor to the display's refresh instead of to however fast
+ * it can paint, which is the correct rate and the one clients are told about through their frame callbacks.
+ * The cost is that `present` blocks for up to a vblank; making that asynchronous means driving the render from
+ * the flip event rather than from the commit, which the backend interface would need a `busy` door for.
  *
  * TWO THINGS IT MUST DO THAT A WINDOWED BACKEND NEVER DOES:
  *
  *   IT TAKES DRM MASTER, the kernel's one-claimant lock on the device. If another compositor holds it this
- *   FAILS and says so — the safety property that makes the backend hard to run by accident.
+ *   FAILS and says so.
  *
- *   AND IT RELEASES THE DISPLAY ON THE WAY OUT, in the right order: the CRTC is turned off and the connector
- *   detached before the framebuffer and the buffer under it are destroyed. A compositor that leaves a screen
- *   showing its last frame has taken a display away from whoever owns it — and one that destroys a buffer a
- *   live CRTC is scanning is worse.
- *
- * WHEN IT FAILS HERE, IT SAYS WHAT TO DO. The usual reason on a machine with a proprietary NVIDIA driver is
- * modesetting being off IN THE KERNEL (`nvidia_drm.modeset=1`), and the symptom is a card with no connectors at
- * all — one that can render and cannot display.
+ *   AND IT RELEASES THE DISPLAY ON THE WAY OUT, in the reverse of the order it was taken: the plane lets go of
+ *   the framebuffer and the CRTC, the CRTC goes inactive, the connector lets go of the CRTC — and only then are
+ *   the framebuffers and the buffers destroyed. A compositor that leaves a screen showing its last frame has
+ *   taken a display away from whoever owns it, and one that destroys a buffer a live CRTC is scanning is worse.
  */
 
 #include "server.h"
@@ -58,6 +54,15 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
+/* ONE PAGE. Two of these exist and the compositor always draws into the one that is not being scanned out. */
+struct drm_buffer {
+	uint32_t handle;
+	uint32_t fb_id;
+	uint32_t pitch;
+	uint64_t size;
+	void *map;
+};
+
 struct drm_state {
 	int fd;
 	drmModeRes *resources;
@@ -65,58 +70,11 @@ struct drm_state {
 	uint32_t connector_id;
 	uint32_t plane_id;		/* the PRIMARY plane of that CRTC */
 	uint32_t blob_id;		/* the mode, in the form an atomic request wants */
-	uint32_t fb_id;
-	uint32_t handle;
-	uint32_t pitch;
-	uint64_t size;
-	void *map;
-	int mode_is_set;		/* the commit happened, so there is something to turn OFF */
+	struct drm_buffer buffers[2];
+	int front;			/* which of the two is being scanned out */
+	int flip_pending;
+	int mode_is_set;
 };
-
-/* THE MODE: the connector's PREFERRED one, or its first, because a preferred mode is the panel's own answer to
- * "what shape are you" and anything else is this process guessing. */
-static const drmModeModeInfo *preferred_mode(drmModeConnector *connector)
-{
-	int i;
-
-	for (i = 0; i < connector->count_modes; i++) {
-		if (connector->modes[i].type & DRM_MODE_TYPE_PREFERRED) {
-			return &connector->modes[i];
-		}
-	}
-	return connector->count_modes > 0 ? &connector->modes[0] : NULL;
-}
-
-/* A CRTC THAT CAN DRIVE THIS CONNECTOR, chosen by what the encoder says it is able to reach rather than by
- * taking the first one and hoping. */
-static uint32_t crtc_for_connector(struct drm_state *drm, drmModeConnector *connector)
-{
-	int i, k;
-
-	for (i = 0; i < connector->count_encoders; i++) {
-		drmModeEncoder *encoder = drmModeGetEncoder(drm->fd, connector->encoders[i]);
-
-		if (encoder == NULL) {
-			continue;
-		}
-		if (encoder->crtc_id != 0) {
-			uint32_t id = encoder->crtc_id;
-
-			drmModeFreeEncoder(encoder);
-			return id;
-		}
-		for (k = 0; k < drm->resources->count_crtcs; k++) {
-			if ((encoder->possible_crtcs & (1u << k)) != 0) {
-				uint32_t id = drm->resources->crtcs[k];
-
-				drmModeFreeEncoder(encoder);
-				return id;
-			}
-		}
-		drmModeFreeEncoder(encoder);
-	}
-	return 0;
-}
 
 /* ---------------------------------------------------------------------------------------------------
  * the atomic API
@@ -165,8 +123,8 @@ static int drm_atomic_set(int fd, drmModeAtomicReq *req, uint32_t object_id, uin
 }
 
 /* THE PRIMARY PLANE FOR A CRTC: the one the kernel calls PRIMARY and that this CRTC can drive. Both conditions
- * matter — without the second a compositor can be handed a plane it cannot route to; without the first it can be
- * handed a cursor plane. */
+ * matter — without the second a compositor can be handed a plane it cannot route to; without the first a cursor
+ * plane. */
 static uint32_t drm_primary_plane(int fd, uint32_t crtc_id, const uint32_t *crtcs, int count)
 {
 	drmModePlaneRes *planes = drmModeGetPlaneResources(fd);
@@ -203,16 +161,36 @@ static uint32_t drm_primary_plane(int fd, uint32_t crtc_id, const uint32_t *crtc
 	return result;
 }
 
+/* THE PLANE'S HALF OF EVERY COMMIT: which buffer it scans, and which part of it goes where. Called by both the
+ * initial modeset and every flip, so there is one place where the rectangles are spelled — the source in 16.16
+ * fixed point and the destination in pixels, two units for one rectangle, which is where a half-sized mode
+ * comes from. */
+static int drm_set_plane(struct aws_server *server, drmModeAtomicReq *req, uint32_t fb_id)
+{
+	struct drm_state *drm = server->backend.data;
+	uint64_t w = (uint64_t)server->backend.width;
+	uint64_t h = (uint64_t)server->backend.height;
+
+	drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", fb_id);
+	drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_ID", drm->crtc_id);
+	drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "SRC_X", 0);
+	drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "SRC_Y", 0);
+	drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "SRC_W", w << 16);
+	drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "SRC_H", h << 16);
+	drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_X", 0);
+	drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_Y", 0);
+	drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_W", w);
+	drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_H", h);
+	return 0;
+}
+
 /* **THE MODESET, AND THE ONLY STEP THAT MAKES LIGHT.** An atomic modeset is a list of (object, property, value)
- * that the kernel applies TOGETHER or not at all: the connector is pointed at the CRTC, the CRTC at the mode
- * blob and told to be ACTIVE, and the primary plane at the framebuffer with the rectangles that say which part
- * of it goes where. */
+ * the kernel applies together or not at all: the connector is pointed at the CRTC, the CRTC at the mode blob
+ * and told to be ACTIVE, and the plane at a framebuffer. */
 static int drm_atomic_modeset(struct aws_server *server, int on)
 {
 	struct drm_state *drm = server->backend.data;
 	drmModeAtomicReq *req = drmModeAtomicAlloc();
-	uint64_t w = (uint64_t)server->backend.width;
-	uint64_t h = (uint64_t)server->backend.height;
 	int ret;
 
 	if (req == NULL) {
@@ -223,28 +201,12 @@ static int drm_atomic_modeset(struct aws_server *server, int on)
 			       drm->crtc_id);
 		drm_atomic_set(drm->fd, req, drm->crtc_id, DRM_MODE_OBJECT_CRTC, "MODE_ID", drm->blob_id);
 		drm_atomic_set(drm->fd, req, drm->crtc_id, DRM_MODE_OBJECT_CRTC, "ACTIVE", 1);
-		drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", drm->fb_id);
-		drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_ID", drm->crtc_id);
-		drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "SRC_X", 0);
-		drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "SRC_Y", 0);
-		/* THE SOURCE RECTANGLE IS IN 16.16 FIXED POINT and the destination is in pixels — two units for the
-		 * same rectangle, which is where a mode that comes out half-sized comes from. */
-		drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "SRC_W", w << 16);
-		drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "SRC_H", h << 16);
-		drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_X", 0);
-		drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_Y", 0);
-		drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_W", w);
-		drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_H", h);
+		drm_set_plane(server, req, drm->buffers[0].fb_id);
 	} else {
-		/* TURNING IT OFF, AND BEFORE THE FRAMEBUFFER GOES: a CRTC still scanning out something about to be
-		 * destroyed is refused by the kernel at best and a stale scan-out at worst.
-		 *
-		 * **AND THE PLANE IS DETACHED FIRST, WHICH THE FIRST VERSION DID NOT DO.** Clearing the CRTC's ACTIVE
-		 * while its primary plane still holds this framebuffer and this CRTC is EINVAL — MEASURED: "the atomic
-		 * teardown was refused: Invalid argument" on every exit, which left the CRTC on with a framebuffer that
-		 * the next lines then destroyed. The order a kernel wants is the reverse of the order that set it up:
-		 * the plane lets go of the framebuffer and the CRTC, then the CRTC goes inactive, then the connector
-		 * lets go of the CRTC. */
+		/* TURNING IT OFF, AND IN THE REVERSE OF THE ORDER THAT SET IT UP: the plane lets go of the framebuffer
+		 * and the CRTC, then the CRTC goes inactive, then the connector lets go of the CRTC. Clearing ACTIVE
+		 * while the plane still holds the framebuffer is EINVAL — measured, on every exit, before this order
+		 * was right. */
 		drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", 0);
 		drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_ID", 0);
 		drm_atomic_set(drm->fd, req, drm->crtc_id, DRM_MODE_OBJECT_CRTC, "ACTIVE", 0);
@@ -259,34 +221,95 @@ static int drm_atomic_modeset(struct aws_server *server, int on)
 	return ret;
 }
 
-/* **AND `present`, WHICH IS NOT OPTIONAL EITHER.** The frame buffer IS what the display scans out, so there is
- * nothing to hand over — but a driver still has to be TOLD the memory it is scanning has changed, or it shows
- * the first frame and never another. That is `drmModeDirtyFB`, and without it a compositor paints into memory
- * nobody reads. */
+/* ---------------------------------------------------------------------------------------------------
+ * the flip
+ * --------------------------------------------------------------------------------------------------- */
+
+static void drm_page_flip(int fd, unsigned int sequence, unsigned int tv_sec, unsigned int tv_usec, void *data)
+{
+	struct drm_state *drm = data;
+
+	(void)fd; (void)sequence; (void)tv_sec; (void)tv_usec;
+	drm->flip_pending = 0;
+}
+
+/* **THE PRESENT, WHICH IS A FLIP AND A WAIT.** The frame just drawn goes to the display at the next vblank, and
+ * this does not return until that has happened — because the OTHER buffer is only free once it has, and the
+ * compositor is about to draw into it. */
 static void drm_present(struct aws_server *server)
 {
 	struct drm_state *drm = server->backend.data;
+	drmModeAtomicReq *req = drmModeAtomicAlloc();
+	drmEventContext context;
+	int back = 1 - drm->front;
+	int ret;
 
-	if (drm->fb_id != 0) {
-		drmModeDirtyFB(drm->fd, drm->fb_id, NULL, 0);
+	if (req == NULL || drm->buffers[back].fb_id == 0) {
+		if (req != NULL) {
+			drmModeAtomicFree(req);
+		}
+		return;
 	}
+	drm_set_plane(server, req, drm->buffers[back].fb_id);
+	/* NONBLOCK BECAUSE THE POINT IS TO GET TO THE EVENT: the flip happens at the next vblank and
+	 * DRM_MODE_PAGE_FLIP_EVENT is what tells this process when it has. */
+	drm->flip_pending = 1;
+	ret = drmModeAtomicCommit(drm->fd, req, DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, drm);
+	drmModeAtomicFree(req);
+	if (ret != 0) {
+		fprintf(stderr, "window-server: the page flip was refused: %s\n", strerror(errno));
+		drm->flip_pending = 0;
+		return;
+	}
+	memset(&context, 0, sizeof context);
+	context.version = DRM_EVENT_CONTEXT_VERSION;
+	context.page_flip_handler = drm_page_flip;
+	while (drm->flip_pending) {
+		/* The flip event is the only thing this waits for, and it arrives at a vblank — so this loop is
+		 * bounded by the display's refresh rate, not by anything this process does. */
+		if (drmHandleEvent(drm->fd, &context) != 0) {
+			fprintf(stderr, "window-server: waiting for the page flip failed: %s\n", strerror(errno));
+			drm->flip_pending = 0;
+			return;
+		}
+	}
+	drm->front = back;
+	/* AND THE COMPOSITOR DRAWS INTO THE OTHER ONE NEXT TIME. */
+	server->backend.pixels = drm->buffers[1 - back].map;
 }
 
 /* ---------------------------------------------------------------------------------------------------
  * start and stop
  * --------------------------------------------------------------------------------------------------- */
 
+static void drm_destroy_buffer(struct drm_state *drm, struct drm_buffer *buffer)
+{
+	if (buffer->fb_id != 0) {
+		drmModeRmFB(drm->fd, buffer->fb_id);
+		buffer->fb_id = 0;
+	}
+	if (buffer->map != NULL && buffer->size > 0) {
+		munmap(buffer->map, (size_t)buffer->size);
+		buffer->map = NULL;
+	}
+	if (buffer->handle != 0) {
+		struct drm_mode_destroy_dumb destroy;
+
+		memset(&destroy, 0, sizeof destroy);
+		destroy.handle = buffer->handle;
+		drmIoctl(drm->fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+		buffer->handle = 0;
+	}
+}
+
 static void drm_stop(struct aws_server *server)
 {
 	struct drm_state *drm = server->backend.data;
+	int i;
 
 	if (drm == NULL) {
 		return;
 	}
-	/* **THE DISPLAY IS RELEASED FIRST, AND IN THIS ORDER.** The CRTC is turned off and the connector detached
-	 * BEFORE the framebuffer and the buffer under it are destroyed, because a CRTC still scanning them out makes
-	 * that destruction refused at best and a stale scan-out at worst. And it is released at all because a
-	 * compositor that leaves the screen showing its last frame has taken a display away from whoever owns it. */
 	if (drm->mode_is_set) {
 		drm_atomic_modeset(server, 0);
 		drm->mode_is_set = 0;
@@ -295,23 +318,9 @@ static void drm_stop(struct aws_server *server)
 		drmModeDestroyPropertyBlob(drm->fd, drm->blob_id);
 		drm->blob_id = 0;
 	}
-	if (drm->fb_id != 0) {
-		drmModeRmFB(drm->fd, drm->fb_id);
-		drm->fb_id = 0;
+	for (i = 0; i < 2; i++) {
+		drm_destroy_buffer(drm, &drm->buffers[i]);
 	}
-	if (drm->map != NULL && drm->size > 0) {
-		munmap(drm->map, (size_t)drm->size);
-		drm->map = NULL;
-	}
-	if (drm->handle != 0) {
-		struct drm_mode_destroy_dumb destroy;
-
-		memset(&destroy, 0, sizeof destroy);
-		destroy.handle = drm->handle;
-		drmIoctl(drm->fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
-		drm->handle = 0;
-	}
-	/* THE CLAIM IS GIVEN BACK, so whoever had the display before can have it again. */
 	if (drm->fd >= 0) {
 		drmDropMaster(drm->fd);
 	}
@@ -326,15 +335,53 @@ static void drm_stop(struct aws_server *server)
 	server->backend.pixels = NULL;
 }
 
+/* A PAGE: kernel memory, mapped into this process, and a framebuffer the atomic API can scan. */
+static int drm_create_buffer(struct drm_state *drm, int width, int height, struct drm_buffer *buffer)
+{
+	struct drm_mode_create_dumb create;
+	struct drm_mode_map_dumb map;
+
+	memset(&create, 0, sizeof create);
+	create.width = (uint32_t)width;
+	create.height = (uint32_t)height;
+	create.bpp = 32;
+	if (drmIoctl(drm->fd, DRM_IOCTL_MODE_CREATE_DUMB, &create) != 0) {
+		fprintf(stderr, "window-server: could not allocate a %dx%d buffer: %s\n", width, height,
+			strerror(errno));
+		return -1;
+	}
+	buffer->handle = create.handle;
+	buffer->pitch = create.pitch;
+	buffer->size = create.size;
+	memset(&map, 0, sizeof map);
+	map.handle = create.handle;
+	if (drmIoctl(drm->fd, DRM_IOCTL_MODE_MAP_DUMB, &map) != 0) {
+		fprintf(stderr, "window-server: could not map a buffer: %s\n", strerror(errno));
+		return -1;
+	}
+	buffer->map = mmap(NULL, (size_t)buffer->size, PROT_READ | PROT_WRITE, MAP_SHARED, drm->fd,
+			   (off_t)map.offset);
+	if (buffer->map == MAP_FAILED) {
+		buffer->map = NULL;
+		fprintf(stderr, "window-server: mmap of a buffer failed: %s\n", strerror(errno));
+		return -1;
+	}
+	/* 24 DEPTH AND 32 BITS PER PIXEL IS XRGB8888, the format every client here sends and the one the
+	 * compositing loop writes. */
+	if (drmModeAddFB(drm->fd, create.width, create.height, 24, 32, buffer->pitch, buffer->handle,
+			 &buffer->fb_id) != 0) {
+		fprintf(stderr, "window-server: could not make a framebuffer: %s\n", strerror(errno));
+		return -1;
+	}
+	return 0;
+}
+
 int aws_backend_drm_start(struct aws_server *server)
 {
 	const char *path = getenv("AWS_DRM_DEVICE") != NULL ? getenv("AWS_DRM_DEVICE") : "/dev/dri/card0";
 	struct drm_state *drm;
 	drmModeConnector *connector = NULL;
 	drmModeModeInfo mode;
-	struct drm_mode_create_dumb create;
-	struct drm_mode_map_dumb map;
-	uint64_t offset = 0;
 	int i;
 
 	drm = calloc(1, sizeof *drm);
@@ -353,7 +400,7 @@ int aws_backend_drm_start(struct aws_server *server)
 	}
 	/* **ATOMIC IS NOT AN OPTION HERE, IT IS THE API.** The legacy modeset is accepted by nvidia-drm and lights
 	 * nothing, so a build that found no atomic support would be a compositor that reports success and shows
-	 * nothing — which is worse than one that refuses. */
+	 * nothing — worse than one that refuses. */
 	if (drmSetClientCap(drm->fd, DRM_CLIENT_CAP_ATOMIC, 1) != 0) {
 		fprintf(stderr, "window-server: %s does not support atomic modesetting, which this backend "
 				"requires\n", path);
@@ -393,8 +440,16 @@ int aws_backend_drm_start(struct aws_server *server)
 		return -1;
 	}
 	{
-		const drmModeModeInfo *found = preferred_mode(connector);
+		const drmModeModeInfo *found = NULL;
 
+		for (i = 0; i < connector->count_modes && found == NULL; i++) {
+			if (connector->modes[i].type & DRM_MODE_TYPE_PREFERRED) {
+				found = &connector->modes[i];
+			}
+		}
+		if (found == NULL && connector->count_modes > 0) {
+			found = &connector->modes[0];
+		}
 		if (found == NULL) {
 			fprintf(stderr, "window-server: the connected display offers no modes\n");
 			drmModeFreeConnector(connector);
@@ -403,7 +458,23 @@ int aws_backend_drm_start(struct aws_server *server)
 		}
 		mode = *found;	/* a copy: the connector's own belongs to drmModeGetConnector's allocation */
 	}
-	drm->crtc_id = crtc_for_connector(drm, connector);
+	/* A CRTC THIS CONNECTOR CAN BE DRIVEN BY, chosen from what the encoder says it can reach rather than by
+	 * taking the first one and hoping. */
+	drm->crtc_id = 0;
+	for (i = 0; i < connector->count_encoders && drm->crtc_id == 0; i++) {
+		drmModeEncoder *encoder = drmModeGetEncoder(drm->fd, connector->encoders[i]);
+		int k;
+
+		if (encoder == NULL) {
+			continue;
+		}
+		for (k = 0; k < drm->resources->count_crtcs && drm->crtc_id == 0; k++) {
+			if ((encoder->possible_crtcs & (1u << k)) != 0) {
+				drm->crtc_id = drm->resources->crtcs[k];
+			}
+		}
+		drmModeFreeEncoder(encoder);
+	}
 	if (drm->crtc_id == 0) {
 		fprintf(stderr, "window-server: found a connected display but no CRTC it can be driven by\n");
 		drmModeFreeConnector(connector);
@@ -412,9 +483,7 @@ int aws_backend_drm_start(struct aws_server *server)
 	}
 	drm->connector_id = connector->connector_id;
 
-	/* **MASTER IS THE CLAIM ON THE DEVICE, AND IT FAILS WHEN SOMEBODY ELSE HAS THE DISPLAY.** That failure is
-	 * the reason this backend is hard to start by accident: an X server or another compositor holding master
-	 * keeps it. */
+	/* **MASTER IS THE CLAIM ON THE DEVICE, AND IT FAILS WHEN SOMEBODY ELSE HAS THE DISPLAY.** */
 	if (drmSetMaster(drm->fd) != 0) {
 		fprintf(stderr, "window-server: %s is held by another DRM master (an X server or another\n"
 				"                compositor); this cannot take the display while that is running\n",
@@ -424,46 +493,13 @@ int aws_backend_drm_start(struct aws_server *server)
 		return -1;
 	}
 
-	/* THE PIXELS ARE THE KERNEL'S AND THE MAPPING IS THIS PROCESS'S, which is what makes the compositing loop
-	 * write straight onto the screen with no copy. */
-	memset(&create, 0, sizeof create);
-	create.width = (uint32_t)mode.hdisplay;
-	create.height = (uint32_t)mode.vdisplay;
-	create.bpp = 32;
-	if (drmIoctl(drm->fd, DRM_IOCTL_MODE_CREATE_DUMB, &create) != 0) {
-		fprintf(stderr, "window-server: could not allocate a %ux%u scanout buffer: %s\n", create.width,
-			create.height, strerror(errno));
-		drmModeFreeConnector(connector);
-		drm_stop(server);
-		return -1;
-	}
-	drm->handle = create.handle;
-	drm->pitch = create.pitch;
-	drm->size = create.size;
-	memset(&map, 0, sizeof map);
-	map.handle = create.handle;
-	if (drmIoctl(drm->fd, DRM_IOCTL_MODE_MAP_DUMB, &map) != 0) {
-		fprintf(stderr, "window-server: could not map the scanout buffer: %s\n", strerror(errno));
-		drmModeFreeConnector(connector);
-		drm_stop(server);
-		return -1;
-	}
-	offset = map.offset;
-	drm->map = mmap(NULL, (size_t)drm->size, PROT_READ | PROT_WRITE, MAP_SHARED, drm->fd, (off_t)offset);
-	if (drm->map == MAP_FAILED) {
-		drm->map = NULL;
-		fprintf(stderr, "window-server: mmap of the scanout buffer failed: %s\n", strerror(errno));
-		drmModeFreeConnector(connector);
-		drm_stop(server);
-		return -1;
-	}
-	/* 24 DEPTH AND 32 BITS PER PIXEL IS XRGB8888, the format every client here sends and the one the
-	 * compositing loop writes. */
-	if (drmModeAddFB(drm->fd, create.width, create.height, 24, 32, drm->pitch, drm->handle, &drm->fb_id) != 0) {
-		fprintf(stderr, "window-server: could not make a framebuffer for the scanout buffer\n");
-		drmModeFreeConnector(connector);
-		drm_stop(server);
-		return -1;
+	/* **TWO PAGES**, because one buffer cannot be both scanned and drawn. */
+	for (i = 0; i < 2; i++) {
+		if (drm_create_buffer(drm, mode.hdisplay, mode.vdisplay, &drm->buffers[i]) != 0) {
+			drmModeFreeConnector(connector);
+			drm_stop(server);
+			return -1;
+		}
 	}
 	/* THE PRIMARY PLANE, WHICH AN ATOMIC REQUEST NAMES AND `drmModeSetCrtc` ONLY IMPLIED. */
 	drm->plane_id = drm_primary_plane(drm->fd, drm->crtc_id, drm->resources->crtcs,
@@ -481,13 +517,13 @@ int aws_backend_drm_start(struct aws_server *server)
 		drm_stop(server);
 		return -1;
 	}
-	server->backend.width = (int)create.width;
-	server->backend.height = (int)create.height;
+	server->backend.width = (int)mode.hdisplay;
+	server->backend.height = (int)mode.vdisplay;
 
 	/* **THE DRY RUN: EVERY STEP UP TO THE COMMIT AND NOTHING AFTER IT.** Taking a display away from the session
-	 * using it is the most disruptive thing any backend in this tree can do, so there is a way to prove the
-	 * whole preparation — the device, the connector, the mode, the CRTC, the plane, the buffer, the framebuffer,
-	 * the blob — WITHOUT the commit that makes light. `AWS_DRM_DRY_RUN=1` asks for it. */
+	 * using it is the most disruptive thing any backend in this tree can do, so the whole preparation can be
+	 * proven — device, connector, mode, CRTC, plane, both buffers, both framebuffers, the blob — WITHOUT the
+	 * commit that makes light. `AWS_DRM_DRY_RUN=1` asks for it. */
 	if (getenv("AWS_DRM_DRY_RUN") != NULL) {
 		fprintf(stderr,
 			"window-server: DRY RUN — every step up to the commit succeeded, and NOTHING was committed:\n"
@@ -496,16 +532,17 @@ int aws_backend_drm_start(struct aws_server *server)
 			"                mode        %ux%u%s\n"
 			"                crtc        %u\n"
 			"                plane       %u (PRIMARY)\n"
-			"                buffer      %ux%u, pitch %u, %llu bytes, mapped at %p\n"
-			"                framebuffer %u (XRGB8888), mode blob %u\n"
+			"                pages       2 x (%ux%u, pitch %u, %llu bytes) at %p and %p\n"
+			"                framebuffers %u and %u, mode blob %u\n"
 			"                Master was taken and is given back; no pixel moves.\n",
 			path, drm->connector_id,
 			drmModeGetConnectorTypeName(connector->connector_type) != NULL
 				? drmModeGetConnectorTypeName(connector->connector_type) : "?",
 			connector->count_modes, mode.hdisplay, mode.vdisplay,
 			(mode.type & DRM_MODE_TYPE_PREFERRED) ? " (PREFERRED)" : "", drm->crtc_id, drm->plane_id,
-			create.width, create.height, drm->pitch, (unsigned long long)drm->size, drm->map, drm->fb_id,
-			drm->blob_id);
+			mode.hdisplay, mode.vdisplay, drm->buffers[0].pitch,
+			(unsigned long long)drm->buffers[0].size, drm->buffers[0].map, drm->buffers[1].map,
+			drm->buffers[0].fb_id, drm->buffers[1].fb_id, drm->blob_id);
 		drmModeFreeConnector(connector);
 		drm_stop(server);
 		return -1;
@@ -519,16 +556,15 @@ int aws_backend_drm_start(struct aws_server *server)
 		return -1;
 	}
 	drm->mode_is_set = 1;
-
-	server->backend.pixels = drm->map;
+	/* PAGE 0 IS NOW ON THE SCREEN, SO THE COMPOSITOR STARTS ON PAGE 1. */
+	drm->front = 0;
+	server->backend.pixels = drm->buffers[1].map;
 	server->backend.name = "drm";
 	server->backend.data = drm;
-	/* **AND `present` IS NO LONGER NULL.** The frame buffer IS what the display scans out, so there is nothing
-	 * to hand over — but a driver still has to be told the memory changed. */
 	server->backend.present = drm_present;
 	server->backend.stop = drm_stop;
-	fprintf(stderr, "window-server: driving %s at %ux%u (atomic: connector %u, crtc %u, plane %u)\n", path,
-		create.width, create.height, drm->connector_id, drm->crtc_id, drm->plane_id);
+	fprintf(stderr, "window-server: driving %s at %ux%u (atomic, 2 pages: connector %u, crtc %u, plane %u)\n",
+		path, mode.hdisplay, mode.vdisplay, drm->connector_id, drm->crtc_id, drm->plane_id);
 	return 0;
 }
 
