@@ -104,11 +104,17 @@
         changed, and nothing would tell it. The work area above cannot carry it either: that is a VERTICAL reserve,
         and the Mac's `-visibleFrame` starts at x = 0 because the bar spans the whole screen. Two different
         questions, two different events.
+
+        **AND THE COLOUR IS IN THIS EVENT BECAUSE IT IS A PROPERTY OF THE BAR THE SERVER OWNS.** An application's
+        menus sit IN the bar, and menus drawn on a panel of their own colour are a visible SEAM across a surface
+        that is meant to be one thing. The alternative — every client picking a colour that looks close — is how two
+        greys come to differ by four counts and nobody can say which one is right.
       </description>
       <arg name="x" type="int"/>
       <arg name="y" type="int"/>
       <arg name="width" type="int"/>
       <arg name="height" type="int"/>
+      <arg name="colour" type="uint" summary="the strip's colour, 0xRRGGBB"/>
     </event>
   </interface>
 

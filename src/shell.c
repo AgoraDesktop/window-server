@@ -106,7 +106,9 @@ static void bind_agora_output(struct wl_client *client, void *data, uint32_t ver
 	 * itself against it. */
 	agora_output_send_work_area(resource, x, y, width, height);
 	aws_shell_menu_bar_area(server, &x, &y, &width, &height);
-	agora_output_send_menu_bar_area(resource, x, y, width, height);
+	/* **AND WHAT COLOUR IT IS**, because the application's menus are drawn in this bar and a menu drawn on a panel
+	 * of its own colour is a seam across what is meant to be one surface. */
+	agora_output_send_menu_bar_area(resource, x, y, width, height, AWS_MENU_BAR_COLOUR & 0xFFFFFFu);
 	/* **AN EVENT-ONLY INTERFACE HAS NO IMPLEMENTATION STRUCT**, which is not an inconvenience but the generated
 	 * header telling the truth: the server never RECEIVES anything on this object, so there is no vtable to
 	 * fill and `NULL` is what says so. */
