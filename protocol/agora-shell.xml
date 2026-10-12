@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  agora_shell — the window management the Mac has, which xdg-shell cannot express.
+
+  Copyright © 2026 Kyle J. Cardoza. MIT licensed.
+  SPDX-License-Identifier: MIT
+
+  WHY THIS EXISTS AT ALL. `xdg-shell` is the bootstrap protocol: it is what a stock compositor speaks, which is
+  why the window server implements it and why the AppKit was first made to talk it. IT CANNOT SAY THE THREE
+  THINGS A MAC-LIKE DESKTOP IS MADE OF, and each was measured against Apple's own headers before being written
+  down here (see DESIGN.md):
+
+    1. POSITION AND SIZE ARE THE APPLICATION'S. `NSWindow` has `setFrame:display:`, `setFrameOrigin:`,
+       `setFrameTopLeftPoint:` and `frame`; the only thing in AppKit that changes a frame is
+       `constrainFrameRect:toScreen:`, an NSWindow method, and both resize decisions are DELEGATE methods.
+       An `xdg_toplevel`, by contrast, is CONFIGURED BY THE COMPOSITOR and has NO request by which a client asks
+       to be put anywhere. The two models are inverted.
+
+    2. ORDERING IS BY AN INTEGER LEVEL, NOT BY A FIXED SET OF LAYERS. `NSWindow` has `-setLevel:(NSInteger)` and
+       `-level`, and the levels are named in the WINDOW SERVER's vocabulary (`kCGMainMenuWindowLevel`,
+       `kCGStatusWindowLevel`, `kCGDockWindowLevel`). A fixed enumeration would be a toolkit's names on the
+       server's business, and it could not express the menu window and the status area being different owners.
+
+    3. THE SCREEN HAS A WORK AREA. `NSScreen` declares `-frame` and `-visibleFrame` side by side, and the second
+       is the first minus the menu bar and the Dock. Without a work area an application cannot answer
+       `constrainFrameRect:toScreen:`, which is the application's own job.
+
+  WHAT THIS PROTOCOL IS NOT: it is not `xdg-shell` with extra requests. A surface given a role here is NOT an
+  `xdg_toplevel`, because the configure cycle those two would share is exactly the inversion above — this server
+  does not tell an application how big to be, so there is nothing to acknowledge. A client picks one role
+  protocol or the other and the two never mix on one surface.
+-->
+<protocol name="agora_shell">
+
+  <copyright>
+    Copyright © 2026 Kyle J. Cardoza. MIT licensed.
+  </copyright>
+
+  <interface name="agora_shell" version="1">
+    <description summary="the window server's own window management">
+      One global. It hands out the two objects above it: a window, which is what a surface becomes, and an
+      output, which is where the work area comes from.
+    </description>
+
+    <request name="get_window">
+      <description summary="give a surface the role of a window">
+        A surface with no role is never composited, so this is what makes a surface a window. It is the
+        counterpart of `xdg_wm_base.get_xdg_surface` and may not be combined with it on the same surface: a
+        surface has ONE role, and the two roles disagree about who decides the size.
+      </description>
+      <arg name="id" type="new_id" interface="agora_window"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+
+    <request name="get_output">
+      <description summary="ask an output for its work area">
+        `wl_output` describes what a screen IS — its geometry and its mode. This describes what is LEFT of it,
+        which is a question only the window server can answer because the answer depends on the furniture the
+        server owns.
+      </description>
+      <arg name="id" type="new_id" interface="agora_output"/>
+      <arg name="output" type="object" interface="wl_output"/>
+    </request>
+  </interface>
+
+  <interface name="agora_output" version="1">
+    <description summary="an output, and the part of it an application may use">
+      A COMPANION TO `wl_output`, not a replacement: that interface is the surface a client needs to draw and
+      this one is the one it needs to place itself.
+    </description>
+
+    <event name="work_area">
+      <description summary="the frame minus the menu bar and the Dock">
+        Apple's `NSScreen.visibleFrame`, in the output's coordinates. Sent when the client binds and again
+        whenever it changes — because the Mac's answer to "the work area changed" is that THE APPLICATION
+        CONSTRAINS ITSELF (`constrainFrameRect:toScreen:`), so the server's job is to say what happened and not
+        to move anybody's window.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </event>
+  </interface>
+
+  <interface name="agora_window" version="1">
+    <description summary="a window, placed and sized by its application">
+      **THE APPLICATION IS HONOURED.** Every set_ here is a DEMAND the server writes down and acts on, not a
+      request it may refuse or adjust — which is the inversion of `xdg_toplevel` and the whole point of this
+      protocol. The server's share of the Mac's model is the shadow, the work area, and knowing who is in front.
+    </description>
+
+    <request name="set_frame">
+      <description summary="where the window is and how big it is">
+        `NSWindow.setFrame:display:`, position included. The server honours it exactly: it does not cascade, it
+        does not tile, and it does not move a window the application did not move. Constraining a frame to a
+        screen is the APPLICATION's — `constrainFrameRect:toScreen:`, against the work area above — and a server
+        that did it for the application would be doing it without knowing what the application knows.
+      </description>
+      <arg name="x" type="int" summary="left edge, in output coordinates"/>
+      <arg name="y" type="int" summary="top edge, in output coordinates"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+
+    <request name="set_level">
+      <description summary="where the window sits in the stack">
+        `NSWindow.setLevel:`, an INTEGER and not a member of a fixed set — so a menu window, a status item and
+        the Dock can be ordered against each other and against ordinary windows without this protocol having
+        anticipated any of them. A window with no level set is at the server's normal level.
+      </description>
+      <arg name="level" type="int"/>
+    </request>
+
+    <request name="raise">
+      <description summary="bring the window to the front of its level">
+        `NSWindow.orderFront:`. The application asks and the server honours. WHAT THIS DOES NOT SETTLE IS FOCUS:
+        on the Mac that is the user's click together with `makeKeyAndOrderFront:`, and this protocol has no
+        opinion about it yet.
+      </description>
+    </request>
+
+    <request name="lower">
+      <description summary="send the window to the back of its level">
+        `NSWindow.orderBack:`.
+      </description>
+    </request>
+
+    <request name="set_title">
+      <description summary="the window's name">
+        Which the application draws itself, as it draws its whole frame; the server records it for its own use
+        — the menu bar of the active application, the window menu — and for anything describing windows to a
+        person.
+      </description>
+      <arg name="title" type="string"/>
+    </request>
+
+    <request name="set_app_id">
+      <description summary="which application this window belongs to">
+        The Mac's bundle identifier, near enough: what the menu bar is switched by when this window becomes the
+        active one, and what a launcher or a task list groups by.
+      </description>
+      <arg name="app_id" type="string"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="the window is gone">
+        Destroys the object. The surface outlives it and may be given another role, as it may under
+        `xdg-shell`.
+      </description>
+    </request>
+
+    <event name="close">
+      <description summary="the server is asking the application to close">
+        NOT the close button — that button is the application's, like the rest of the frame, and it is the
+        application that decides what closing means. This is for the cases the server does know about: the
+        session is ending, or a window manager's own affordance was used.
+      </description>
+    </event>
+
+    <event name="work_area_changed">
+      <description summary="the work area this window is on has changed">
+        The menu bar grew, the Dock moved, a screen went away. THE SERVER DOES NOT MOVE THE WINDOW: the
+        application constrains itself, and this event is what tells it there is something to constrain.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </event>
+  </interface>
+
+</protocol>

@@ -36,6 +36,19 @@ Three things follow from six lines:
   when the thing that uses it stops being an AppKit window and becomes **a separate application**, which the
   Dock is.
 
+## The contract
+
+The protocol those rules require is [`protocol/agora-shell.xml`](protocol/agora-shell.xml) — three interfaces:
+`agora_shell` (the global, handing out `agora_window` and `agora_output`), `agora_window` (`set_frame`,
+`set_level`, `raise`, `lower`, `set_title`, `set_app_id`, `destroy`; events `close` and `work_area_changed`) and
+`agora_output` (the `work_area` event, which is `NSScreen.visibleFrame`). The bindings are generated from it on
+every build, so a contract that does not parse stops the build rather than being discovered by a client.
+
+**IT IS NOT `xdg-shell` WITH EXTRA REQUESTS.** A surface given a role here is not an `xdg_toplevel`, because the
+configure cycle the two would share is exactly the inversion above: this server does not tell an application how
+big to be, so there is nothing to acknowledge. A client picks one role protocol or the other; the two never mix
+on one surface.
+
 ## What that means for Agora
 
 **`xdg-shell` cannot express this, which is why it was called the bootstrap protocol and not the destination.**

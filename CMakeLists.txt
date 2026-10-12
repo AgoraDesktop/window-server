@@ -67,13 +67,35 @@ add_custom_target(xdg-shell-bindings
     "${_generated}/xdg-shell-server-protocol.h"
     "${_generated}/xdg-shell-protocol.c")
 
+# AGORA'S OWN PROTOCOL, generated from this repository's contract and NOT vendored: `agora-shell.xml` is the
+# source, the bindings are code, and generating them at build time means a contract that does not parse stops
+# the build rather than being discovered by a client.
+set(AGORA_SHELL_XML "${CMAKE_CURRENT_SOURCE_DIR}/protocol/agora-shell.xml")
+add_custom_command(
+  OUTPUT "${_generated}/agora-shell-server-protocol.h"
+  COMMAND ${WAYLAND_SCANNER} server-header "${AGORA_SHELL_XML}" "${_generated}/agora-shell-server-protocol.h"
+  DEPENDS "${AGORA_SHELL_XML}" VERBATIM)
+add_custom_command(
+  OUTPUT "${_generated}/agora-shell-client-protocol.h"
+  COMMAND ${WAYLAND_SCANNER} client-header "${AGORA_SHELL_XML}" "${_generated}/agora-shell-client-protocol.h"
+  DEPENDS "${AGORA_SHELL_XML}" VERBATIM)
+add_custom_command(
+  OUTPUT "${_generated}/agora-shell-protocol.c"
+  COMMAND ${WAYLAND_SCANNER} private-code "${AGORA_SHELL_XML}" "${_generated}/agora-shell-protocol.c"
+  DEPENDS "${AGORA_SHELL_XML}" VERBATIM)
+add_custom_target(agora-shell-bindings
+  DEPENDS
+    "${_generated}/agora-shell-server-protocol.h"
+    "${_generated}/agora-shell-client-protocol.h"
+    "${_generated}/agora-shell-protocol.c")
+
 file(GLOB WINDOW_SERVER_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c")
 
 add_executable(window-server
   ${WINDOW_SERVER_SOURCES}
   "${_generated}/xdg-shell-protocol.c")
 
-add_dependencies(window-server xdg-shell-bindings)
+add_dependencies(window-server xdg-shell-bindings agora-shell-bindings)
 
 target_include_directories(window-server PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src"
