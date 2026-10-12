@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-struct aws_server *aws_server_create(const char *backend_name, int width, int height)
+struct aws_server *aws_server_create(const char *backend_name, const char *input_name, int width, int height)
 {
 	struct aws_server *server = calloc(1, sizeof *server);
 
@@ -41,6 +41,14 @@ struct aws_server *aws_server_create(const char *backend_name, int width, int he
 		free(server);
 		return NULL;
 	}
+	/* INPUT LAST, because a source may need to know where the output ended up (the nested window's size) and
+	 * because it has to be told whether the backend is feeding the seat by itself. */
+	if (aws_input_init(server, input_name, server->backend.name) != 0) {
+		aws_backend_shutdown(server);
+		wl_display_destroy(server->display);
+		free(server);
+		return NULL;
+	}
 	return server;
 }
 
@@ -54,6 +62,7 @@ void aws_server_destroy(struct aws_server *server)
 	wl_display_destroy_clients(server->display);
 	wl_display_destroy(server->display);
 	aws_backend_shutdown(server);
+	aws_input_shutdown(server);
 	aws_seat_finish(server);
 	free(server);
 }

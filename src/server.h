@@ -21,12 +21,15 @@
  *     target is Wayland on real hardware, and Xwayland exists for X CLIENTS. This backend is a development
  *     one, the same thing weston's `--backend=x11` and mutter's `--nested` are. It is also OPTIONAL — the core
  *     does not link libX11 at all unless it is built in.
- *   - NO INPUT *DEVICES*, WHICH IS NOT THE SAME AS NO INPUT. The seat is real: wl_pointer and wl_keyboard are
- *     advertised, focus is decided, and events are delivered — but the events come from the HOST through the
- *     nested backend (a nested compositor's input is its host window's input; that is what weston's x11 backend
- *     does). What is missing is reading a device directly: `libinput` needs its development headers, which are
- *     not installed, and /dev/input is not readable by an ordinary user. So a server with no host — the
- *     headless one — has a seat nobody can press.
+ *   - TWO INPUT SOURCES, AND THE OUTPUT DOES NOT DECIDE WHICH. `libinput` reads the DEVICES — the real thing,
+ *     through udev and logind, no root and no `input` group — and `host` takes the events the nested backend's
+ *     window is given. They are mutually exclusive and chosen with `--input`, because both feed the same seat
+ *     and a device read twice is a pointer that moves twice as fast. The DEFAULT is libinput when it is built
+ *     in and can start, and the nested window otherwise, which is the right answer in each case: a machine with
+ *     devices wants them, and a machine with only a host window has only that.
+ *
+ *     NOTHING HERE GRABS A DEVICE. `libinput_device_grab` is never called, so the host session keeps working
+ *     while this compositor reads the same events — which is what makes running it on a real desktop safe.
  *   - NO DRAWING OF ITS OWN. A Mac-like window server owns the menu bar, the dock and the window frames, and
  *     this owns none of them: it composites client buffers and paints a background. That is why it takes no
  *     drawing library yet — the row copy below is the whole of its drawing. A drawing library arrives with the
@@ -129,6 +132,9 @@ struct aws_server {
 	int requested_width;			/* what the caller asked for, before a backend adjusted it */
 	int requested_height;
 
+	int input_from_host;			/* the nested backend's window feeds the seat (--input host) */
+	void *input;				/* the chosen input source's own state */
+
 	struct aws_backend backend;
 	struct aws_output output;
 
@@ -153,7 +159,7 @@ struct aws_server {
 };
 
 /* server.c */
-struct aws_server *aws_server_create(const char *backend_name, int width, int height);
+struct aws_server *aws_server_create(const char *backend_name, const char *input_name, int width, int height);
 void aws_server_destroy(struct aws_server *server);
 void aws_server_schedule_render(struct aws_server *server);
 
@@ -188,6 +194,15 @@ void aws_seat_pointer_leave(struct aws_server *server);
 void aws_seat_pointer_motion(struct aws_server *server, int x, int y);
 void aws_seat_pointer_button(struct aws_server *server, uint32_t evdev_button, int pressed);
 void aws_seat_key(struct aws_server *server, uint32_t evdev_keycode, int pressed);
+
+/* input.c — choosing an input source, and shutting it down */
+int aws_input_init(struct aws_server *server, const char *name, const char *backend_name);
+void aws_input_shutdown(struct aws_server *server);
+const char *aws_input_names(void);
+
+/* EACH SOURCE FILLS IN `server->input` AND ANSWERS 0, or answers non-zero and says why on stderr. */
+int aws_input_libinput_start(struct aws_server *server);
+int aws_input_host_start(struct aws_server *server);
 
 /* GIVE THE KEYBOARD TO A SURFACE (or to nothing, with NULL). The compositor's focus POLICY lives in one place,
  * and this is the door it uses — a new window takes the focus and a click moves it. */

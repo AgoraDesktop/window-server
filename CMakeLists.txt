@@ -35,6 +35,9 @@ pkg_check_modules(WAYLAND_SERVER REQUIRED IMPORTED_TARGET wayland-server)
 pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
 pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
 pkg_check_modules(X11 IMPORTED_TARGET x11)
+# AND libinput, ALSO OPTIONAL, for reading the machine's own devices. libudev comes with it.
+pkg_check_modules(LIBINPUT IMPORTED_TARGET libinput)
+pkg_check_modules(LIBUDEV IMPORTED_TARGET libudev)
 find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
 
 find_file(XDG_SHELL_XML
@@ -77,6 +80,14 @@ target_include_directories(window-server PRIVATE
 target_link_libraries(window-server PRIVATE
   PkgConfig::WAYLAND_SERVER
   PkgConfig::XKBCOMMON)
+
+if(LIBINPUT_FOUND AND LIBUDEV_FOUND)
+  target_compile_definitions(window-server PRIVATE AWS_HAVE_LIBINPUT)
+  target_link_libraries(window-server PRIVATE PkgConfig::LIBINPUT PkgConfig::LIBUDEV)
+  message(STATUS "window-server: libinput input is built in")
+else()
+  message(STATUS "window-server: no libinput — the seat is fed by the nested backend only")
+endif()
 
 if(X11_FOUND)
   target_compile_definitions(window-server PRIVATE AWS_HAVE_X11)

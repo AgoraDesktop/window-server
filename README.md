@@ -87,7 +87,40 @@ the client's own xkbcommon.
 person can type into the first thing that appears, and a CLICK moves it. The first half was missing and it
 showed: keys arrived with the focus nil and went nowhere.
 
-### 4. It is tested without the AppKit
+### 4. libinput: written, built, and blocked by a permission
+
+`--input libinput` is implemented, links, assigns **seat0** successfully through logind — and then cannot open
+a single device. libinput's own log handler (which is production code a compositor wants anyway; without one it
+fails in silence) says exactly why:
+
+```
+libinput: event0: opening input device '/dev/input/event0' failed (Permission denied).
+libinput: event0  - failed to create input device '/dev/input/event0'
+... (every device)
+window-server: libinput could not be started; falling back
+```
+
+**The measured cause, in two parts, and the first is the one that matters:**
+
+```
+$ loginctl list-sessions
+SESSION  UID USER SEAT  LEADER CLASS   TTY
+      1 1000 kyle -     1391   manager -        <- this process's session: NO SEAT
+      3 1000 kyle seat0 2191   user    tty2     <- the graphical session
+
+$ getfacl /dev/input/event0
+user::rw-          group::rw-          other::---      (owner root, group `input`; no ACL for kyle)
+```
+
+logind grants a session's devices to processes **in that session on that seat**, and this one runs in a
+`manager` session with no seat — so nothing is granted. And the devices are `root:input` with no user ACL, so
+there is no second way in. **`sudo usermod -aG input kyle` (then log out and back in) is what unblocks it**;
+the group `rw` is already there, and nothing else has to change.
+
+Notice what is NOT wrong: udev finds the devices, libinput builds them, and the seat assignment succeeds. The
+failure is one `open()` and it is the operating system's answer rather than the compositor's.
+
+### 5. It is tested without the AppKit
 
 `ctest` — the server, a client that is nothing but the protocol, and a check that reads the server's own
 screenshot:
@@ -113,12 +146,11 @@ that is written down is a decision and one that is not is a surprise.
   this process, and `x11` is a nested window on an X server. A **DRM/KMS** backend is the real one and is not
   written. A backend is a place to put pixels — a width, a height and a buffer — which is what makes a new one
   a file (`src/backend-*.c`) rather than a change to the compositor.
-- **No input *devices*, which is not the same as no input.** The seat is real — `wl_pointer` and `wl_keyboard`
-  are advertised, focus is decided and events are delivered — and the events come from the **host** through the
-  nested backend, which is what a nested compositor's input is (weston's x11 backend works the same way).
-  What is missing is reading a device directly: `libinput` has no development headers on the build machine and
-  `/dev/input` is not readable by an ordinary user, so that path is blocked until one of those changes. A
-  server with no host — the headless one — has a seat nobody can press.
+- **Input has two sources and the OUTPUT does not decide which.** `--input libinput` reads the machine's own
+  devices through udev and logind; `--input host` takes the events the nested backend's window is given. They
+  are mutually exclusive — both feed one seat, and a device read twice is a pointer that moves at double speed
+  — and the default is libinput when it can start, the nested window otherwise. See below for the one thing
+  that still blocks libinput on this machine.
 - **No cursor.** `wl_pointer.set_cursor` is accepted and does nothing: a nested output's pointer is the HOST's,
   and a second cursor drawn into the window is one the person did not ask for.
 - **No drawing of its own.** The menu bar, the dock and the window frames are the window server's to draw in

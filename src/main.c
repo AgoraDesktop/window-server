@@ -14,7 +14,8 @@
  * to composite N frames and then write the output to a file and exit — which is how a screenshot of AGORA'S OWN
  * compositor becomes the acceptance test of the AppKit, rather than a screenshot of somebody else's.
  *
- *   window-server [--backend headless|x11] [--width W] [--height H] [--socket NAME]
+ *   window-server [--backend headless|x11] [--input libinput|host|none] [--width W] [--height H]
+ *                 [--socket NAME]
  *                 [--frames N] [--screenshot PATH.ppm]
  *
  * The socket name is printed on STDOUT alone — a test captures it with a pipe, and everything else goes to
@@ -33,16 +34,18 @@ static void usage(const char *program)
 		"usage: %s [--backend NAME] [--width W] [--height H] [--socket NAME] [--frames N]\n"
 		"          [--screenshot PATH.ppm]\n"
 		"  --backend NAME    where the pixels go: %s (default headless)\n"
+		"  --input NAME      where input comes from: %s (default libinput)\n"
 		"  --width/--height  the output's size, in pixels (default 1280x720)\n"
 		"  --socket NAME     the Wayland socket's name; the default is chosen and printed\n"
 		"  --frames N        composite N frames, then stop (0, the default, runs until killed)\n"
 		"  --screenshot P    write the final output to a PPM file\n",
-		program, aws_backend_names());
+		program, aws_backend_names(), aws_input_names());
 }
 
 int main(int argc, char **argv)
 {
 	const char *backend = "headless";
+	const char *input = NULL;
 	int width = 1280;
 	int height = 720;
 	int frames = 0;
@@ -54,6 +57,8 @@ int main(int argc, char **argv)
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--backend") == 0 && i + 1 < argc) {
 			backend = argv[++i];
+		} else if (strcmp(argv[i], "--input") == 0 && i + 1 < argc) {
+			input = argv[++i];
 		} else if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
 			width = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--height") == 0 && i + 1 < argc) {
@@ -73,7 +78,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	server = aws_server_create(backend, width, height);
+	server = aws_server_create(backend, input, width, height);
 	if (server == NULL) {
 		fprintf(stderr, "window-server: could not start (backend '%s')\n", backend);
 		return 1;
