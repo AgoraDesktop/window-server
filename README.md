@@ -262,9 +262,11 @@ that is written down is a decision and one that is not is a surprise.
   that still blocks libinput on this machine.
 - **No cursor.** `wl_pointer.set_cursor` is accepted and does nothing: a nested output's pointer is the HOST's,
   and a second cursor drawn into the window is one the person did not ask for.
-- **No drawing of its own.** The menu bar, the dock and the window frames are the window server's to draw in
-  a Mac-like desktop, and this owns none of them yet — which is the honest reason there is no drawing library
-  in the build. The compositing is a row copy.
+- **No drawing of its own.** The menu bar, the status area and the window frames are the window server's to
+  draw in a Mac-like desktop, and this owns none of them yet — which is the honest reason there is no drawing
+  library in the build. The compositing is a row copy. **Who owns which pixels, and why `xdg-shell` cannot
+  express it, is written down in [`DESIGN.md`](DESIGN.md)** — including Apple's own window-level names, which is
+  the evidence that the menu bar is stitched from windows owned by different processes.
 - **No policy.** Every toplevel is placed by a cascade and sized by its client. Placement, stacking, the menu
   bar's reserve and the dock's are POLICY, and policy is what this version has none of.
 
@@ -284,6 +286,12 @@ Two system libraries, neither vendored: `wayland-server` (the protocol, the even
 buffer plumbing, which libwayland owns through `wl_display_init_shm`) and `xkbcommon` (the keymap a seat
 sends). The xdg-shell bindings are **generated** at build time from the system's `wayland-protocols`, so a
 checked-in copy cannot silently age against the protocol on the machine.
+
+## The architecture this is being built toward
+
+Three owners of the screen — a compositor with system-owned furniture, applications, and the Dock as an
+application of its own. Not implemented, and recorded in [`DESIGN.md`](DESIGN.md) because the pieces that exist
+have to be able to reach it.
 
 ## Licence
 
