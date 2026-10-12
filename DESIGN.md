@@ -56,14 +56,44 @@ And the clients of that protocol are not only applications: **the Dock is one of
 the status area. They are ordinary clients with levels, which is exactly how the Mac does it — and it is why the
 window server must not grow a special case for "the dock" when a level and a reserved region will do.
 
-## What is deliberately NOT decided here
+## The rule: the Mac's answer is the answer
 
-- **The protocol's shape** — whether levels are an extension of `xdg-shell`, a layer protocol of our own, or a
-  single Agora surface protocol. That is a real design decision and it is not made.
-- **Who draws the window frames.** The Mac's answer is the *application* — its own title bar, in its own window,
-  which is why this tree's AppKit draws a chrome strip itself (see `NSWindow.m`) — with the server supplying the
-  shadow. Whether Agora keeps that is not decided, but the code as it stands assumes it.
-- **Whether the status area is one client or many**, and whether it survives the application that put something
-  in it. The Mac's answer is that the server hosts it; ours is unwritten.
-- **The level numbers.** Apple's names are quoted above; the values behind `kCG…` were not fetched, so nothing
-  here depends on them.
+**Where the Mac has an answer, Agora takes it.** Not because the Mac is right — because a compatible stack is
+the point, and an answer that was invented here is an answer no existing code, no existing documentation and no
+existing habit will agree with. This is the tie-breaker for every question in this document, and it is written
+down so the questions below are answered rather than re-argued.
+
+### The four questions, answered from Apple's headers
+
+**LEVELS, NOT LAYERS.** `NSWindow` declares `- (void)setLevel:(NSInteger)newLevel` and `- (NSInteger)level`
+(`NSWindow.h` 453–454). The Mac's model is **a per-window integer level**, in the *window server's* vocabulary
+(`kCG…`), not a fixed enumeration of layers with a toolkit's names on them — so an application can put its menu
+window at the menu level and its panel above ordinary windows without the server having anticipated either.
+
+**THE APPLICATION DRAWS ITS OWN WINDOW FRAME.** `NSWindow` declares
+`+ (NSButton *)standardWindowButton:(NSWindowButton)b forStyleMask:` and `- (NSButton *)standardWindowButton:`
+(`NSWindow.h` 574–575): the close, miniaturize and zoom buttons are **`NSButton`s, in the application's own
+process**. They are the application's to draw, which is what "client-side chrome" means, and it is what this
+tree's `NSWindow.m` already assumes when it paints its own chrome strip. The server's share is the shadow.
+
+**THE STATUS AREA IS MANY CLIENTS, NOT ONE.** `NSStatusItem` holds `NSView *_fView` (`NSStatusItem.h` 26): a
+status item's view belongs to the **application that made it**. So the status area is a row of windows owned by
+several applications and *placed* by the server — which is the same shape as the menu bar beside it, and the
+reason the server must not host the contents itself.
+
+**RESERVED REGIONS, AND APPLE'S DOOR FOR THEM IS `visibleFrame`.** `NSScreen` declares `- (NSRect)frame` and
+`- (NSRect)visibleFrame` side by side (`NSScreen.h` 30–31); the second is the first minus the menu bar and the
+Dock. **This tree's `NSScreen` cannot answer it** — it returns the frame, with the deviation recorded at the
+door — because there is no menu bar to subtract yet. That is the concrete thing this architecture unblocks.
+
+### And where the Mac's answer does not reach
+
+**THE WIRE FORMAT IS OURS TO CHOOSE.** macOS has no public protocol for any of this; it is the private CGS API,
+so there is no answer to copy at that layer. The **model** above is Apple's — levels, reserved regions, and a
+server that places windows it does not own — and the **encoding** is Agora's, because there is nothing to be
+compatible *with*. Saying so is the point: "the Mac's answer" is a rule about the model, and pretending it
+extends to a wire format that Apple never published would be inventing one and calling it compatibility.
+
+**THE LEVEL NUMBERS ARE UNCHANGED AND STILL UNUSED.** Apple's *names* are quoted above; the `kCG…` values were
+not fetched, and nothing here depends on them — an Agora client will name a level the way an AppKit client does,
+and the numbers are the server's business.
