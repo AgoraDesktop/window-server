@@ -237,7 +237,16 @@ static int drm_atomic_modeset(struct aws_server *server, int on)
 		drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_H", h);
 	} else {
 		/* TURNING IT OFF, AND BEFORE THE FRAMEBUFFER GOES: a CRTC still scanning out something about to be
-		 * destroyed is refused by the kernel at best and a stale scan-out at worst. */
+		 * destroyed is refused by the kernel at best and a stale scan-out at worst.
+		 *
+		 * **AND THE PLANE IS DETACHED FIRST, WHICH THE FIRST VERSION DID NOT DO.** Clearing the CRTC's ACTIVE
+		 * while its primary plane still holds this framebuffer and this CRTC is EINVAL — MEASURED: "the atomic
+		 * teardown was refused: Invalid argument" on every exit, which left the CRTC on with a framebuffer that
+		 * the next lines then destroyed. The order a kernel wants is the reverse of the order that set it up:
+		 * the plane lets go of the framebuffer and the CRTC, then the CRTC goes inactive, then the connector
+		 * lets go of the CRTC. */
+		drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", 0);
+		drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_ID", 0);
 		drm_atomic_set(drm->fd, req, drm->crtc_id, DRM_MODE_OBJECT_CRTC, "ACTIVE", 0);
 		drm_atomic_set(drm->fd, req, drm->connector_id, DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID", 0);
 	}
