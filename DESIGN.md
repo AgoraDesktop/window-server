@@ -86,6 +86,38 @@ reason the server must not host the contents itself.
 Dock. **This tree's `NSScreen` cannot answer it** — it returns the frame, with the deviation recorded at the
 door — because there is no menu bar to subtract yet. That is the concrete thing this architecture unblocks.
 
+**POSITION AND SIZE ARE THE APPLICATION'S, AND THE SERVER HONOURS THEM.** `NSWindow` declares
+`- (void)setFrame:(NSRect)frameRect display:` (294), `- (void)setFrameOrigin:` (296) and
+`- (void)setFrameTopLeftPoint:` (297) — the application states a frame, position included, and reads it back
+with `- (NSRect)frame` (299). There is no door by which the server moves a window, and that is not an omission:
+**the only thing that adjusts a frame is `- (NSRect)constrainFrameRect:(NSRect)toScreen:` (293), an `NSWindow`
+method** — the application's own AppKit, against a screen — and **both resize decisions are DELEGATE methods**,
+`- (NSSize)windowWillResize:toSize:` (666) and `- (NSRect)windowWillUseStandardFrame:defaultFrame:` (667). Even
+Zoom is the window's, and the frame it zooms to comes from the application's delegate.
+
+**THIS IS THE OPPOSITE OF WHAT WAYLAND DOES, AND IT IS THE SECOND THING `xdg-shell` CANNOT SAY — LARGER THAN
+THE FIRST.** An `xdg_toplevel` is **configured by the compositor**, which sends a size the client is expected to
+take; and there is **no request at all** by which a client asks to be put somewhere, because placing windows is
+the compositor's job in that model. So the two are inverted on size and silent on position, and a client that
+must be honoured cannot be written against it.
+
+**WHAT THAT COSTS IN THE CODE THAT EXISTS**, each one a thing to change rather than a thing to interpret:
+
+- **the compositor's CASCADE IS A POLICY THE MAC DOES NOT HAVE.** `surface_commit` places a new toplevel at an
+  offset it chose (`40 + n * 40`). Under this rule the client says where it goes and the compositor writes it
+  down; a default is legitimate only for a client that asked for nothing.
+- **`-setFrame:` MUST REACH THE SERVER.** `NSWindow.m` currently updates the Cocoa frame and says in its header
+  that "a Wayland client does not place or move its toplevel". Under this rule it does, and the door is missing:
+  the seam needs a "here is my frame" call, honoured by whichever backend is in use.
+- **AND `-constrainFrameRect:toScreen:` MEETS THE PREVIOUS SECTION HERE**, because what it constrains against is
+  `[NSScreen visibleFrame]` — the frame minus the menu bar and the Dock. The reserved regions are what make the
+  application's own constraint answerable, which is why these two rules are one feature and not two.
+
+**ORDERING FOLLOWS THE SAME RULE**, by the same argument rather than by a separate one: `-orderFront:` raises
+the application's own window on the Mac, so the application asks and the server honours. This does not settle
+who gets *focus* — on the Mac that is the user's click and the application's `-makeKeyAndOrderFront:` together —
+and that is left where it is until it is needed.
+
 ### And where the Mac's answer does not reach
 
 **THE WIRE FORMAT IS OURS TO CHOOSE.** macOS has no public protocol for any of this; it is the private CGS API,
