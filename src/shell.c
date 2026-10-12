@@ -43,7 +43,8 @@
  * the Dock exists as a client that can say how much it wants. They are constants rather than configuration
  * because there is nothing yet to configure them from, and they are named so that the day there is, there is one
  * place to look. */
-#define AWS_MENU_BAR_HEIGHT 24
+/* `AWS_MENU_BAR_HEIGHT` lives in server.h, because the compositing loop fills a strip that tall and the two must
+ * not disagree. The Dock's reserve is still zero: the Dock is a CLIENT that has to ask, and nothing asks yet. */
 #define AWS_DOCK_RESERVE 0
 
 void aws_shell_reserved(struct aws_server *server, int *x, int *y, int *width, int *height)

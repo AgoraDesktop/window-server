@@ -117,6 +117,24 @@ void aws_output_render(struct aws_server *server)
 	for (i = 0; i < count; i++) {
 		backend->pixels[i] = AWS_BACKGROUND;
 	}
+	/* **THE SERVER'S OWN FURNITURE, AND THE FIRST PIXELS DRAWN HERE THAT ARE NOT A CLIENT'S.** The menu bar
+	 * strip is the WindowServer's on the Mac — it owns the bar and the Apple menu at its left — while everything
+	 * to the right of that is drawn by CLIENTS and merely PLACED by the server (see DESIGN.md). The height is
+	 * the same constant `aws_shell_reserved` subtracts to answer the work area, so the strip and the reserve
+	 * cannot come apart.
+	 *
+	 * AND IT IS DRAWN FIRST, WHICH IS A DECISION RATHER THAN AN ORDER: a window may be given a frame that
+	 * overlaps the bar, because the application's frame is honoured, and until the strip has a LEVEL of its own
+	 * such a window covers it. The level is the next step and the honest place to leave it. */
+	{
+		int row, column;
+
+		for (row = 0; row < AWS_MENU_BAR_HEIGHT && row < backend->height; row++) {
+			for (column = 0; column < backend->width; column++) {
+				backend->pixels[row * backend->width + column] = AWS_MENU_BAR_COLOUR;
+			}
+		}
+	}
 	/* MAPPING ORDER IS THE STACKING: the list is walked front-to-back, so the last mapped is on top. A
 	 * compositor that has raised a window has reordered this list; this version never reorders it. */
 	/* **BY LEVEL FIRST, THEN BY MAPPING ORDER WITHIN ONE.** A level is an `NSWindow` level — an integer the

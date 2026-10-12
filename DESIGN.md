@@ -89,10 +89,31 @@ window at the menu level and its panel above ordinary windows without the server
 process**. They are the application's to draw, which is what "client-side chrome" means, and it is what this
 tree's `NSWindow.m` already assumes when it paints its own chrome strip. The server's share is the shadow.
 
-**THE STATUS AREA IS MANY CLIENTS, NOT ONE.** `NSStatusItem` holds `NSView *_fView` (`NSStatusItem.h` 26): a
-status item's view belongs to the **application that made it**. So the status area is a row of windows owned by
-several applications and *placed* by the server — which is the same shape as the menu bar beside it, and the
-reason the server must not host the contents itself.
+**THE STATUS AREA IS MANY CLIENTS, NOT ONE — AND THE SERVER IS NONE OF THEM.** `NSStatusItem` holds
+`NSView *_fView` (`NSStatusItem.h` 26), and `NSStatusBar` declares `+systemStatusBar`,
+`-statusItemWithLength:` and `-thickness`: a status item has a **view, a title, an image, a menu, a target and an
+action**, and all of them belong to whoever made the item.
+
+**AND THE SYSTEM'S OWN EXTRAS ARE A SEPARATE PROCESS RATHER THAN THE SERVER, WHICH IS THE POINT WORTH WRITING
+DOWN.** "Menu bar extra" is the older name for the things in that area, and the *system's* ones — Wi-Fi, battery,
+the clock, sound — were bundles drawn by **SystemUIServer**: a process of its own, the same shape as the Dock.
+So the area has two kinds of owner and neither is the window server:
+
+    a system extra (Wi-Fi, the clock)   drawn by SystemUIServer — a separate process
+    an application's menu bar item      drawn by the application  (NSStatusItem._fView)
+
+**AND AN ITEM'S POSITION IS THE SERVER'S, WHICH IS THE ONE PLACE THE FRAME RULE DOES NOT REACH.** `NSStatusItem`
+declares `-length`, `-title`, `-image`, `-menu`, `-target`, `-action`, `-highlightMode` and `-view` — AND NO
+POSITION OF ANY KIND. That is what an item an application placed for itself would need and could not have: an
+application does not know what else is in the status bar, so it cannot know where its own item goes. The server
+packs them, and the application says only HOW LONG ITS ITEM IS. So `agora_shell` will need a way for a surface to
+say "the server places this one" — a KIND of window, not a frame — and `set_frame` will not be called for it.
+
+**A SERVER THAT HOSTED THE CONTENTS WOULD BE MAKING THE MISTAKE THE DOCK RULE EXISTS TO PREVENT**, one area over:
+it owns the STRIP and places what is in it, and the moment it also draws an item it has a special case for a kind
+of client. The two doors agree on the reserve as well — the server's own reserved height and
+`[[NSStatusBar systemStatusBar] thickness]` are the same number — which is a cross-check worth having before
+anything is built on it.
 
 **RESERVED REGIONS, AND APPLE'S DOOR FOR THEM IS `visibleFrame`.** `NSScreen` declares `- (NSRect)frame` and
 `- (NSRect)visibleFrame` side by side (`NSScreen.h` 30–31); the second is the first minus the menu bar and the

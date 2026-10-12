@@ -200,6 +200,13 @@ int aws_backend_x11_start(struct aws_server *server);
 int aws_backend_drm_start(struct aws_server *server);
 
 
+/* **THE MENU BAR'S HEIGHT, IN ONE PLACE.** `aws_shell_reserved` subtracts it to answer the work area and
+ * `aws_output_render` fills it to DRAW the strip, and a reserve and a strip that disagreed would be a window
+ * placed under the bar or a bar over a window. It is the server's own furniture, so it is the server's constant;
+ * a client asking `[[NSStatusBar systemStatusBar] thickness]` gets the same number through AppKit. */
+#define AWS_MENU_BAR_HEIGHT 24
+#define AWS_MENU_BAR_COLOUR 0xFFD8D8D8u
+
 /* shell.c — agora_shell: the frames, the levels and the work area the Mac's model needs. */
 void aws_shell_init(struct aws_server *server);
 void aws_shell_reserved(struct aws_server *server, int *x, int *y, int *width, int *height);
