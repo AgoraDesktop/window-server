@@ -111,6 +111,11 @@ struct aws_backend {
 	/* GIVE BACK WHATEVER `start` TOOK. */
 	void (*stop)(struct aws_server *server);
 
+	/* **NONZERO WHILE THE BACKEND CANNOT ACCEPT A FRAME** — the display has not taken the last one yet. A RENDER
+	 * LOOP ASKS THIS BEFORE IT DRAWS, because drawing into a buffer the display may still be reading is the tear
+	 * a double-buffered backend exists to avoid. NULL means always ready. */
+	int (*busy)(struct aws_server *server);
+
 	void *data;				/* the backend's own state */
 };
 
@@ -175,6 +180,7 @@ int aws_output_write_ppm(struct aws_server *server, const char *path);
 /* backend.c — choosing one, and the two calls the event loop makes */
 int aws_backend_init(struct aws_server *server, const char *name, int width, int height);
 void aws_backend_present(struct aws_server *server);
+int aws_backend_busy(struct aws_server *server);
 void aws_backend_shutdown(struct aws_server *server);
 const char *aws_backend_names(void);
 

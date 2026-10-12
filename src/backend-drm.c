@@ -19,13 +19,14 @@
  * over AT THE NEXT VBLANK — so the display never shows a frame that is half drawn. The alternative, which is
  * what this backend did first, is to draw straight into the memory being scanned and accept the tear.
  *
- * AND IT WAITS FOR THE FLIP, WHICH IS THE PART THAT IS EASY TO GET WRONG. With two buffers there is exactly one
- * to draw into, and it is only free once the PREVIOUS flip has completed — a compositor that draws into it
- * early is drawing into a buffer the display may still be reading, which is the tear it was trying to avoid
- * wearing a different hat. Waiting also PACES the compositor to the display's refresh instead of to however fast
- * it can paint, which is the correct rate and the one clients are told about through their frame callbacks.
- * The cost is that `present` blocks for up to a vblank; making that asynchronous means driving the render from
- * the flip event rather than from the commit, which the backend interface would need a `busy` door for.
+ * AND THE FLIP IS ASYNCHRONOUS, WHICH IS THE PART THAT IS EASY TO GET WRONG. With two buffers there is exactly
+ * one to draw into, and it is free only once the PREVIOUS flip has completed — so the RENDER LOOP asks `busy`
+ * before it draws, and `busy` answers yes until the flip event has been read off the DRM descriptor, which is on
+ * the event loop. Drawing early would be drawing into a buffer the display may still be reading, which is the
+ * tear it was avoiding wearing a different hat. The wait is still there; it is spent in the event loop, where
+ * the rest of the compositor keeps working, instead of inside `present`. That also paces the compositor to the
+ * display's refresh rather than to how fast it can paint — which is the correct rate, and the one clients are
+ * told about through their frame callbacks.
  *
  * TWO THINGS IT MUST DO THAT A WINDOWED BACKEND NEVER DOES:
  *
@@ -74,6 +75,7 @@ struct drm_state {
 	int front;			/* which of the two is being scanned out */
 	int flip_pending;
 	int mode_is_set;
+	struct wl_event_source *source;	/* the DRM descriptor, on the event loop */
 };
 
 /* ---------------------------------------------------------------------------------------------------
@@ -225,6 +227,15 @@ static int drm_atomic_modeset(struct aws_server *server, int on)
  * the flip
  * --------------------------------------------------------------------------------------------------- */
 
+static int drm_busy(struct aws_server *server)
+{
+	struct drm_state *drm = server->backend.data;
+
+	return drm->flip_pending;
+}
+
+/* THE FLIP HAPPENED: the page being scanned is free, so `drm_busy` answers no and the render loop draws again.
+ * Nothing else is needed — the frame it skipped left `render_pending` set, and the loop comes back round. */
 static void drm_page_flip(int fd, unsigned int sequence, unsigned int tv_sec, unsigned int tv_usec, void *data)
 {
 	struct drm_state *drm = data;
@@ -233,14 +244,35 @@ static void drm_page_flip(int fd, unsigned int sequence, unsigned int tv_sec, un
 	drm->flip_pending = 0;
 }
 
-/* **THE PRESENT, WHICH IS A FLIP AND A WAIT.** The frame just drawn goes to the display at the next vblank, and
- * this does not return until that has happened — because the OTHER buffer is only free once it has, and the
- * compositor is about to draw into it. */
+/* **THE DRM DESCRIPTOR IS ON THE EVENT LOOP, WHICH IS WHAT REPLACED THE WAIT.** A flip event is read here, and
+ * reading it is what makes the next frame possible. */
+static int drm_dispatch(int fd, uint32_t mask, void *data)
+{
+	struct aws_server *server = data;
+	drmEventContext context;
+
+	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)) {
+		fprintf(stderr, "window-server: the DRM descriptor went away\n");
+		server->running = 0;
+		return 0;
+	}
+	memset(&context, 0, sizeof context);
+	context.version = DRM_EVENT_CONTEXT_VERSION;
+	context.page_flip_handler = drm_page_flip;
+	if (drmHandleEvent(fd, &context) != 0) {
+		fprintf(stderr, "window-server: reading a DRM event failed: %s\n", strerror(errno));
+	}
+	return 0;
+}
+
+/* **THE PRESENT, WHICH NO LONGER WAITS.** It commits the flip and returns; the event that says the flip happened
+ * arrives on the DRM descriptor, which is on the event loop, and only then does the render loop draw again —
+ * because `drm_busy` is what it asks first. The wait is still there; it is spent in the event loop, where the
+ * rest of the compositor keeps working, instead of inside this function, where nothing could. */
 static void drm_present(struct aws_server *server)
 {
 	struct drm_state *drm = server->backend.data;
 	drmModeAtomicReq *req = drmModeAtomicAlloc();
-	drmEventContext context;
 	int back = 1 - drm->front;
 	int ret;
 
@@ -260,18 +292,6 @@ static void drm_present(struct aws_server *server)
 		fprintf(stderr, "window-server: the page flip was refused: %s\n", strerror(errno));
 		drm->flip_pending = 0;
 		return;
-	}
-	memset(&context, 0, sizeof context);
-	context.version = DRM_EVENT_CONTEXT_VERSION;
-	context.page_flip_handler = drm_page_flip;
-	while (drm->flip_pending) {
-		/* The flip event is the only thing this waits for, and it arrives at a vblank — so this loop is
-		 * bounded by the display's refresh rate, not by anything this process does. */
-		if (drmHandleEvent(drm->fd, &context) != 0) {
-			fprintf(stderr, "window-server: waiting for the page flip failed: %s\n", strerror(errno));
-			drm->flip_pending = 0;
-			return;
-		}
 	}
 	drm->front = back;
 	/* AND THE COMPOSITOR DRAWS INTO THE OTHER ONE NEXT TIME. */
@@ -313,6 +333,10 @@ static void drm_stop(struct aws_server *server)
 	if (drm->mode_is_set) {
 		drm_atomic_modeset(server, 0);
 		drm->mode_is_set = 0;
+	}
+	if (drm->source != NULL) {
+		wl_event_source_remove(drm->source);
+		drm->source = NULL;
 	}
 	if (drm->blob_id != 0) {
 		drmModeDestroyPropertyBlob(drm->fd, drm->blob_id);
@@ -562,8 +586,11 @@ int aws_backend_drm_start(struct aws_server *server)
 	server->backend.name = "drm";
 	server->backend.data = drm;
 	server->backend.present = drm_present;
+	server->backend.busy = drm_busy;
 	server->backend.stop = drm_stop;
-	fprintf(stderr, "window-server: driving %s at %ux%u (atomic, 2 pages: connector %u, crtc %u, plane %u)\n",
+	/* AND THE DESCRIPTOR GOES ON THE LOOP, which is where the flip events are read. */
+	drm->source = wl_event_loop_add_fd(server->loop, drm->fd, WL_EVENT_READABLE, drm_dispatch, server);
+	fprintf(stderr, "window-server: driving %s at %ux%u (atomic, 2 pages, async flip: connector %u, crtc %u, plane %u)\n",
 		path, mode.hdisplay, mode.vdisplay, drm->connector_id, drm->crtc_id, drm->plane_id);
 	return 0;
 }

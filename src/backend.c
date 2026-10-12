@@ -61,6 +61,13 @@ void aws_backend_present(struct aws_server *server)
  * crash. MEASURED: 300 frames composited and the display restored correctly, then exit 139 in the cleanup.
  * Hoisting the ownership to each backend also means a backend that maps rather than allocates needs no special
  * case here, which is what a fourth one would have had to add. */
+/* WHETHER A FRAME MAY BE DRAWN NOW. A backend with nothing to say is always ready; the ones that are not are
+ * the ones holding a page the display is still reading. */
+int aws_backend_busy(struct aws_server *server)
+{
+	return server->backend.busy != NULL ? server->backend.busy(server) : 0;
+}
+
 void aws_backend_shutdown(struct aws_server *server)
 {
 	if (server->backend.stop != NULL) {

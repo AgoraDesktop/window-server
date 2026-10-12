@@ -127,7 +127,12 @@ int main(int argc, char **argv)
 			break;
 		}
 		wl_display_flush_clients(server->display);
-		if (server->render_pending) {
+		/* **AND NOT WHILE THE BACKEND IS HOLDING A PAGE.** `render_pending` is left SET when the backend is
+		 * busy, so the frame is drawn as soon as the display has taken the last one — the flip event arrives on
+		 * the DRM descriptor, which is on this loop, and the loop comes back round to here. That is the whole
+		 * difference from waiting inside `present`: the wait is spent in the event loop, where the rest of the
+		 * compositor keeps working, instead of inside a function that can do nothing else. */
+		if (server->render_pending && !aws_backend_busy(server)) {
 			server->render_pending = 0;
 			aws_output_render(server);
 			/* AND THEN IT GOES ON THE SCREEN, if the backend has one. */

@@ -138,9 +138,10 @@ shape for it (`present` exists and is simply unused).
 
 **IT DOUBLE-BUFFERS AND FLIPS AT VBLANK, WHICH IS WHAT PAGES ARE** — one buffer is scanned while the compositor
 draws into the other, and the new one is handed over at the next vblank, so the display never shows a frame that
-is half drawn. It then WAITS for the flip: with two buffers there is exactly one to draw into and it is only free
-once the previous flip has completed, so drawing early would be the tear it was avoiding. Waiting also paces the
-compositor to the display's refresh rather than to how fast it can paint.
+is half drawn. **AND THE FLIP IS ASYNCHRONOUS**: the render loop asks the backend `busy` before it draws, and `busy` answers yes
+until the flip event has been read off the DRM descriptor, which is on the event loop. So the wait is real but it
+is spent in the event loop, where the rest of the compositor keeps working — not inside `present`, where nothing
+could. That also paces the compositor to the display's refresh rather than to how fast it can paint.
 
 **THE ATOMIC REPLACEMENT IS NOT YET CONFIRMED ON A SCREEN.** The legacy path was measured
 to be inert on this driver (see below) and has been replaced by `drmModeAtomicCommit`. Everything up to the
