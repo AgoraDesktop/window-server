@@ -24,9 +24,20 @@
 
 #include "server.h"
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* A SIGNAL DOES NOT KILL THIS PROCESS; IT ASKS THE LOOP TO STOP. See where it is registered. */
+static int on_signal(int signal_number, void *data)
+{
+	struct aws_server *server = data;
+
+	(void)signal_number;
+	server->running = 0;
+	return 0;
+}
 
 static void usage(const char *program)
 {
@@ -104,6 +115,13 @@ int main(int argc, char **argv)
 		server->backend.width, server->backend.height);
 
 	server->running = 1;
+	/* **A SIGNAL MUST GO THROUGH THE LOOP, NOT AROUND IT.** `SIGINT` and `SIGTERM` end this process, and the
+	 * DRM backend's teardown is what releases the display — so a compositor killed by Ctrl+C without running it
+	 * leaves a screen showing its last frame, which is the failure every backend in this tree is written to
+	 * avoid. Registering them ON THE EVENT LOOP means the loop stops and the ordinary exit path runs, in the
+	 * ordinary order, with the display given back. */
+	wl_event_loop_add_signal(server->loop, SIGINT, on_signal, server);
+	wl_event_loop_add_signal(server->loop, SIGTERM, on_signal, server);
 	while (server->running) {
 		if (wl_event_loop_dispatch(server->loop, -1) < 0) {
 			break;
