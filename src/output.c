@@ -45,6 +45,37 @@ static uint32_t aws_now_ms(void)
  *
  * THE FIELDS COME FROM THE `wl_shm_buffer` EVERY TIME rather than from a copy kept on the surface: the buffer
  * belongs to the client, and a copy would be a second place for its size and format to be true. */
+/* **THE ONE THING IN THE BAR THAT IS THE SERVER'S, AND THE FIRST THING HERE THAT IS DRAWN RATHER THAN FILLED.**
+ * Every other pixel in this file is a background or a client's buffer; the System menu is neither. Its glyph is the
+ * hamburger — U+2630 — which IS three horizontal bars, so its shape is arithmetic and no font is needed: three
+ * bars of THICKNESS, two gaps of GAP, centred in a square of WIDTH. A font arrives with the first thing whose
+ * shape is NOT already known. See DESIGN.md for why it is not the Apple logo. */
+static void aws_output_draw_system_menu(struct aws_backend *backend)
+{
+	const int glyph_height = 3 * AWS_SYSTEM_MENU_BAR_THICKNESS + 2 * AWS_SYSTEM_MENU_BAR_GAP;
+	const int left = (AWS_SYSTEM_MENU_WIDTH - AWS_SYSTEM_MENU_GLYPH_WIDTH) / 2;
+	const int top = (AWS_MENU_BAR_HEIGHT - glyph_height) / 2;
+	int bar, row, column;
+
+	for (bar = 0; bar < 3; bar++) {
+		const int first = top + bar * (AWS_SYSTEM_MENU_BAR_THICKNESS + AWS_SYSTEM_MENU_BAR_GAP);
+		const int last = first + AWS_SYSTEM_MENU_BAR_THICKNESS;
+
+		for (row = first; row < last; row++) {
+			if (row < 0 || row >= backend->height) {
+				continue;
+			}
+			for (column = left; column < left + AWS_SYSTEM_MENU_GLYPH_WIDTH; column++) {
+				if (column < 0 || column >= backend->width) {
+					continue;
+				}
+				backend->pixels[(size_t)row * (size_t)backend->width + (size_t)column] =
+					AWS_SYSTEM_MENU_GLYPH_COLOUR;
+			}
+		}
+	}
+}
+
 static void composite_surface(struct aws_backend *output, struct aws_surface *surface)
 {
 	struct wl_shm_buffer *shm = wl_shm_buffer_get(surface->current_buffer);
@@ -128,7 +159,7 @@ void aws_output_render(struct aws_server *server)
 		backend->pixels[i] = AWS_BACKGROUND;
 	}
 	/* **THE SERVER'S OWN FURNITURE, AND THE FIRST PIXELS DRAWN HERE THAT ARE NOT A CLIENT'S.** The menu bar
-	 * strip is the WindowServer's on the Mac — it owns the bar and the Apple menu at its left — while everything
+	 * strip is the WindowServer's on the Mac — it owns the bar and the SYSTEM menu at its left —, while everything
 	 * to the right of that is drawn by CLIENTS and merely PLACED by the server (see DESIGN.md). The height is
 	 * the same constant `aws_shell_reserved` subtracts to answer the work area, so the strip and the reserve
 	 * cannot come apart.
@@ -145,6 +176,7 @@ void aws_output_render(struct aws_server *server)
 			}
 		}
 	}
+	aws_output_draw_system_menu(backend);
 	/* MAPPING ORDER IS THE STACKING: the list is walked front-to-back, so the last mapped is on top. A
 	 * compositor that has raised a window has reordered this list; this version never reorders it. */
 	/* **BY LEVEL FIRST, THEN BY MAPPING ORDER WITHIN ONE.** A level is an `NSWindow` level — an integer the

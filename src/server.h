@@ -213,6 +213,15 @@ int aws_backend_drm_start(struct aws_server *server);
 #define AWS_MENU_BAR_HEIGHT 24
 #define AWS_MENU_BAR_COLOUR 0xFFD8D8D8u
 
+/* **THE SYSTEM MENU, WHICH IS THE SERVER'S OWN.** A square at the left of the bar, and inside it the hamburger —
+ * `☰`, U+2630 — which IS three horizontal bars, so it is drawn rather than typeset and needs no font. The three
+ * numbers below are the whole of the character: its bars, the gaps between them, and how wide the mark is. */
+#define AWS_SYSTEM_MENU_WIDTH 28
+#define AWS_SYSTEM_MENU_GLYPH_WIDTH 16
+#define AWS_SYSTEM_MENU_BAR_THICKNESS 3
+#define AWS_SYSTEM_MENU_BAR_GAP 3
+#define AWS_SYSTEM_MENU_GLYPH_COLOUR 0xFF303030u
+
 /* shell.c — agora_shell: the frames, the levels and the work area the Mac's model needs. */
 void aws_shell_init(struct aws_server *server);
 void aws_shell_reserved(struct aws_server *server, int *x, int *y, int *width, int *height);

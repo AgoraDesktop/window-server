@@ -11,10 +11,27 @@ system-owned furniture, plus applications — and the menu bar is the piece wher
 done any other way.
 
 **The menu bar is stitched from parts owned by different processes.** The WindowServer owns the bar's *global*
-portion — the strip itself, the Apple menu at its left, and the status area at its right. The **active
+portion — the strip itself, the SYSTEM MENU at its left, and the status area at its right. The **active
 application** owns its own menus (its name, File, Edit, …) and draws them in **its own window**, which the
 WindowServer places inside the bar at the right level. Nothing is copied between them and there is no shared
 surface: they are separate windows at ordered levels, which is what makes the result look like one object.
+
+### The System menu, and the hamburger
+
+**IT IS THE SYSTEM MENU, AND ITS GLYPH IS THE HAMBURGER — `☰`, U+2630 TRIGRAM FOR HEAVEN.** Not the Apple menu and
+not the Apple logo: that mark is Apple's, and this project reuses none of it — the same reason the SDK's headers
+are fetched from a recipe here instead of being committed. The three-line character says in that position what the
+logo says there, and belongs to nobody.
+
+**AND IT IS THE ONE THING IN THE BAR THAT IS THE SERVER'S.** The status area is clients'; each application's own
+menu titles are that application's; the System menu is about the SYSTEM rather than about any program — so the
+server draws it, the server decides how wide it is, and everything else in the bar is placed to the right of it.
+
+That is also why it is the first thing this compositor DRAWS rather than fills. `☰` IS three horizontal bars, so
+three bars of a known size inside a square of a known size is the whole of the character and no font is needed to
+put it on the screen. `libagora-text` is what the server will reach for when it has to draw something whose SHAPE
+it does not already know.
+
 
 **Apple's own headers say so, in the window server's vocabulary rather than AppKit's.** From `NSWindow.h` in the
 10.6 SDK (`Versions/C/Headers/NSWindow.h`, fetched by the recipe in `libagora-text/PROVENANCE.md`):

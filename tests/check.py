@@ -15,6 +15,8 @@ from PIL import Image
 BACKGROUND = (48, 51, 56)        # aws_output.c's AWS_BACKGROUND
 MENU_BAR = (216, 216, 216)       # server.h's AWS_MENU_BAR_COLOUR — the strip the SERVER draws
 MENU_BAR_HEIGHT = 24
+SYSTEM_MENU_MID = 13             # the middle of the glyph in the System menu's square (server.h)
+GLYPH = (48, 48, 48)             # server.h's AWS_SYSTEM_MENU_GLYPH_COLOUR
 TOP_AT = (100, 80)               # the first client's frame, asked for with agora_window.set_frame
 BOTTOM_AT = (150, 110)           # the second's — created LATER and at a LOWER level
 WINDOW = (320, 200)
@@ -69,6 +71,14 @@ def main():
         # the buffer, that keeps a status item inside the menu bar.
         (f"and it is the menu bar's height and no taller — row {MENU_BAR_HEIGHT} below it is not the item",
          px[1280 - 2, MENU_BAR_HEIGHT + 4] != cstatus),
+        # **THE SYSTEM MENU, WHICH IS THE SERVER'S OWN AND THE ONLY THING HERE IT DRAWS RATHER THAN FILLS.** Its
+        # glyph is the hamburger — three bars — so three bars with two gaps between them is the whole assertion,
+        # and a solid block, two bars or four would each fail it.
+        ("the SERVER's System menu is at the left of the strip, and is THREE bars",
+         px[SYSTEM_MENU_MID, 5] == GLYPH and px[SYSTEM_MENU_MID, 11] == GLYPH and
+         px[SYSTEM_MENU_MID, 17] == GLYPH),
+        ("and the gaps between the bars are the bar, so it is not a block",
+         px[SYSTEM_MENU_MID, 8] == MENU_BAR and px[SYSTEM_MENU_MID, 14] == MENU_BAR),
         (f"and it ends exactly there — row {MENU_BAR_HEIGHT} is not strip",
          px[640, MENU_BAR_HEIGHT + 1] != MENU_BAR),
         ("and the rest is the compositor's own background", px[5, 715] == BACKGROUND and
