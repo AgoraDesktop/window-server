@@ -136,7 +136,32 @@ shape for it (`present` exists and is simply unused).
 - **It puts the previous mode back on the way out**, so leaving is not a screen left in a state only a reboot
   fixes.
 
-**MEASURED, AND THIS MACHINE HAS NO KMS TO DRIVE:**
+**AND IT DRIVES A REAL DISPLAY.** With KMS enabled on the card, `--backend drm` takes the monitor, composites
+into a kernel dumb buffer, and gives the mode back on the way out:
+
+```
+$ ./build/window-server --backend drm --frames 120 &
+$ WAYLAND_DISPLAY=… libagora-app/build/tests/appkit_window --seconds 4
+window-server: driving /dev/dri/card0 at 1920x1080 (dumb buffer scanout)
+window-server: 120 frame(s) composited
+appkit_window: drew 120 frame(s); frame now 640x422
+server exit=0
+$ xdpyinfo | grep dimensions   ->  3840x1080      (the desktop is back on both monitors)
+```
+
+`AWS_DRM_DRY_RUN=1` RUNS EVERY STEP UP TO THE MODESET AND STOPS, which is how the setup path above was proven
+before anything was allowed to touch a screen:
+
+```
+  connector  77 (DVI-D), 11 mode(s)
+  mode       1920x1080 (PREFERRED)
+  crtc       42
+  buffer     1920x1080, pitch 7680, 8294400 bytes, mapped at 0x…
+  framebuffer 93 (XRGB8888)
+  Master was taken and is given back; nothing was set on the CRTC.
+```
+
+**MEASURED, AND A MACHINE WITH NO KMS SAYS SO:**
 
 ```
 $ ./build/window-server --backend drm

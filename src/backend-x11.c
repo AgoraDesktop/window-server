@@ -160,6 +160,7 @@ static void x11_stop(struct aws_server *server)
 		XCloseDisplay(x11->display);
 	}
 	free(x11);
+	free(server->backend.pixels);
 	server->backend.data = NULL;
 }
 

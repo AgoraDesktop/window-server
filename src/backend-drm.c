@@ -286,6 +286,31 @@ int aws_backend_drm_start(struct aws_server *server)
 		drm_stop(server);
 		return -1;
 	}
+	/* **THE DRY RUN: EVERYTHING UP TO THE MODESET AND NOTHING AFTER IT.** Taking a display away from the
+	 * session using it is the most disruptive thing any backend in this tree can do, so there is a way to
+	 * prove the whole setup path — the device, the connector, the mode, the CRTC, the dumb buffer, the
+	 * framebuffer — WITHOUT the screen changing at all. `AWS_DRM_DRY_RUN=1` is what asks for it. */
+	if (getenv("AWS_DRM_DRY_RUN") != NULL) {
+		fprintf(stderr,
+			"window-server: DRY RUN — every step up to the modeset succeeded, and the display was NOT taken:\n"
+			"                device     %s\n"
+			"                connector  %u (%s), %u mode(s)\n"
+			"                mode       %ux%u%s\n"
+			"                crtc       %u\n"
+			"                buffer     %ux%u, pitch %u, %llu bytes, mapped at %p\n"
+			"                framebuffer %u (XRGB8888)\n"
+			"                Master was taken and is given back; nothing was set on the CRTC.\n",
+			path, drm->connector_id,
+			drmModeGetConnectorTypeName(connector->connector_type) != NULL
+				? drmModeGetConnectorTypeName(connector->connector_type) : "?", connector->count_modes,
+			mode.hdisplay, mode.vdisplay, (mode.type & DRM_MODE_TYPE_PREFERRED) ? " (PREFERRED)" : "",
+			drm->crtc_id, create.width, create.height, drm->pitch, (unsigned long long)drm->size,
+			drm->map, drm->fb_id);
+		drmModeFreeConnector(connector);
+		drm_stop(server);
+		return -1;
+	}
+
 	drmModeFreeConnector(connector);
 
 	server->backend.width = (int)create.width;

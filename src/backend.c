@@ -55,11 +55,16 @@ void aws_backend_present(struct aws_server *server)
 	}
 }
 
+/* **WHOEVER ALLOCATED THE PIXELS FREES THEM, AND THAT IS THE BACKEND.** An unconditional `free` here was
+ * wrong for exactly one of the three and cost a SIGSEGV at exit: the DRM backend's pixels are an `mmap` of a
+ * kernel dumb buffer, which its own `stop` unmaps — and `free` on an mmap'd pointer is not a leak, it is a
+ * crash. MEASURED: 300 frames composited and the display restored correctly, then exit 139 in the cleanup.
+ * Hoisting the ownership to each backend also means a backend that maps rather than allocates needs no special
+ * case here, which is what a fourth one would have had to add. */
 void aws_backend_shutdown(struct aws_server *server)
 {
 	if (server->backend.stop != NULL) {
 		server->backend.stop(server);
 	}
-	free(server->backend.pixels);
 	server->backend.pixels = NULL;
 }

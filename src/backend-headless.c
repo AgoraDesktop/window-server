@@ -15,6 +15,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* THE HEADLESS BACKEND OWNS ITS BUFFER AND GIVES IT BACK, like every other backend does. */
+static void headless_stop(struct aws_server *server)
+{
+	free(server->backend.pixels);
+}
+
 int aws_backend_headless_start(struct aws_server *server)
 {
 	size_t count = (size_t)server->backend.width * (size_t)server->backend.height;
@@ -28,6 +34,6 @@ int aws_backend_headless_start(struct aws_server *server)
 	server->backend.name = "headless";
 	server->backend.data = NULL;
 	server->backend.present = NULL;
-	server->backend.stop = NULL;
+	server->backend.stop = headless_stop;
 	return 0;
 }
