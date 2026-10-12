@@ -18,8 +18,8 @@ add_custom_target(xdg-shell-client-bindings
 # THE INTERFACE DEFINITIONS ARE SHARED: the private code defines the wl_interface structs and is the same for
 # either end of the protocol, so the one the server already generates is compiled in here too rather than
 # generated twice.
-add_executable(window-server-test-client client.c "${_generated}/xdg-shell-protocol.c")
-add_dependencies(window-server-test-client xdg-shell-bindings xdg-shell-client-bindings)
+add_executable(window-server-test-client client.c "${_generated}/agora-shell-protocol.c")
+add_dependencies(window-server-test-client agora-shell-bindings)
 target_include_directories(window-server-test-client PRIVATE "${_generated}")
 target_link_libraries(window-server-test-client PRIVATE PkgConfig::WAYLAND_CLIENT)
 

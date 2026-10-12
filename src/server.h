@@ -79,6 +79,12 @@ struct aws_surface {
 	int configure_sent;			/* the initial configure has gone; it is sent once */
 	int configured;				/* the client has acked a configure and may attach a buffer */
 	int mapped;
+	/* **THE APPLICATION'S FRAME AND LEVEL, HONOURED.** `x`/`y` are where it said to go, the frame pair is how
+	 * big it says it is, and `level` is the integer the composition is ordered by. See `src/shell.c`. */
+	int frame_width;
+	int frame_height;
+	int level;
+	struct wl_resource *agora_window;	/* the role, when this surface's client is an Agora one */
 
 	int x;					/* where the compositor has put it, in output coordinates */
 	int y;
@@ -189,6 +195,10 @@ int aws_backend_headless_start(struct aws_server *server);
 int aws_backend_x11_start(struct aws_server *server);
 int aws_backend_drm_start(struct aws_server *server);
 
+
+/* shell.c — agora_shell: the frames, the levels and the work area the Mac's model needs. */
+void aws_shell_init(struct aws_server *server);
+void aws_shell_reserved(struct aws_server *server, int *x, int *y, int *width, int *height);
 
 /* seat.c — the seat: the devices, the focus, and the keymap. */
 void aws_seat_init(struct aws_server *server);

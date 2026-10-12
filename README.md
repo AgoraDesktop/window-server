@@ -267,8 +267,11 @@ that is written down is a decision and one that is not is a surprise.
   library in the build. The compositing is a row copy. **Who owns which pixels, and why `xdg-shell` cannot
   express it, is written down in [`DESIGN.md`](DESIGN.md)** — including Apple's own window-level names, which is
   the evidence that the menu bar is stitched from windows owned by different processes.
-- **No policy.** Every toplevel is placed by a cascade and sized by its client. Placement, stacking, the menu
-  bar's reserve and the dock's are POLICY, and policy is what this version has none of.
+- **No policy — AND IT NO LONGER CASCADES.** A cascade was a placement policy, and the Mac's model is that the
+  application states its frame and the server honours it; that cascade is gone. What remains absent is anything
+  that would place a window the application did not, and the furniture the server owns beyond a menu bar's
+  reserve. **The server's half of that model is implemented: `agora_shell`** — see `protocol/agora-shell.xml`
+  and [`DESIGN.md`](DESIGN.md).
 
 ## Build and run
 

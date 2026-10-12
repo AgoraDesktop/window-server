@@ -257,16 +257,11 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
 		wl_resource_add_destroy_listener(surface->current_buffer, &surface->buffer_listener);
 		surface->has_buffer_listener = 1;
 		if (!surface->mapped) {
-			int step = (int)(server->toplevel_count++ % 8u) * 40;
-
-			surface->x = 40 + step;
-			surface->y = 40 + step;
-			if (surface->x > server->backend.width - 64) {
-				surface->x = 40;
-			}
-			if (surface->y > server->backend.height - 64) {
-				surface->y = 40;
-			}
+			/* **THERE IS NO CASCADE HERE, AND THAT IS THE POINT.** A cascade is a PLACEMENT POLICY, and on
+			 * the Mac the application's frame is honoured — the only thing that adjusts it is the
+			 * application's own `constrainFrameRect:toScreen:`. So there is no offset computed, no counting
+			 * of windows and no "put it somewhere plausible": a client that says nothing gets the origin,
+			 * which is what an application that never set a frame would get anyway. */
 			surface->mapped = 1;
 			/* **A NEW WINDOW TAKES THE KEYBOARD IF NOTHING HAS IT.** A window that is mapped but never
 			 * clicked would otherwise receive no key at all — a person could see it and not type into it.
@@ -619,6 +614,14 @@ static void xdg_wm_base_get_xdg_surface(struct wl_client *client, struct wl_reso
 	struct wl_resource *xdg_surface;
 
 	if (surface == NULL) {
+		return;
+	}
+	/* ONE ROLE, AND THE TWO ROLE PROTOCOLS DISAGREE ABOUT WHO DECIDES THE SIZE — so a surface that is already
+	 * an `agora_window` cannot also be an `xdg_toplevel`, and saying so is kinder than a surface quietly obeying
+	 * two contradictory models. */
+	if (surface->agora_window != NULL) {
+		wl_resource_post_error(resource, XDG_WM_BASE_ERROR_INVALID_SURFACE_STATE,
+				       "this surface already has an agora_window role");
 		return;
 	}
 	if (surface->xdg_surface != NULL) {

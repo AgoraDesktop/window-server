@@ -34,6 +34,7 @@ struct aws_server *aws_server_create(const char *backend_name, const char *input
 	aws_xdg_shell_init(server);
 	aws_output_init(server);
 	aws_seat_init(server);
+	aws_shell_init(server);
 	/* THE BACKEND LAST, because an X11 one adds its connection's descriptor to the event loop that has to
 	 * exist first. */
 	if (aws_backend_init(server, backend_name, server->requested_width, server->requested_height) != 0) {

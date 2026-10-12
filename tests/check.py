@@ -9,7 +9,7 @@ import sys
 from PIL import Image
 
 BACKGROUND = (48, 51, 56)      # aws_output.c's AWS_BACKGROUND
-CASCADE = (40, 40)             # surface.c's first-window placement
+FRAME = (100, 80)              # what tests/client.c asks for with agora_window.set_frame
 
 
 def main():
@@ -25,11 +25,13 @@ def main():
     checks = []
 
     checks.append((f"the output is {im.size[0]}x{im.size[1]}", im.size == (1280, 720)))
-    checks.append((f"the client's colour is at the cascade ({CASCADE[0]},{CASCADE[1]})",
-                   px[CASCADE[0] + 2, CASCADE[1] + 2] == want))
+    checks.append((f"THE SERVER HONOURED set_frame: the colour is at ({FRAME[0]},{FRAME[1]})",
+                   px[FRAME[0] + 2, FRAME[1] + 2] == want))
     checks.append((f"the window is {w}x{h}",
-                   px[CASCADE[0] + w - 2, CASCADE[1] + h - 2] == want))
-    checks.append(("nothing of the client is outside it", px[CASCADE[0] + w + 5, CASCADE[1] + 5] == BACKGROUND))
+                   px[FRAME[0] + w - 2, FRAME[1] + h - 2] == want))
+    checks.append(("and NOTHING is at the origin, where a cascade would have put it",
+                   px[2, 2] == BACKGROUND and px[42, 42] == BACKGROUND))
+    checks.append(("nothing of the client is outside it", px[FRAME[0] + w + 5, FRAME[1] + 5] == BACKGROUND))
     checks.append(("and the rest is the compositor's own background", px[5, 5] == BACKGROUND and
                    px[1275, 715] == BACKGROUND))
 

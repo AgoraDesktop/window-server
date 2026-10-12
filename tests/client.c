@@ -20,7 +20,7 @@
 #define _GNU_SOURCE
 
 #include <wayland-client.h>
-#include "xdg-shell-client-protocol.h"
+#include "agora-shell-client-protocol.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -36,11 +36,11 @@ struct client {
 	struct wl_registry *registry;
 	struct wl_compositor *compositor;
 	struct wl_shm *shm;
-	struct xdg_wm_base *wm_base;
+	struct agora_shell *shell;
 
 	struct wl_surface *surface;
-	struct xdg_surface *xdg_surface;
-	struct xdg_toplevel *toplevel;
+	struct agora_window *window;
+	int frame_x, frame_y;
 	struct wl_buffer *buffer;
 	uint32_t *pixels;
 
@@ -89,53 +89,8 @@ static void buffer_release(void *data, struct wl_buffer *buffer)
 
 static const struct wl_buffer_listener buffer_listener = { buffer_release };
 
-static void wm_base_ping(void *data, struct xdg_wm_base *wm_base, uint32_t serial)
-{
-	(void)data;
-	xdg_wm_base_pong(wm_base, serial);
-}
 
-static const struct xdg_wm_base_listener wm_base_listener = { wm_base_ping };
 
-static void toplevel_configure(void *data, struct xdg_toplevel *toplevel, int32_t width, int32_t height,
-			       struct wl_array *states)
-{
-	(void)data; (void)toplevel; (void)width; (void)height; (void)states;
-}
-
-static void toplevel_close(void *data, struct xdg_toplevel *toplevel)
-{
-	(void)data; (void)toplevel;
-}
-
-static void toplevel_configure_bounds(void *d, struct xdg_toplevel *t, int32_t w, int32_t h)
-{
-	(void)d; (void)t; (void)w; (void)h;
-}
-
-static void toplevel_wm_capabilities(void *d, struct xdg_toplevel *t, struct wl_array *c)
-{
-	(void)d; (void)t; (void)c;
-}
-
-static const struct xdg_toplevel_listener toplevel_listener = {
-	toplevel_configure,
-	toplevel_close,
-	toplevel_configure_bounds,
-	toplevel_wm_capabilities,
-};
-
-/* THE ACK, AND THEN THE DRAW. Everything here is the documented order and nothing is a shortcut: the ack
- * comes first, the buffer is attached after, and only the commit presents it. */
-static void xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t serial)
-{
-	struct client *client = data;
-
-	xdg_surface_ack_configure(xdg_surface, serial);
-	client->configured = 1;
-}
-
-static const struct xdg_surface_listener xdg_surface_listener = { xdg_surface_configure };
 
 static int create_buffer(struct client *client)
 {
@@ -191,9 +146,8 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
 						      version < 4 ? version : 4);
 	} else if (strcmp(interface, wl_shm_interface.name) == 0) {
 		client->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
-	} else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
-		client->wm_base = wl_registry_bind(registry, name, &xdg_wm_base_interface, 1);
-		xdg_wm_base_add_listener(client->wm_base, &wm_base_listener, client);
+	} else if (strcmp(interface, agora_shell_interface.name) == 0) {
+		client->shell = wl_registry_bind(registry, name, &agora_shell_interface, 1);
 	}
 }
 
@@ -217,6 +171,8 @@ int main(int argc, char **argv)
 	client.height = 200;
 	client.colour = 0x00C050FFu;	/* a blue no background would be */
 	client.max_frames = 3;
+	client.frame_x = 100;
+	client.frame_y = 80;
 
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
@@ -238,26 +194,20 @@ int main(int argc, char **argv)
 	client.registry = wl_display_get_registry(client.display);
 	wl_registry_add_listener(client.registry, &registry_listener, &client);
 	wl_display_roundtrip(client.display);
-	if (client.compositor == NULL || client.shm == NULL || client.wm_base == NULL) {
+	if (client.compositor == NULL || client.shm == NULL || client.shell == NULL) {
 		fprintf(stderr, "client: the compositor is missing a required global\n");
 		return 1;
 	}
 
 	client.surface = wl_compositor_create_surface(client.compositor);
-	client.xdg_surface = xdg_wm_base_get_xdg_surface(client.wm_base, client.surface);
-	xdg_surface_add_listener(client.xdg_surface, &xdg_surface_listener, &client);
-	client.toplevel = xdg_surface_get_toplevel(client.xdg_surface);
-	xdg_toplevel_add_listener(client.toplevel, &toplevel_listener, &client);
-	xdg_toplevel_set_title(client.toplevel, "window server test client");
-
-	/* THE EMPTY COMMIT: this is the one that asks to be configured, and it carries no buffer on purpose. */
-	wl_surface_commit(client.surface);
-	while (!client.configured && wl_display_dispatch(client.display) != -1) {
-	}
-	if (!client.configured) {
-		fprintf(stderr, "client: the compositor never configured the surface\n");
-		return 1;
-	}
+	/* **THE AGORA ROLE, AND NO CONFIGURE DANCE.** xdg-shell makes a client wait to be told how big to be; this
+	 * protocol does not, because the Mac's model is that the APPLICATION states its frame and the server honours
+	 * it. So the client says where it goes and draws — and what the test then checks is that the server put it
+	 * exactly there, which is the whole claim being made. */
+	client.window = agora_shell_get_window(client.shell, client.surface);
+	agora_window_set_frame(client.window, client.frame_x, client.frame_y, client.width, client.height);
+	agora_window_set_title(client.window, "window server test client");
+	agora_window_set_app_id(client.window, "org.agora.test-client");
 
 	if (create_buffer(&client) != 0) {
 		fprintf(stderr, "client: could not make a buffer\n");

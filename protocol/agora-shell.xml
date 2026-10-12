@@ -42,6 +42,14 @@
       output, which is where the work area comes from.
     </description>
 
+    <enum name="error">
+      <description summary="what this global can refuse">
+        A surface has ONE role, and the two role protocols disagree about who decides the size — so a surface
+        that already has one is refused rather than quietly obeying two contradictory models.
+      </description>
+      <entry name="already_has_role" value="0" summary="that surface already has a role"/>
+    </enum>
+
     <request name="get_window">
       <description summary="give a surface the role of a window">
         A surface with no role is never composited, so this is what makes a surface a window. It is the

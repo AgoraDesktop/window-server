@@ -93,7 +93,8 @@ file(GLOB WINDOW_SERVER_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/s
 
 add_executable(window-server
   ${WINDOW_SERVER_SOURCES}
-  "${_generated}/xdg-shell-protocol.c")
+  "${_generated}/xdg-shell-protocol.c"
+  "${_generated}/agora-shell-protocol.c")
 
 add_dependencies(window-server xdg-shell-bindings agora-shell-bindings)
 

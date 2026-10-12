@@ -119,11 +119,31 @@ void aws_output_render(struct aws_server *server)
 	}
 	/* MAPPING ORDER IS THE STACKING: the list is walked front-to-back, so the last mapped is on top. A
 	 * compositor that has raised a window has reordered this list; this version never reorders it. */
-	wl_list_for_each(surface, &server->surfaces, link) {
-		if (!surface->mapped) {
-			continue;
+	/* **BY LEVEL FIRST, THEN BY MAPPING ORDER WITHIN ONE.** A level is an `NSWindow` level — an integer the
+	 * APPLICATION chose — so this loop is what makes a menu window sit above ordinary windows and a status item
+	 * above that, without this file knowing what any of those numbers mean. Within a level the list order is the
+	 * stacking, which is what raise and lower change. */
+	{
+		int lowest = 0, highest = 0, level, first = 1;
+
+		wl_list_for_each(surface, &server->surfaces, link) {
+			if (!surface->mapped) {
+				continue;
+			}
+			if (first || surface->level < lowest) {
+				lowest = surface->level;
+			}
+			if (first || surface->level > highest) {
+				highest = surface->level;
+			}
+			first = 0;
 		}
-		composite_surface(backend, surface);
+		for (level = lowest; level <= highest; level++) {
+			wl_list_for_each(surface, &server->surfaces, link) {
+				if (!surface->mapped || surface->level != level) {
+					continue;
+				}
+				composite_surface(backend, surface);
 
 		/* **THE BUFFER GOES BACK BEFORE THE FRAME CALLBACK, AND THE ORDER IS THE WHOLE THING.** A Wayland
 		 * buffer belongs to the COMPOSITOR from `attach` until the compositor releases it, so a client that
@@ -131,12 +151,14 @@ void aws_output_render(struct aws_server *server)
 		 * finds the buffer busy, does nothing, and waits for a callback that will not come. MEASURED — this
 		 * is what stopped the AppKit at three frames. Releasing first means the client that hears the callback
 		 * can actually use what it hears. */
-		if (surface->current_buffer != NULL) {
-			wl_buffer_send_release(surface->current_buffer);
+				if (surface->current_buffer != NULL) {
+					wl_buffer_send_release(surface->current_buffer);
+				}
+				/* AND THE FRAME CALLBACK GOES WITH THE COMPOSITE, NOT WITH THE COMMIT: the client may
+				 * draw again only once its picture is on screen. */
+				aws_surface_frame_done(surface, time);
+			}
 		}
-		/* AND THE FRAME CALLBACK GOES WITH THE COMPOSITE, NOT WITH THE COMMIT: the client may draw again only
-		 * once its picture is on screen. */
-		aws_surface_frame_done(surface, time);
 	}
 }
 
