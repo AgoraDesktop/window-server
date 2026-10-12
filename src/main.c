@@ -14,7 +14,8 @@
  * to composite N frames and then write the output to a file and exit — which is how a screenshot of AGORA'S OWN
  * compositor becomes the acceptance test of the AppKit, rather than a screenshot of somebody else's.
  *
- *   window-server [--width W] [--height H] [--socket NAME] [--frames N] [--screenshot PATH.ppm]
+ *   window-server [--backend headless|x11] [--width W] [--height H] [--socket NAME]
+ *                 [--frames N] [--screenshot PATH.ppm]
  *
  * The socket name is printed on STDOUT alone — a test captures it with a pipe, and everything else goes to
  * stderr so the two do not mix.
@@ -29,16 +30,19 @@
 static void usage(const char *program)
 {
 	fprintf(stderr,
-		"usage: %s [--width W] [--height H] [--socket NAME] [--frames N] [--screenshot PATH.ppm]\n"
+		"usage: %s [--backend NAME] [--width W] [--height H] [--socket NAME] [--frames N]\n"
+		"          [--screenshot PATH.ppm]\n"
+		"  --backend NAME    where the pixels go: %s (default headless)\n"
 		"  --width/--height  the output's size, in pixels (default 1280x720)\n"
 		"  --socket NAME     the Wayland socket's name; the default is chosen and printed\n"
 		"  --frames N        composite N frames, then stop (0, the default, runs until killed)\n"
 		"  --screenshot P    write the final output to a PPM file\n",
-		program);
+		program, aws_backend_names());
 }
 
 int main(int argc, char **argv)
 {
+	const char *backend = "headless";
 	int width = 1280;
 	int height = 720;
 	int frames = 0;
@@ -48,7 +52,9 @@ int main(int argc, char **argv)
 	int i;
 
 	for (i = 1; i < argc; i++) {
-		if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
+		if (strcmp(argv[i], "--backend") == 0 && i + 1 < argc) {
+			backend = argv[++i];
+		} else if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
 			width = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--height") == 0 && i + 1 < argc) {
 			height = atoi(argv[++i]);
@@ -67,9 +73,9 @@ int main(int argc, char **argv)
 		}
 	}
 
-	server = aws_server_create(width, height);
+	server = aws_server_create(backend, width, height);
 	if (server == NULL) {
-		fprintf(stderr, "window-server: could not create the display\n");
+		fprintf(stderr, "window-server: could not start (backend '%s')\n", backend);
 		return 1;
 	}
 	if (socket_name != NULL) {
@@ -89,7 +95,8 @@ int main(int argc, char **argv)
 
 	printf("%s\n", socket_name);
 	fflush(stdout);
-	fprintf(stderr, "window-server: listening on %s, output %dx%d\n", socket_name, width, height);
+	fprintf(stderr, "window-server: listening on %s, %s output %dx%d\n", socket_name, server->backend.name,
+		server->backend.width, server->backend.height);
 
 	server->running = 1;
 	while (server->running) {
@@ -100,6 +107,8 @@ int main(int argc, char **argv)
 		if (server->render_pending) {
 			server->render_pending = 0;
 			aws_output_render(server);
+			/* AND THEN IT GOES ON THE SCREEN, if the backend has one. */
+			aws_backend_present(server);
 			/* **THE RENDER QUEUES EVENTS — the buffer release and the frame callbacks — SO THE FLUSH HAS TO
 			 * FOLLOW IT.** The flush above happens before the render and therefore misses exactly the events
 			 * that make the next frame possible: the client sits waiting for a callback that is still in this

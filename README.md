@@ -37,7 +37,37 @@ That is the whole stack: a view's `-drawRect:`, through `NSWindow`, through the 
 compositor**, out as a screenshot — and the area around the window is the compositor's own background
 `(48,51,56)`, not a client's.
 
-### 2. It is tested without the AppKit
+### 2. And it runs nested, in a window on a desktop
+
+`--backend x11` puts the compositor's screen in an X window — the same thing weston's `--backend=x11` and
+mutter's `--nested` are. An independent capture of the desktop, with the AppKit client running inside it:
+
+```
+$ ./build/window-server --backend x11 --frames 200 --screenshot /tmp/ws-x11.ppm
+
+$ python3 ../libagora-app/tests/inspect.py /tmp/ws-x11.ppm      # the compositor's own output
+  [ok] red marker is the top-left corner   [ok] green marker is the bottom-right corner
+  [ok] both markers are square             [ok] gradient R rises left to right (36 -> 215)
+  [ok] gradient G rises top to bottom      [ok] a white bar is present
+
+$ python3 ... # on an X screenshot taken at the same time
+  red marker on the desktop  : 2304 px at (360,277)..(407,324)
+  green marker on the desktop: 2304 px at (952,629)..(999,676)
+  -> a 640x400 window at (360,277), red top-left, green bottom-right
+  the nested window's own corner (320,237) is (48,51,56) — the window server's background
+```
+
+**IT GRABS NOTHING, AND THAT IS NOT AN ACCIDENT OF THE CODE YET.** This server has no input devices (no
+`libinput`, see below), so the backend presents pixels and takes no input: no `XGrabPointer`, no
+`XGrabKeyboard`, no pointer fence. That matters because a nested compositor *with* input can leave a desktop
+with a dead mouse — which is a real failure this project has already met once, from a nested `gnome-shell`.
+A compositor that has nothing to route has nothing to grab, and that stays true until input arrives on purpose.
+
+**An X11 backend is not an X11 target.** Agora's display target is Wayland on real hardware, with Xwayland for
+X *clients*; this is a development backend, which is why it is **optional** — the core links no `libX11` at all
+unless it is built in (`-DWITH_X11` is not needed: it is taken if `pkg-config` finds it).
+
+### 3. It is tested without the AppKit
 
 `ctest` — the server, a client that is nothing but the protocol, and a check that reads the server's own
 screenshot:
@@ -59,9 +89,10 @@ The server does **not** depend on `libagora-app` — the dependency runs the oth
 Each of these is recorded at the code that would have to change (`src/server.h`), because an absent feature
 that is written down is a decision and one that is not is a surprise.
 
-- **No real output.** The output is HEADLESS: a framebuffer in this process, described to clients through
-  `wl_output`. A DRM/KMS backend and a nested-in-X11/Wayland backend are next; the compositing code does not
-  care which, because it is only ever given a width, a height and a place to put pixels.
+- **No real output.** There are two backends and neither is the shipping one: `headless` is a framebuffer in
+  this process, and `x11` is a nested window on an X server. A **DRM/KMS** backend is the real one and is not
+  written. A backend is a place to put pixels — a width, a height and a buffer — which is what makes a new one
+  a file (`src/backend-*.c`) rather than a change to the compositor.
 - **No input devices.** `libinput` is the dependency that would bring them and it is not taken yet. The seat
   advertises a keyboard and sends the **keymap** — so a client's key translation is exercised against a
   compositor-supplied map — but generates no key or pointer events. The pointer is not advertised at all: a

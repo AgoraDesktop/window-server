@@ -261,10 +261,10 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
 
 			surface->x = 40 + step;
 			surface->y = 40 + step;
-			if (surface->x > server->output.width - 64) {
+			if (surface->x > server->backend.width - 64) {
 				surface->x = 40;
 			}
-			if (surface->y > server->output.height - 64) {
+			if (surface->y > server->backend.height - 64) {
 				surface->y = 40;
 			}
 			surface->mapped = 1;

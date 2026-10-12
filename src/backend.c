@@ -1,0 +1,62 @@
+/*
+ * backend.c — choosing an output backend.
+ *
+ * Copyright © 2026 Kyle J. Cardoza. MIT licensed.
+ * SPDX-License-Identifier: MIT
+ *
+ * A BACKEND IS A PLACE TO PUT PIXELS. That is the entire contract, and it is deliberately small: everything
+ * above it — clients, surfaces, xdg-shell, the compositing loop — sees a width, a height and a buffer, and
+ * never asks where the buffer is going. So a new output device is a file that fills in three function
+ * pointers rather than a change to the compositor.
+ *
+ * THE HEADLESS ONE IS NOT A TEST FIXTURE; IT IS AN OUTPUT. It is what a machine with no display driver can
+ * still run Agora on, and it is what the automated tests use because it is the only one that cannot disturb
+ * the machine it is started on.
+ */
+
+#include "server.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+const char *aws_backend_names(void)
+{
+	return "headless, x11";
+}
+
+int aws_backend_init(struct aws_server *server, const char *name, int width, int height)
+{
+	/* THE SIZE IS SET HERE RATHER THAN BY EACH BACKEND, so that a backend can only be a PLACE for pixels and
+	 * not a decider of how many — a backend that wanted different dimensions would be asking for a policy
+	 * this does not have. */
+	server->backend.width = width;
+	server->backend.height = height;
+
+	if (name == NULL || strcmp(name, "headless") == 0) {
+		return aws_backend_headless_start(server);
+	}
+	if (strcmp(name, "x11") == 0) {
+		return aws_backend_x11_start(server);
+	}
+	fprintf(stderr, "window-server: no output backend named '%s' (have: %s)\n", name, aws_backend_names());
+	return -1;
+}
+
+void aws_backend_present(struct aws_server *server)
+{
+	/* A BACKEND WITH NOTHING TO PRESENT LEAVES THIS NULL, which is what a headless output is: the frame
+	 * buffer IS the screen. */
+	if (server->backend.present != NULL) {
+		server->backend.present(server);
+	}
+}
+
+void aws_backend_shutdown(struct aws_server *server)
+{
+	if (server->backend.stop != NULL) {
+		server->backend.stop(server);
+	}
+	free(server->backend.pixels);
+	server->backend.pixels = NULL;
+}

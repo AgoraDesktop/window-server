@@ -24,12 +24,17 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+# AND ONE OPTIONAL ONE. An X11 backend lets the compositor be run NESTED — in a window on a desktop — which is
+# how it is developed and demonstrated without taking over a machine's display. It is OPTIONAL on purpose: the
+# core does not link libX11 unless the backend is wanted, so "no X11-native target" stays true of the thing
+# that would be shipped. See src/backend-x11.c for why an X11 backend is not an X11 target.
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WAYLAND_SERVER REQUIRED IMPORTED_TARGET wayland-server)
 # AND THE CLIENT SIDE TOO, for the TEST CLIENT only: the server speaks the protocol's server end, and the test
 # speaks its client end, so the two are different libraries and neither substitutes for the other.
 pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
 pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
+pkg_check_modules(X11 IMPORTED_TARGET x11)
 find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
 
 find_file(XDG_SHELL_XML
@@ -72,6 +77,14 @@ target_include_directories(window-server PRIVATE
 target_link_libraries(window-server PRIVATE
   PkgConfig::WAYLAND_SERVER
   PkgConfig::XKBCOMMON)
+
+if(X11_FOUND)
+  target_compile_definitions(window-server PRIVATE AWS_HAVE_X11)
+  target_link_libraries(window-server PRIVATE PkgConfig::X11)
+  message(STATUS "window-server: the x11 (nested) backend is built in")
+else()
+  message(STATUS "window-server: no libX11, so no x11 backend — headless only")
+endif()
 
 enable_testing()
 add_subdirectory(tests)

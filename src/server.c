@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-struct aws_server *aws_server_create(int width, int height)
+struct aws_server *aws_server_create(const char *backend_name, int width, int height)
 {
 	struct aws_server *server = calloc(1, sizeof *server);
 
@@ -23,8 +23,8 @@ struct aws_server *aws_server_create(int width, int height)
 		return NULL;
 	}
 	server->loop = wl_display_get_event_loop(server->display);
-	server->output.width = width > 0 ? width : 1280;
-	server->output.height = height > 0 ? height : 720;
+	server->requested_width = width > 0 ? width : 1280;
+	server->requested_height = height > 0 ? height : 720;
 	wl_list_init(&server->surfaces);
 
 	/* THE GLOBALS, IN THE ORDER A CLIENT BINDS THEM — which the protocol does not require and a reader does:
@@ -34,6 +34,13 @@ struct aws_server *aws_server_create(int width, int height)
 	aws_xdg_shell_init(server);
 	aws_output_init(server);
 	aws_seat_init(server);
+	/* THE BACKEND LAST, because an X11 one adds its connection's descriptor to the event loop that has to
+	 * exist first. */
+	if (aws_backend_init(server, backend_name, server->requested_width, server->requested_height) != 0) {
+		wl_display_destroy(server->display);
+		free(server);
+		return NULL;
+	}
 	return server;
 }
 
@@ -46,7 +53,7 @@ void aws_server_destroy(struct aws_server *server)
 	 * cleanup — libwayland says so by refusing. */
 	wl_display_destroy_clients(server->display);
 	wl_display_destroy(server->display);
-	free(server->output.pixels);
+	aws_backend_shutdown(server);
 	free(server);
 }
 

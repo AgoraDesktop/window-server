@@ -45,7 +45,7 @@ static uint32_t aws_now_ms(void)
  *
  * THE FIELDS COME FROM THE `wl_shm_buffer` EVERY TIME rather than from a copy kept on the surface: the buffer
  * belongs to the client, and a copy would be a second place for its size and format to be true. */
-static void composite_surface(struct aws_output *output, struct aws_surface *surface)
+static void composite_surface(struct aws_backend *output, struct aws_surface *surface)
 {
 	struct wl_shm_buffer *shm = wl_shm_buffer_get(surface->current_buffer);
 	const uint8_t *base;
@@ -108,14 +108,14 @@ static void composite_surface(struct aws_output *output, struct aws_surface *sur
 
 void aws_output_render(struct aws_server *server)
 {
-	struct aws_output *output = &server->output;
+	struct aws_backend *backend = &server->backend;
 	struct aws_surface *surface;
-	size_t count = (size_t)output->width * (size_t)output->height;
+	size_t count = (size_t)backend->width * (size_t)backend->height;
 	size_t i;
 	uint32_t time = aws_now_ms();
 
 	for (i = 0; i < count; i++) {
-		output->pixels[i] = AWS_BACKGROUND;
+		backend->pixels[i] = AWS_BACKGROUND;
 	}
 	/* MAPPING ORDER IS THE STACKING: the list is walked front-to-back, so the last mapped is on top. A
 	 * compositor that has raised a window has reordered this list; this version never reorders it. */
@@ -123,7 +123,7 @@ void aws_output_render(struct aws_server *server)
 		if (!surface->mapped) {
 			continue;
 		}
-		composite_surface(output, surface);
+		composite_surface(backend, surface);
 
 		/* **THE BUFFER GOES BACK BEFORE THE FRAME CALLBACK, AND THE ORDER IS THE WHOLE THING.** A Wayland
 		 * buffer belongs to the COMPOSITOR from `attach` until the compositor releases it, so a client that
@@ -149,19 +149,19 @@ void aws_output_render(struct aws_server *server)
  * which is what makes the two comparable. */
 int aws_output_write_ppm(struct aws_server *server, const char *path)
 {
-	struct aws_output *output = &server->output;
+	struct aws_backend *backend = &server->backend;
 	FILE *file = fopen(path, "wb");
 
 	if (file == NULL) {
 		return -1;
 	}
-	fprintf(file, "P6\n%d %d\n255\n", output->width, output->height);
-	for (size_t i = 0; i < (size_t)output->width * (size_t)output->height; i++) {
+	fprintf(file, "P6\n%d %d\n255\n", backend->width, backend->height);
+	for (size_t i = 0; i < (size_t)backend->width * (size_t)backend->height; i++) {
 		unsigned char rgb[3];
 
-		rgb[0] = (unsigned char)((output->pixels[i] >> 16) & 0xFFu);
-		rgb[1] = (unsigned char)((output->pixels[i] >> 8) & 0xFFu);
-		rgb[2] = (unsigned char)(output->pixels[i] & 0xFFu);
+		rgb[0] = (unsigned char)((backend->pixels[i] >> 16) & 0xFFu);
+		rgb[1] = (unsigned char)((backend->pixels[i] >> 8) & 0xFFu);
+		rgb[2] = (unsigned char)(backend->pixels[i] & 0xFFu);
 		if (fwrite(rgb, 1, 3, file) != 3) {
 			fclose(file);
 			return -1;
@@ -202,7 +202,7 @@ static void bind_output(struct wl_client *client, void *data, uint32_t version, 
 	wl_output_send_geometry(resource, 0, 0, 0, 0, WL_OUTPUT_SUBPIXEL_UNKNOWN, "Agora", "headless",
 				WL_OUTPUT_TRANSFORM_NORMAL);
 	wl_output_send_mode(resource, WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED,
-			    server->output.width, server->output.height, 60000);
+			    server->backend.width, server->backend.height, 60000);
 	if (wl_resource_get_version(resource) >= 2) {
 		wl_output_send_scale(resource, 1);
 		wl_output_send_done(resource);
@@ -214,7 +214,6 @@ static void bind_output(struct wl_client *client, void *data, uint32_t version, 
 
 void aws_output_init(struct aws_server *server)
 {
-	server->output.pixels = calloc((size_t)server->output.width * (size_t)server->output.height,
-				       sizeof(uint32_t));
+	/* THE PIXELS ARE THE BACKEND'S NOW — see backend.c — and this owns only the global that describes them. */
 	wl_global_create(server->display, &wl_output_interface, 2, server, bind_output);
 }

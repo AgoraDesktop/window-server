@@ -11,9 +11,16 @@
  *
  * WHAT IT DOES NOT DO YET, recorded rather than left to be discovered:
  *
- *   - NO REAL OUTPUT. The output is HEADLESS: a framebuffer in this process, with `wl_output` describing it.
- *     A DRM/KMS backend and a nested-in-X11/Wayland backend are the next backends; the compositing code does
- *     not care which one it is given, because it only ever sees a width, a height and a buffer of pixels.
+ *   - TWO OUTPUT BACKENDS, AND NEITHER IS THE SHIPPING ONE. `headless` is a framebuffer in this process;
+ *     `x11` is a NESTED window on an X server, which is how a compositor is developed and demonstrated without
+ *     taking over a machine's display. A DRM/KMS backend is the real one and is not written yet. The
+ *     compositing code does not care which backend it has, because it is only ever given a width, a height and
+ *     a place to put pixels — which is what makes a new one a file rather than a change.
+ *
+ *     AN X11 BACKEND IS NOT AN X11 TARGET, and the distinction is the whole of the reasoning: Agora's display
+ *     target is Wayland on real hardware, and Xwayland exists for X CLIENTS. This backend is a development
+ *     one, the same thing weston's `--backend=x11` and mutter's `--nested` are. It is also OPTIONAL — the core
+ *     does not link libX11 at all unless it is built in.
  *   - NO INPUT DEVICES. `libinput` is the dependency that would bring them, and it is not taken yet. The seat
  *     therefore advertises a keyboard and sends the KEYMAP (so a client's key translation is exercised against
  *     a compositor-supplied map) but generates no key or pointer events.
@@ -81,12 +88,30 @@ struct aws_frame {
 	struct wl_listener destroy_listener;
 };
 
-/* THE OUTPUT, WHICH IS HEADLESS: a size and a buffer of pixels this process owns. */
-struct aws_output {
-	struct wl_resource *resource;
+/* THE OUTPUT BACKEND. Everything above it — clients, surfaces, xdg-shell, compositing — sees only `width`,
+ * `height` and `pixels`, which is what makes an output device a file rather than a change. */
+struct aws_backend {
+	const char *name;
 	int width;
 	int height;
 	uint32_t *pixels;			/* XRGB8888, the format every client here sends */
+
+	/* CALLED ONCE, AFTER THE WAYLAND DISPLAY EXISTS — an X11 backend needs the event loop to add its own
+	 * descriptor to. Returns 0 on success. */
+	int (*start)(struct aws_server *server);
+	/* PUT THE FRAMEBUFFER ON THE DISPLAY. Called after every composite, so it must be cheap enough to call
+	 * sixty times a second; a backend with nothing to do (headless) leaves it NULL. */
+	void (*present)(struct aws_server *server);
+	/* GIVE BACK WHATEVER `start` TOOK. */
+	void (*stop)(struct aws_server *server);
+
+	void *data;				/* the backend's own state */
+};
+
+/* THE OUTPUT GLOBAL'S OWN STATE, which is a wl_output resource and nothing else: the size belongs to the
+ * backend, because the backend is what knows it. */
+struct aws_output {
+	struct wl_resource *resource;
 };
 
 struct aws_server {
@@ -98,6 +123,10 @@ struct aws_server {
 	struct wl_list toplevels;
 	unsigned int toplevel_count;		/* for the cascade */
 
+	int requested_width;			/* what the caller asked for, before a backend adjusted it */
+	int requested_height;
+
+	struct aws_backend backend;
 	struct aws_output output;
 
 	struct wl_resource *keyboard_focus;	/* the wl_keyboard resource that has focus, or NULL */
@@ -110,7 +139,7 @@ struct aws_server {
 };
 
 /* server.c */
-struct aws_server *aws_server_create(int width, int height);
+struct aws_server *aws_server_create(const char *backend_name, int width, int height);
 void aws_server_destroy(struct aws_server *server);
 void aws_server_schedule_render(struct aws_server *server);
 
@@ -118,10 +147,21 @@ void aws_server_schedule_render(struct aws_server *server);
 void aws_compositor_init(struct aws_server *server);
 void aws_xdg_shell_init(struct aws_server *server);
 
-/* output.c — the output, the compositing, and the screenshot */
+/* output.c — the wl_output global, the compositing, and the screenshot */
 void aws_output_init(struct aws_server *server);
 void aws_output_render(struct aws_server *server);
 int aws_output_write_ppm(struct aws_server *server, const char *path);
+
+/* backend.c — choosing one, and the two calls the event loop makes */
+int aws_backend_init(struct aws_server *server, const char *name, int width, int height);
+void aws_backend_present(struct aws_server *server);
+void aws_backend_shutdown(struct aws_server *server);
+const char *aws_backend_names(void);
+
+/* EACH BACKEND FILLS IN `server->backend` AND ANSWERS 0, or answers non-zero and says why on stderr. */
+int aws_backend_headless_start(struct aws_server *server);
+int aws_backend_x11_start(struct aws_server *server);
+
 
 /* seat.c — the seat, and the keymap this version can honestly supply */
 void aws_seat_init(struct aws_server *server);
