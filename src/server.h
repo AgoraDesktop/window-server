@@ -181,6 +181,7 @@ const char *aws_backend_names(void);
 /* EACH BACKEND FILLS IN `server->backend` AND ANSWERS 0, or answers non-zero and says why on stderr. */
 int aws_backend_headless_start(struct aws_server *server);
 int aws_backend_x11_start(struct aws_server *server);
+int aws_backend_drm_start(struct aws_server *server);
 
 
 /* seat.c — the seat: the devices, the focus, and the keymap. */

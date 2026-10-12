@@ -38,6 +38,8 @@ pkg_check_modules(X11 IMPORTED_TARGET x11)
 # AND libinput, ALSO OPTIONAL, for reading the machine's own devices. libudev comes with it.
 pkg_check_modules(LIBINPUT IMPORTED_TARGET libinput)
 pkg_check_modules(LIBUDEV IMPORTED_TARGET libudev)
+# AND libdrm, OPTIONAL, for the DRM/KMS output — the shipping backend.
+pkg_check_modules(DRM IMPORTED_TARGET libdrm)
 find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
 
 find_file(XDG_SHELL_XML
@@ -80,6 +82,14 @@ target_include_directories(window-server PRIVATE
 target_link_libraries(window-server PRIVATE
   PkgConfig::WAYLAND_SERVER
   PkgConfig::XKBCOMMON)
+
+if(DRM_FOUND)
+  target_compile_definitions(window-server PRIVATE AWS_HAVE_DRM)
+  target_link_libraries(window-server PRIVATE PkgConfig::DRM)
+  message(STATUS "window-server: the drm (KMS) backend is built in")
+else()
+  message(STATUS "window-server: no libdrm — no drm backend")
+endif()
 
 if(LIBINPUT_FOUND AND LIBUDEV_FOUND)
   target_compile_definitions(window-server PRIVATE AWS_HAVE_LIBINPUT)

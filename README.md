@@ -120,7 +120,39 @@ the group `rw` is already there, and nothing else has to change.
 Notice what is NOT wrong: udev finds the devices, libinput builds them, and the seat assignment succeeds. The
 failure is one `open()` and it is the operating system's answer rather than the compositor's.
 
-### 5. It is tested without the AppKit
+### 5. DRM/KMS: written, and unrunnable on a machine with no KMS
+
+`--backend drm` is the shipping backend: it opens a card, takes DRM master, allocates a **dumb buffer**, maps
+it, points a CRTC at it and hands the mapping to the compositing loop — so frames are written straight onto the
+screen with no copy, no GBM, no EGL and no page flipping. What that costs is tearing, which is the honest first
+version; `drmModePageFlip` with two buffers is the next refinement and the backend interface already has the
+shape for it (`present` exists and is simply unused).
+
+**Two things it must do that a windowed backend never does**, and both are safety rather than features:
+
+- **It takes DRM master**, the kernel's one-claimant lock on the device. An X server or another compositor
+  holding it makes this FAIL and say so — which is what makes the backend safe to start by accident: a
+  compositor cannot quietly take a display away from the session using it.
+- **It puts the previous mode back on the way out**, so leaving is not a screen left in a state only a reboot
+  fixes.
+
+**MEASURED, AND THIS MACHINE HAS NO KMS TO DRIVE:**
+
+```
+$ ./build/window-server --backend drm
+window-server: /dev/dri/card0 has no KMS resources at all. On a machine with the proprietary NVIDIA
+                driver this is KMS being OFF IN THE KERNEL: `nvidia_drm.modeset=1` ...
+exit=1
+
+$ ls /sys/class/drm/card0-DP-* | wc -l     -> 0     (no connectors, no CRTCs)
+```
+
+The card can render and cannot display, which is the proprietary NVIDIA driver's default. There is no `vkms`
+virtual-KMS module on this machine to test against either. So the backend is built, links, enumerates, and
+**refuses with the reason** — and the paths to making it testable are `nvidia_drm.modeset=1` (a kernel module
+parameter plus an initramfs rebuild and a reboot) or installing `vkms`.
+
+### 6. It is tested without the AppKit
 
 `ctest` — the server, a client that is nothing but the protocol, and a check that reads the server's own
 screenshot:
@@ -142,10 +174,11 @@ The server does **not** depend on `libagora-app` — the dependency runs the oth
 Each of these is recorded at the code that would have to change (`src/server.h`), because an absent feature
 that is written down is a decision and one that is not is a surprise.
 
-- **No real output.** There are two backends and neither is the shipping one: `headless` is a framebuffer in
-  this process, and `x11` is a nested window on an X server. A **DRM/KMS** backend is the real one and is not
-  written. A backend is a place to put pixels — a width, a height and a buffer — which is what makes a new one
-  a file (`src/backend-*.c`) rather than a change to the compositor.
+- **Three backends, and the shipping one cannot be tested on every machine.** `headless` is a framebuffer in
+  this process, `x11` is a nested window on an X server, and `drm` drives a real display through Kernel Mode
+  Setting. The first two run anywhere; the third needs a KMS device, and see below for what happens when there
+  is not one. A backend is a place to put pixels — a width, a height and a buffer — which is what makes a new
+  one a file (`src/backend-*.c`) rather than a change to the compositor.
 - **Input has two sources and the OUTPUT does not decide which.** `--input libinput` reads the machine's own
   devices through udev and logind; `--input host` takes the events the nested backend's window is given. They
   are mutually exclusive — both feed one seat, and a device read twice is a pointer that moves at double speed

@@ -22,7 +22,7 @@
 
 const char *aws_backend_names(void)
 {
-	return "headless, x11";
+	return "headless, x11, drm";
 }
 
 int aws_backend_init(struct aws_server *server, const char *name, int width, int height)
@@ -38,6 +38,9 @@ int aws_backend_init(struct aws_server *server, const char *name, int width, int
 	}
 	if (strcmp(name, "x11") == 0) {
 		return aws_backend_x11_start(server);
+	}
+	if (strcmp(name, "drm") == 0) {
+		return aws_backend_drm_start(server);
 	}
 	fprintf(stderr, "window-server: no output backend named '%s' (have: %s)\n", name, aws_backend_names());
 	return -1;

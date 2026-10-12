@@ -31,8 +31,8 @@
 static void usage(const char *program)
 {
 	fprintf(stderr,
-		"usage: %s [--backend NAME] [--width W] [--height H] [--socket NAME] [--frames N]\n"
-		"          [--screenshot PATH.ppm]\n"
+		"usage: %s [--backend NAME] [--input NAME] [--width W] [--height H] [--socket NAME]\n"
+		"          [--frames N] [--screenshot PATH.ppm]\n"
 		"  --backend NAME    where the pixels go: %s (default headless)\n"
 		"  --input NAME      where input comes from: %s (default libinput)\n"
 		"  --width/--height  the output's size, in pixels (default 1280x720)\n"
