@@ -136,14 +136,14 @@ shape for it (`present` exists and is simply unused).
 - **It puts the previous mode back on the way out**, so leaving is not a screen left in a state only a reboot
   fixes.
 
-**IT DOES NOT YET PUT ANYTHING ON A SCREEN, AND THAT IS MEASURED RATHER THAN UNKNOWN.** Everything below works
-up to the modeset and the modeset is inert on this driver — see "the legacy path is accepted and does not
-display" below. The evidence that follows is what the COMPOSITOR did; it is not evidence that light came out of
-a monitor, which is a thing only a person looking at the screen can say.
+**IT USES THE ATOMIC API, AND THAT REPLACEMENT IS NOT YET CONFIRMED ON A SCREEN.** The legacy path was measured
+to be inert on this driver (see below) and has been replaced by `drmModeAtomicCommit`. Everything up to the
+commit is verified by the dry run; **the commit itself has not been run**, because its failure mode is the
+display of the person running it.
 
-**AND IT DRIVES A REAL DISPLAY** *(this claim was made before it was checked, and it was wrong — see below)*.
-With KMS enabled on the card, `--backend drm` takes the monitor, composites into a kernel dumb buffer, and gives
-the mode back on the way out:
+**AND THE CLAIM BELOW WAS MADE ONCE WITHOUT BEING CHECKED, AND WAS WRONG** — the numbers are what the
+COMPOSITOR did, not evidence that light came out of a monitor, which is a thing only a person looking at the
+screen can say:
 
 ```
 $ ./build/window-server --backend drm --frames 120 &
@@ -167,7 +167,7 @@ before anything was allowed to touch a screen:
   Master was taken and is given back; nothing was set on the CRTC.
 ```
 
-**THE LEGACY PATH IS ACCEPTED AND DOES NOT DISPLAY, which is the state of this backend.** `drmModeSetCrtc`
+**THE LEGACY PATH IS ACCEPTED AND DOES NOT DISPLAY, WHICH IS WHY THE BACKEND IS ATOMIC NOW.** `drmModeSetCrtc`
 returns 0 and `drmModeGetCrtc` then reports this framebuffer on this CRTC — and no monitor changes. The
 driver's own state says why:
 
@@ -182,9 +182,20 @@ Nothing is bound to anything in the legacy model, and a desktop is nonetheless o
 solid red, held it for eight seconds and called `drmModeDirtyFB` produced NO CHANGE ON ANY MONITOR, which is
 what settled it.
 
-The fix is `drmModeAtomicCommit` — the connector's `CRTC_ID`, the CRTC's `MODE_ID` blob and `ACTIVE`, and the
-primary plane's `FB_ID`/`CRTC_ID`/`SRC`/`CRTC` rectangles, committed with `ALLOW_MODESET` — plus
-`drmModeDirtyFB` in `present` so the driver is told the buffer changed. Neither is written.
+`drmModeAtomicCommit` is what this backend does now: the connector's `CRTC_ID`, the CRTC's `MODE_ID` blob and
+`ACTIVE`, and the primary plane's `FB_ID`/`CRTC_ID`/`SRC`/`CRTC` rectangles, committed with `ALLOW_MODESET` —
+plus `drmModeDirtyFB` in `present`, because a driver has to be TOLD the memory it is scanning has changed or it
+shows one frame and never another. The dry run reports all of it:
+
+```
+connector   77 (DVI-D), 11 mode(s)      mode  1920x1080 (PREFERRED)      crtc  42
+plane       36 (PRIMARY)                framebuffer 92 (XRGB8888), mode blob 94
+```
+
+**RELEASING THE DISPLAY IS PART OF THE MODESET AND HAS THE SAME RISK.** On the way out the CRTC is turned off
+and the connector detached — before the framebuffer and the buffer under it are destroyed, because a CRTC still
+scanning them out makes that destruction wrong. If X is not the DRM master (and on this machine it is not, which
+is why `drmSetMaster` succeeds), it may not re-assert afterwards, and the way back is a VT switch.
 
 **MEASURED, AND A MACHINE WITH NO KMS SAYS SO:**
 
