@@ -225,6 +225,10 @@ int aws_backend_drm_start(struct aws_server *server);
 /* shell.c — agora_shell: the frames, the levels and the work area the Mac's model needs. */
 void aws_shell_init(struct aws_server *server);
 void aws_shell_reserved(struct aws_server *server, int *x, int *y, int *width, int *height);
+/* **WHERE AN APPLICATION'S OWN MENUS MAY BEGIN** — the strip minus the System menu's square. The one number about
+ * the bar that a client cannot derive, because the System menu's width is the server's. See `agora-shell.xml`. */
+void aws_shell_menu_bar_area(struct aws_server *server, int *x, int *y, int *width, int *height);
+
 /* The packing of the status area, which a client adding or removing an item has just invalidated. */
 void aws_shell_place_status_items(struct aws_server *server);
 

@@ -89,6 +89,27 @@
       <arg name="width" type="int"/>
       <arg name="height" type="int"/>
     </event>
+
+    <event name="menu_bar_area">
+      <description summary="the part of the menu bar an application's own menus may use">
+        **THE ONE NUMBER ABOUT THE MENU BAR THAT AN APPLICATION CANNOT DERIVE, AND THE REASON THIS EVENT EXISTS.**
+        The server owns the bar's STRIP and the SYSTEM MENU at its left. Everything to the right of that square is
+        where an application's own menus go — AND THE APPLICATION DRAWS THEM, because they are its menus. This event
+        says where they may begin and nothing else: what goes in the space, and how wide each title is, is the
+        application's business.
+
+        A CLIENT CANNOT WORK THIS OUT FOR ITSELF. The System menu's width is the server's, and it is the sort of
+        number that changes with the system's language, its input methods, or a decision made in `window-server` —
+        so an application that guessed would put its first menu UNDER the System menu the first time that width
+        changed, and nothing would tell it. The work area above cannot carry it either: that is a VERTICAL reserve,
+        and the Mac's `-visibleFrame` starts at x = 0 because the bar spans the whole screen. Two different
+        questions, two different events.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </event>
   </interface>
 
   <interface name="agora_window" version="1">

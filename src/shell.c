@@ -62,6 +62,22 @@ void aws_shell_reserved(struct aws_server *server, int *x, int *y, int *width, i
 	}
 }
 
+/* **THE MENU BAR'S USABLE REGION: THE STRIP MINUS THE SERVER'S OWN PART.** The server owns the bar and the System
+ * menu's square; an application's own menus begin where that square ends and run to the output's right edge. It is
+ * sent beside the work area because a client that has just asked where it may put things is asking both questions
+ * at once — and they are two questions: the work area is a VERTICAL reserve for windows, and this is a HORIZONTAL
+ * one for the bar. */
+void aws_shell_menu_bar_area(struct aws_server *server, int *x, int *y, int *width, int *height)
+{
+	*x = AWS_SYSTEM_MENU_WIDTH;
+	*y = 0;
+	*width = server->backend.width - AWS_SYSTEM_MENU_WIDTH;
+	*height = AWS_MENU_BAR_HEIGHT;
+	if (*width < 0) {
+		*width = 0;
+	}
+}
+
 /* ---------------------------------------------------------------------------------------------------
  * agora_output
  * --------------------------------------------------------------------------------------------------- */
@@ -89,6 +105,8 @@ static void bind_agora_output(struct wl_client *client, void *data, uint32_t ver
 	/* SENT ON BIND, because a client that has just asked for the work area is a client that is about to place
 	 * itself against it. */
 	agora_output_send_work_area(resource, x, y, width, height);
+	aws_shell_menu_bar_area(server, &x, &y, &width, &height);
+	agora_output_send_menu_bar_area(resource, x, y, width, height);
 	/* **AN EVENT-ONLY INTERFACE HAS NO IMPLEMENTATION STRUCT**, which is not an inconvenience but the generated
 	 * header telling the truth: the server never RECEIVES anything on this object, so there is no vtable to
 	 * fill and `NULL` is what says so. */
