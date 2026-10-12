@@ -30,13 +30,15 @@
  *
  *     NOTHING HERE GRABS A DEVICE. `libinput_device_grab` is never called, so the host session keeps working
  *     while this compositor reads the same events — which is what makes running it on a real desktop safe.
- *   - NO DRAWING OF ITS OWN. A Mac-like window server owns the menu bar, the dock and the window frames, and
- *     this owns none of them: it composites client buffers and paints a background. That is why it takes no
- *     drawing library yet — the row copy below is the whole of its drawing. A drawing library arrives with the
- *     first thing that has to be drawn.
- *   - NO POLICY. Every toplevel is placed by a cascade and sized by its client. Placement, stacking, the menu
- *     bar's reserve and the dock's are window-management POLICY, and policy is what this version deliberately
- *     has none of.
+ *   - IT DRAWS ITS OWN FURNITURE AND NOTHING ELSE. A Mac-like window server owns the menu bar, the dock and the
+ *     window frames. This one fills the menu bar's STRIP — the first pixels here that are not a client's — and
+ *     owns no more than that: the windows are the applications'. It still takes no drawing library, because a
+ *     filled strip is a row loop. **ONLY THE STRIP IS FURNITURE**: everything IN it is a client's, and a server
+ *     that drew an item would be making the mistake the dock rule exists to prevent. See DESIGN.md.
+ *   - NO POLICY ABOUT WINDOWS, AND EXACTLY ONE ABOUT THE SCREEN. Placement, stacking and sizing are the
+ *     APPLICATION's: no cascade, no tiling, and a frame is acted on as given. What the server does decide is
+ *     what the SCREEN reserves for the furniture it owns — a different kind of question, because an application
+ *     cannot know how tall the menu bar is.
  *
  * THE ONE THING IT DOES INSIST ON is that the client's frame loop works: `wl_surface.frame` callbacks are sent
  * when a frame has been composited. Without them a client draws once and waits forever, which is exactly what
@@ -88,6 +90,10 @@ struct aws_surface {
 	int frame_width;
 	int frame_height;
 	int level;
+	/* **AND THE ONE KIND OF WINDOW WHOSE PLACEMENT IS NOT THE APPLICATION'S.** `NSStatusItem` has a length and
+	 * no position, so its width is the whole of what its client is asked for and the packing is `shell.c`'s.
+	 * Zero means an ordinary window, placed by its own frame like every other one. */
+	int status_length;
 	struct wl_resource *agora_window;	/* the role, when this surface's client is an Agora one */
 
 	int x;					/* where the compositor has put it, in output coordinates */
@@ -210,6 +216,8 @@ int aws_backend_drm_start(struct aws_server *server);
 /* shell.c — agora_shell: the frames, the levels and the work area the Mac's model needs. */
 void aws_shell_init(struct aws_server *server);
 void aws_shell_reserved(struct aws_server *server, int *x, int *y, int *width, int *height);
+/* The packing of the status area, which a client adding or removing an item has just invalidated. */
+void aws_shell_place_status_items(struct aws_server *server);
 
 /* seat.c — the seat: the devices, the focus, and the keymap. */
 void aws_seat_init(struct aws_server *server);

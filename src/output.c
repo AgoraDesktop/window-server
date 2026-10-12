@@ -59,6 +59,16 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 	width = wl_shm_buffer_get_width(shm);
 	height = wl_shm_buffer_get_height(shm);
 	stride = wl_shm_buffer_get_stride(shm);
+	/* **AND THE FRAME IS THE WINDOW'S BOUNDS, SO A BIGGER BUFFER IS CLIPPED TO IT.** MEASURED, not assumed: a
+	 * status item's buffer is 320x200 while the server placed it in a 64x24 box, and without this the item ran
+	 * 200 rows down the screen — a status item taller than the menu bar it is drawn in. The frame is what the
+	 * server was told the window IS, so anything outside it is not part of the window. */
+	if (surface->frame_width > 0 && width > surface->frame_width) {
+		width = surface->frame_width;
+	}
+	if (surface->frame_height > 0 && height > surface->frame_height) {
+		height = surface->frame_height;
+	}
 	transparent = wl_shm_buffer_get_format(shm) == WL_SHM_FORMAT_ARGB8888;
 
 	wl_shm_buffer_begin_access(shm);

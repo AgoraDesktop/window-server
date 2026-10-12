@@ -14,7 +14,8 @@
  * commit is what asks for a role to be configured, and a client that attaches first is committing before the
  * compositor has said the surface may be shown.
  *
- *   client [--width W] [--height H] [--frames N] [--colour RRGGBB]
+ *   client [--width W] [--height H] [--frames N] [--colour RRGGBB] [--x X] [--y Y] [--level L]
+ *          [--status-length N]
  */
 
 #define _GNU_SOURCE
@@ -47,6 +48,7 @@ struct client {
 
 	int width;
 	int height;
+	int status_length;	/* non-zero: a status item the SERVER places, and the frame asked for is ignored */
 	int configured;
 	int frames;
 	int max_frames;
@@ -191,6 +193,8 @@ int main(int argc, char **argv)
 			client.frame_y = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--level") == 0 && i + 1 < argc) {
 			client.level = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "--status-length") == 0 && i + 1 < argc) {
+			client.status_length = atoi(argv[++i]);
 		}
 	}
 
@@ -214,6 +218,11 @@ int main(int argc, char **argv)
 	 * exactly there, which is the whole claim being made. */
 	client.window = agora_shell_get_window(client.shell, client.surface);
 	agora_window_set_frame(client.window, client.frame_x, client.frame_y, client.width, client.height);
+	/* **AND IT ASKS FOR A FRAME AS WELL, ON PURPOSE.** What is measured then is the SERVER's placement winning,
+	 * rather than a client that happened never to ask to be anywhere. */
+	if (client.status_length > 0) {
+		agora_window_set_status_item(client.window, client.status_length);
+	}
 	agora_window_set_level(client.window, client.level);
 	agora_window_set_title(client.window, "window server test client");
 	agora_window_set_app_id(client.window, "org.agora.test-client");

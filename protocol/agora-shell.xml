@@ -111,6 +111,21 @@
       <arg name="height" type="int"/>
     </request>
 
+    <request name="set_status_item">
+      <description summary="make this window an item the SERVER places in the status area">
+        **THE ONE PLACE THE FRAME RULE DOES NOT REACH, AND THE HEADER IS WHY.** `NSStatusItem` declares `length`,
+        `title`, `image`, `menu`, `target`, `action`, `highlightMode` and `view` — AND NO POSITION OF ANY KIND.
+        A position is what an application placing its own item would need and could not have: it does not know
+        what else is in the status bar, so it cannot know where its own item goes. So THE APPLICATION SAYS HOW
+        LONG ITS ITEM IS AND THE SERVER PACKS IT, from the right edge of the menu bar leftwards, in the order the
+        items were made. `set_frame` will not move such a window afterwards, because a status item is in the menu
+        bar by definition. The two sentinel lengths AppKit has (`NSVariableStatusItemLength`,
+        `NSSquareStatusItemLength`) are its own business: it resolves them to a width before asking, since only it
+        knows how wide its view wants to be.
+      </description>
+      <arg name="length" type="int" summary="how wide the item is, in output coordinates"/>
+    </request>
+
     <request name="set_level">
       <description summary="where the window sits in the stack">
         `NSWindow.setLevel:`, an INTEGER and not a member of a fixed set — so a menu window, a status item and

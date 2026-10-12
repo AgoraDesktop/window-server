@@ -5,6 +5,9 @@ THE ASSERTION IS AN ORDER, NOT A PICTURE. Two clients draw flat colours and OVER
 THE HIGHER LEVEL IS ON TOP — while being the one that was created FIRST. That disagreement is deliberate: with
 the levels agreeing with the creation order this would pass whether the server ordered by level or not, which is
 the difference between a test and a decoration.
+
+AND A THIRD CLIENT IS NOT A WINDOW AT ALL: it is a STATUS ITEM, which the server PLACES — the client asks for a
+frame at (0,0) as well, ON PURPOSE, so every assertion about where it ended up is the server's answer winning.
 """
 import sys
 from PIL import Image
@@ -18,13 +21,16 @@ WINDOW = (320, 200)
 
 
 def main():
-    if len(sys.argv) < 5:
-        print("usage: check.py SHOT.ppm TOP-RRGGBB BOTTOM-RRGGBB WxH")
+    if len(sys.argv) < 7:
+        print("usage: check.py SHOT.ppm TOP-RRGGBB BOTTOM-RRGGBB WxH STATUS-RRGGBB STATUS-LENGTH")
         return 2
     path, top, bottom, size = sys.argv[1], int(sys.argv[2], 16), int(sys.argv[3], 16), sys.argv[4]
     ctop = ((top >> 16) & 0xFF, (top >> 8) & 0xFF, top & 0xFF)
     cbot = ((bottom >> 16) & 0xFF, (bottom >> 8) & 0xFF, bottom & 0xFF)
     w, h = (int(v) for v in size.lower().split("x"))
+    status = int(sys.argv[5], 16)
+    status_len = int(sys.argv[6])
+    cstatus = ((status >> 16) & 0xFF, (status >> 8) & 0xFF, status & 0xFF)
 
     im = Image.open(path).convert("RGB")
     px = im.load()
@@ -47,8 +53,22 @@ def main():
         # check is stronger for it, since a window at (0,0) would once have been visible and is now covered.
         ("nothing is at the origin, where a cascade would have put them",
          px[2, MENU_BAR_HEIGHT + 2] == BACKGROUND and px[42, MENU_BAR_HEIGHT + 2] == BACKGROUND),
-        (f"the SERVER's menu bar strip is the top {MENU_BAR_HEIGHT} rows",
-         all(px[x, strip_row] == MENU_BAR for x in range(0, 1280, 32))),
+        # **THE STRIP IS THE SERVER'S; WHAT IS IN IT IS A CLIENT'S.** So the strip is sampled only to the LEFT of
+        # the item — a sample taken through the item would be asserting the server's pixels were never covered,
+        # which is the opposite of what a status area is.
+        (f"the SERVER's menu bar strip is the top {MENU_BAR_HEIGHT} rows, left of the item",
+         all(px[x, strip_row] == MENU_BAR for x in range(0, 1280 - status_len, 32))),
+        # **AND THE ITEM, PLACED BY THE SERVER AT THE RIGHT EDGE.** It asked for a frame at (0,0) as well, so
+        # each of these is the server's placement winning rather than a client that never asked to be anywhere.
+        (f"the status item is at the RIGHT EDGE of the strip, {status_len} wide",
+         px[1280 - 2, MENU_BAR_HEIGHT // 2] == cstatus and
+         px[1280 - status_len + 2, MENU_BAR_HEIGHT // 2] == cstatus),
+        ("and it does not reach past its own left edge, where the strip shows",
+         px[1280 - status_len - 3, MENU_BAR_HEIGHT // 2] == MENU_BAR),
+        # Its buffer is 320x200 — BIGGER than the 64x24 box the server put it in — so this is the clipping, not
+        # the buffer, that keeps a status item inside the menu bar.
+        (f"and it is the menu bar's height and no taller — row {MENU_BAR_HEIGHT} below it is not the item",
+         px[1280 - 2, MENU_BAR_HEIGHT + 4] != cstatus),
         (f"and it ends exactly there — row {MENU_BAR_HEIGHT} is not strip",
          px[640, MENU_BAR_HEIGHT + 1] != MENU_BAR),
         ("and the rest is the compositor's own background", px[5, 715] == BACKGROUND and

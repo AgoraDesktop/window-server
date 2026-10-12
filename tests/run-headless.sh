@@ -14,6 +14,8 @@ CLIENT_W=320
 CLIENT_H=200
 TOP_COLOUR=FF0000
 BOTTOM_COLOUR=0000FF
+STATUS_COLOUR=00FF00
+STATUS_LENGTH=64
 
 cleanup() {
 	[ -n "${SPID:-}" ] && kill "${SPID}" 2>/dev/null
@@ -55,13 +57,19 @@ sleep 0.5
 WAYLAND_DISPLAY="${SOCK}" "${CLIENT}" --width "${CLIENT_W}" --height "${CLIENT_H}" \
 	--colour "${BOTTOM_COLOUR}" --x 150 --y 110 --level 0 --frames 100000 >/dev/null 2>&1 &
 SECOND=$!
+# **AND A THIRD CLIENT THAT IS NOT A WINDOW AT ALL.** It asks for a frame AND to be a status item, so what is
+# measured is the SERVER's placement winning rather than a client that never asked to be anywhere. Nothing
+# overlaps the bar, so this tests the packing without depending on the other two.
+WAYLAND_DISPLAY="${SOCK}" "${CLIENT}" --width "${CLIENT_W}" --height "${CLIENT_H}" \
+	--colour "${STATUS_COLOUR}" --x 0 --y 0 --status-length "${STATUS_LENGTH}" --frames 100000 >/dev/null 2>&1 &
+THIRD=$!
 # **AND THE RUN LASTS LONG ENOUGH FOR BOTH TO BE ON THE SCREEN** before the server is asked to stop. Then the
 # signal stops the LOOP (see `on_signal` in main.c), the ordinary exit path runs, and the screenshot is written
 # with both windows in it.
 sleep 2
 kill -TERM "${SPID}" 2>/dev/null
 wait "${SPID}" 2>/dev/null
-kill "${FIRST}" "${SECOND}" 2>/dev/null
+kill "${FIRST}" "${SECOND}" "${THIRD}" 2>/dev/null
 client_rc=0
 
 # THE SERVER EXITS BY ITSELF once it has composited its frames, which is what makes this a test rather than a
@@ -78,4 +86,5 @@ if [ ! -f "${SHOT}" ]; then
 	exit 1
 fi
 
-"${PYTHON}" "${CHECKER}" "${SHOT}" "${TOP_COLOUR}" "${BOTTOM_COLOUR}" "${CLIENT_W}x${CLIENT_H}"
+"${PYTHON}" "${CHECKER}" "${SHOT}" "${TOP_COLOUR}" "${BOTTOM_COLOUR}" "${CLIENT_W}x${CLIENT_H}" \
+	"${STATUS_COLOUR}" "${STATUS_LENGTH}"

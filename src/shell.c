@@ -105,6 +105,32 @@ static void window_destroy(struct wl_client *client, struct wl_resource *resourc
 	wl_resource_destroy(resource);
 }
 
+/* **THE ITEMS, PACKED FROM THE RIGHT EDGE LEFTWARDS — THE MAC'S ORDER.** The first item made is the RIGHTMOST,
+ * which is why the walk is in MAPPING order: that list is the stacking order, and an item nobody raised keeps the
+ * order it was made in. Each is as tall as the menu bar, because a status item IS the menu bar's height by
+ * definition — a client that could say otherwise could put a window under the bar it is drawn in. */
+void aws_shell_place_status_items(struct aws_server *server)
+{
+	struct aws_surface *surface;
+	/* The screen's size is the BACKEND's — `struct aws_output` is only the wl_output resource. */
+	int right = server->backend.width;
+
+	wl_list_for_each(surface, &server->surfaces, link) {
+		if (surface->status_length <= 0) {
+			continue;
+		}
+		right -= surface->status_length;
+		if (right < 0) {
+			right = 0;	/* an item wider than the screen goes to the left edge and is clipped there */
+		}
+		surface->x = right;
+		surface->y = 0;
+		surface->frame_width = surface->status_length;
+		surface->frame_height = AWS_MENU_BAR_HEIGHT;
+	}
+	aws_server_schedule_render(server);
+}
+
 /* **THE APPLICATION'S FRAME, WRITTEN DOWN AND HONOURED.** Not a hint, not a request to be negotiated: this is the
  * Mac's `setFrame:display:` and the server's whole part in it is remembering the answer. */
 static void window_set_frame(struct wl_client *client, struct wl_resource *resource, int32_t x, int32_t y,
@@ -120,7 +146,32 @@ static void window_set_frame(struct wl_client *client, struct wl_resource *resou
 	surface->y = (int)y;
 	surface->frame_width = (int)width;
 	surface->frame_height = (int)height;
+	/* AND A STATUS ITEM IS PUT BACK WHERE IT BELONGS. `set_frame` is not how an item is placed, so a client that
+	 * calls it anyway does not get to move one — the server's answer wins because there is no other answer it
+	 * could have. */
+	if (surface->status_length > 0) {
+		aws_shell_place_status_items(surface->server);
+		return;
+	}
 	aws_server_schedule_render(surface->server);
+}
+
+/* **THE ONE KIND OF WINDOW THE SERVER PLACES, AND THE HEADER SAYS WHY.** `NSStatusItem` has a LENGTH and no
+ * POSITION: an application does not know what else is in the status bar, so it cannot know where its own item
+ * goes. The application says how long; the server packs. That is why this is a KIND of window and not a frame.
+ *
+ * `length` is a width in output coordinates — the two sentinel lengths AppKit has are its own business. Zero or
+ * less takes the window back OUT of the status area, and it is an ordinary window again, placed by its frame. */
+static void window_set_status_item(struct wl_client *client, struct wl_resource *resource, int32_t length)
+{
+	struct aws_surface *surface = wl_resource_get_user_data(resource);
+
+	(void)client;
+	if (surface == NULL) {
+		return;
+	}
+	surface->status_length = (int)length > 0 ? (int)length : 0;
+	aws_shell_place_status_items(surface->server);
 }
 
 /* AN INTEGER, AND THE SERVER DOES NOT CARE WHICH ONE. The level names belong to the window server's vocabulary
@@ -191,6 +242,7 @@ static void window_set_app_id(struct wl_client *client, struct wl_resource *reso
 
 static const struct agora_window_interface agora_window_implementation = {
 	window_set_frame,
+	window_set_status_item,
 	window_set_level,
 	window_raise,
 	window_lower,
