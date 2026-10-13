@@ -222,6 +222,14 @@ int aws_backend_drm_start(struct aws_server *server);
 #define AWS_SYSTEM_MENU_BAR_GAP 3
 #define AWS_SYSTEM_MENU_GLYPH_COLOUR 0xFF303030u
 
+/* **AND THE AIR BETWEEN IT AND AN APPLICATION'S OWN MENUS, WHICH IS THE BAR'S AND NOT THE SQUARE'S.** The square is
+ * the System menu's — it is what a click on it hits — and widening it to make room would move the GLYPH with it,
+ * because the mark is centred in its square. The gap is a separate thing: the strip's own spacing, which the server
+ * owns because the server owns the strip, and which a client cannot guess any more than it can guess the square's
+ * width. It is part of the region `menu_bar_area` names, so the application's menus move right by exactly this much
+ * and nothing on the client side changes. */
+#define AWS_SYSTEM_MENU_GAP 8
+
 /* shell.c — agora_shell: the frames, the levels and the work area the Mac's model needs. */
 void aws_shell_init(struct aws_server *server);
 void aws_shell_reserved(struct aws_server *server, int *x, int *y, int *width, int *height);

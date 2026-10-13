@@ -69,9 +69,13 @@ void aws_shell_reserved(struct aws_server *server, int *x, int *y, int *width, i
  * one for the bar. */
 void aws_shell_menu_bar_area(struct aws_server *server, int *x, int *y, int *width, int *height)
 {
-	*x = AWS_SYSTEM_MENU_WIDTH;
+	/* **THE SQUARE, THE AIR, AND THEN THE APPLICATION'S MENUS.** The gap is added here rather than folded into
+	 * `AWS_SYSTEM_MENU_WIDTH` so that the two questions stay apart: how wide the System menu's own region is, and
+	 * how much room the bar leaves after it. MEASURED before this: the glyph ended at x = 21 and the first
+	 * application title began at x = 31, ten pixels of air in a bar that is one surface. */
+	*x = AWS_SYSTEM_MENU_WIDTH + AWS_SYSTEM_MENU_GAP;
 	*y = 0;
-	*width = server->backend.width - AWS_SYSTEM_MENU_WIDTH;
+	*width = server->backend.width - *x;
 	*height = AWS_MENU_BAR_HEIGHT;
 	if (*width < 0) {
 		*width = 0;
