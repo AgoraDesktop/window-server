@@ -240,12 +240,25 @@ void aws_output_render(struct aws_server *server)
 		 * finds the buffer busy, does nothing, and waits for a callback that will not come. MEASURED — this
 		 * is what stopped the AppKit at three frames. Releasing first means the client that hears the callback
 		 * can actually use what it hears. */
-				if (surface->current_buffer != NULL) {
-					wl_buffer_send_release(surface->current_buffer);
-				}
+				/* **THE RELEASE IS NOT HERE ANY MORE — see the sweep below.** Releasing inside the loop
+				 * released only the surfaces the loop REACHED, and released them exactly once; a surface it did
+				 * not reach kept its buffer for ever, which is a client waiting for a frame that never comes. */
 				/* AND THE FRAME CALLBACK GOES WITH THE COMPOSITE, NOT WITH THE COMMIT: the client may
 				 * draw again only once its picture is on screen. */
 				aws_surface_frame_done(surface, time);
+			}
+		}
+
+		/* **ONE RELEASE PER SURFACE PER PASS, WHICHEVER LEVEL IT IS AT.** A Wayland buffer belongs to the
+		 * compositor from `attach` until it is released, so a surface the level loop SKIPS keeps its buffer for
+		 * ever — and its client waits for a frame callback that only comes when that buffer is released.
+		 * MEASURED, from a live session: `frame_ready=0 busy=1` for a window whose paint was refused over and over,
+		 * because the compositor had never let go. THE RELEASE IS NOT A PAINTING: a hidden window, a window at a
+		 * level nothing draws, a window whose buffer the loop reached — all of them are released here, once, and
+		 * the frames that were drawn were already sent their callbacks above. */
+		wl_list_for_each(surface, &server->surfaces, link) {
+			if (surface->current_buffer != NULL) {
+				wl_buffer_send_release(surface->current_buffer);
 			}
 		}
 
