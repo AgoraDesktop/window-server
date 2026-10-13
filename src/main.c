@@ -123,7 +123,17 @@ int main(int argc, char **argv)
 	wl_event_loop_add_signal(server->loop, SIGINT, on_signal, server);
 	wl_event_loop_add_signal(server->loop, SIGTERM, on_signal, server);
 	while (server->running) {
-		if (wl_event_loop_dispatch(server->loop, -1) < 0) {
+		/* **A RENDER THAT IS DUE DOES NOT WAIT FOR AN EVENT, AND THAT IS THE WHOLE OF A BUG A PERSON SPOTTED.**
+		 * A timeout of -1 means BLOCK UNTIL SOMETHING HAPPENS — and the only things that happen are a client's
+		 * commit and, on the X11 backend, AN X EVENT, WHICH A MOUSE MOTION IS. MEASURED, from a session driven by
+		 * hand: a menu opened by a click did not appear until the mouse moved, its rows did not highlight on the
+		 * way over, and a drag made it show up — because THE SERVER WAS ONLY EVER RENDERING WHEN THE POINTER
+		 * MOVED. A window created at startup (the menu bar's) never showed it, which is the asymmetry that gave it
+		 * away. When a render is pending and the backend can take it, the loop polls instead: the work is DUE, and
+		 * waiting for the next input to do work that is already waiting is how a screen comes to lag behind a hand
+		 * by one gesture. */
+		if (wl_event_loop_dispatch(server->loop,
+					   (server->render_pending && !aws_backend_busy(server)) ? 0 : -1) < 0) {
 			break;
 		}
 		wl_display_flush_clients(server->display);
