@@ -94,6 +94,10 @@ struct aws_surface {
 	 * no position, so its width is the whole of what its client is asked for and the packing is `shell.c`'s.
 	 * Zero means an ordinary window, placed by its own frame like every other one. */
 	int status_length;
+	/* **WHETHER THE APPLICATION WANTS THIS ON THE SCREEN.** A surface with a buffer is not necessarily a surface
+	 * anyone should see: `-orderOut:` is a real thing, and without this the server painted every window a client had
+	 * ever hidden — which is what "the menus never close" looks like from the outside. */
+	int visible;
 	struct wl_resource *agora_window;	/* the role, when this surface's client is an Agora one */
 
 	int x;					/* where the compositor has put it, in output coordinates */

@@ -204,7 +204,13 @@ void aws_output_render(struct aws_server *server)
 		}
 		for (level = lowest; level <= highest; level++) {
 			wl_list_for_each(surface, &server->surfaces, link) {
-				if (!surface->mapped || surface->level != level) {
+				/* **AND A WINDOW THE APPLICATION HAS TAKEN OFF THE SCREEN IS NOT COMPOSITED — AND IS NOT
+				 * RELEASED EITHER.** `-orderOut:` is a real door, and without this the server painted every window
+				 * a client had ever hidden: MEASURED, closing a menu left its panel on the glass, and the ones
+				 * behind it accumulated until the run loop was repainting a stack of dead menus every pass. Its
+				 * buffer is deliberately NOT released here: a hidden window is not drawing, and the release that
+				 * would let it draw again belongs with the frame callback that comes when it is shown. */
+				if (!surface->mapped || !surface->visible || surface->level != level) {
 					continue;
 				}
 				composite_surface(backend, surface);

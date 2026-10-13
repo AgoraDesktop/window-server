@@ -331,6 +331,7 @@ static void compositor_create_surface(struct wl_client *client, struct wl_resour
 		return;
 	}
 	surface->server = server;
+	surface->visible = 1;	/* a new surface is ON the screen until the application says otherwise */
 	surface->resource = wl_resource_create(client, &wl_surface_interface,
 					       wl_resource_get_version(resource), id);
 	if (surface->resource == NULL) {

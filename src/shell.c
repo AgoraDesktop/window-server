@@ -198,6 +198,20 @@ static void window_set_status_item(struct wl_client *client, struct wl_resource 
 	aws_shell_place_status_items(surface->server);
 }
 
+/* **AND WHETHER IT IS ON THE SCREEN AT ALL.** Not a hint and not negotiated: the application says and the server
+ * writes it down, exactly as it does with the frame and the level. */
+static void window_set_visible(struct wl_client *client, struct wl_resource *resource, int32_t visible)
+{
+	struct aws_surface *surface = wl_resource_get_user_data(resource);
+
+	(void)client;
+	if (surface == NULL) {
+		return;
+	}
+	surface->visible = visible ? 1 : 0;
+	aws_server_schedule_render(surface->server);
+}
+
 /* AN INTEGER, AND THE SERVER DOES NOT CARE WHICH ONE. The level names belong to the window server's vocabulary
  * and are chosen by the application; what this file does with the number is order by it. */
 static void window_set_level(struct wl_client *client, struct wl_resource *resource, int32_t level)
@@ -272,6 +286,7 @@ static const struct agora_window_interface agora_window_implementation = {
 	window_lower,
 	window_set_title,
 	window_set_app_id,
+	window_set_visible,	/* the protocol's order: this door is declared just before `destroy` */
 	window_destroy,
 };
 

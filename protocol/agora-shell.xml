@@ -193,6 +193,16 @@
       <arg name="app_id" type="string"/>
     </request>
 
+    <request name="set_visible">
+      <description summary="put this window on the screen, or take it off">
+        **THE DOOR `xdg-shell` DOES NOT HAVE, AND A REAL APPLICATION NEEDS EVERY DAY.** An `xdg_toplevel` is mapped
+        or destroyed, so a client that wants to hide a window must DESTROY it and build another to show it again —
+        and a menu that closes and reopens would make and throw away a surface each time. `-orderOut:` is not an
+        exotic door: it is what every menu, every sheet and every panel does when it goes away.
+      </description>
+      <arg name="visible" type="int" summary="zero takes it off the screen; anything else puts it back"/>
+    </request>
+
     <request name="destroy" type="destructor">
       <description summary="the window is gone">
         Destroys the object. The surface outlives it and may be given another role, as it may under
