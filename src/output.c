@@ -211,6 +211,25 @@ void aws_output_render(struct aws_server *server)
 				 * buffer is deliberately NOT released here: a hidden window is not drawing, and the release that
 				 * would let it draw again belongs with the frame callback that comes when it is shown. */
 				if (!surface->mapped || !surface->visible || surface->level != level) {
+					/* **A SURFACE WITH A BUFFER THAT IS BEING SKIPPED IS A CLIENT WAITING FOR EVER.** The buffer
+					 * belongs to the compositor from `attach` until this loop releases it — so a surface that never
+					 * reaches the release has a client that cannot draw again, and it will look like an application
+					 * that is merely slow. WHICH GUARD DID IT is the question, and this names it. */
+					/* **AND ONLY A SURFACE AT THIS PASS'S OWN LEVEL IS A SURPRISE.** The first version of this
+					 * fired for EVERY pass whose level differed from the surface's — which is every pass but one,
+					 * and it printed sixty thousand lines of ordinary behaviour. MEASURED, and two rounds went
+					 * into reading that noise as evidence. A surface that has a buffer, is mapped and visible,
+					 * and is at the level being drawn, and STILL does not get composited: that is the one that
+					 * would mean the range is wrong. */
+					if (getenv("AWS_COMPOSITE_DEBUG") != NULL && surface->current_buffer != NULL &&
+					    surface->level == level) {
+						fprintf(stderr, "  DIAG composite: SKIPPED a surface WITH A BUFFER — mapped=%d "
+								"visible=%d surface level=%d, this pass is level %d %s\n",
+							surface->mapped, surface->visible, surface->level, level,
+							(!surface->mapped) ? "<- NOT MAPPED"
+							: (!surface->visible) ? "<- NOT VISIBLE"
+							: "<- A DIFFERENT LEVEL, and no pass will reach it");
+					}
 					continue;
 				}
 				composite_surface(backend, surface);
@@ -229,6 +248,7 @@ void aws_output_render(struct aws_server *server)
 				aws_surface_frame_done(surface, time);
 			}
 		}
+
 	}
 }
 
