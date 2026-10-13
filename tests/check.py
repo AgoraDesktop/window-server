@@ -12,11 +12,11 @@ frame at (0,0) as well, ON PURPOSE, so every assertion about where it ended up i
 import sys
 from PIL import Image
 
-BACKGROUND = (48, 51, 56)        # aws_output.c's AWS_BACKGROUND
-MENU_BAR = (216, 216, 216)       # server.h's AWS_MENU_BAR_COLOUR — the strip the SERVER draws
+BACKGROUND = (42, 29, 13)        # aws_output.c's AWS_BACKGROUND — Argentum's wallpaper, flattened
+MENU_BAR = (235, 235, 235)       # server.h's AWS_MENU_BAR_COLOUR — Argentum's bar, drawn by the SERVER
 MENU_BAR_HEIGHT = 24
 SYSTEM_MENU_MID = 13             # the middle of the glyph in the System menu's square (server.h)
-GLYPH = (48, 48, 48)             # server.h's AWS_SYSTEM_MENU_GLYPH_COLOUR
+GLYPH = (0, 0, 0)                # server.h's AWS_SYSTEM_MENU_GLYPH_COLOUR — Argentum's ink
 TOP_AT = (100, 80)               # the first client's frame, asked for with agora_window.set_frame
 BOTTOM_AT = (150, 110)           # the second's — created LATER and at a LOWER level
 WINDOW = (320, 200)

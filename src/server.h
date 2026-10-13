@@ -211,7 +211,11 @@ int aws_backend_drm_start(struct aws_server *server);
  * placed under the bar or a bar over a window. It is the server's own furniture, so it is the server's constant;
  * a client asking `[[NSStatusBar systemStatusBar] thickness]` gets the same number through AppKit. */
 #define AWS_MENU_BAR_HEIGHT 24
-#define AWS_MENU_BAR_COLOUR 0xFFD8D8D8u
+/* **ARGENTUM'S PALETTE, AND THESE ARE ITS NUMBERS RATHER THAN ANYBODY'S TASTE IN THIS FILE.** Argentum is the
+ * design language this desktop is drawn in, and every value below was MEASURED from its sample rather than chosen
+ * here — the provenance is `ARGENTUM.md`, which records the mockup each one came from. A server that picked its own
+ * greys is how a menu bar comes to differ from the controls drawn under it by four counts. */
+#define AWS_MENU_BAR_COLOUR 0xFFEBEBEBu		/* Argentum: the bar's face, sampled 235,235,235 */
 
 /* **THE SYSTEM MENU, WHICH IS THE SERVER'S OWN.** A square at the left of the bar, and inside it the hamburger —
  * `☰`, U+2630 — which IS three horizontal bars, so it is drawn rather than typeset and needs no font. The three
@@ -220,7 +224,7 @@ int aws_backend_drm_start(struct aws_server *server);
 #define AWS_SYSTEM_MENU_GLYPH_WIDTH 16
 #define AWS_SYSTEM_MENU_BAR_THICKNESS 3
 #define AWS_SYSTEM_MENU_BAR_GAP 3
-#define AWS_SYSTEM_MENU_GLYPH_COLOUR 0xFF303030u
+#define AWS_SYSTEM_MENU_GLYPH_COLOUR 0xFF000000u	/* Argentum: the bar's ink, sampled pure black */
 
 /* **AND THE AIR BETWEEN IT AND AN APPLICATION'S OWN MENUS, WHICH IS THE BAR'S AND NOT THE SQUARE'S.** The square is
  * the System menu's — it is what a click on it hits — and widening it to make room would move the GLYPH with it,

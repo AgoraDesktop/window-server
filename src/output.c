@@ -30,7 +30,11 @@
 /* THE DESKTOP'S OWN COLOUR, for the area no client covers — and the one piece of "drawing" this version does.
  * A distinct colour rather than black, because a black background is indistinguishable from a client that
  * painted black, and this has to be checkable from a screenshot. */
-#define AWS_BACKGROUND 0xFF303338u
+/* **AND THE WALLPAPER, WHICH IN THE SAMPLE IS A GRADIENT AND IS ONE COLOUR HERE.** Argentum's desktop runs from a
+ * warm amber at the left edge — (72,36,14) and (108,55,29) — down to near-black at the bottom corners, (18,14,5).
+ * A flat fill is the honest first step and a vertical ramp is the next one; the samples are recorded in
+ * `ARGENTUM.md` so the next person does not have to re-measure the mockup to find them. */
+#define AWS_BACKGROUND 0xFF2A1D0Du
 
 static uint32_t aws_now_ms(void)
 {
