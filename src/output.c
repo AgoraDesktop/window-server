@@ -142,7 +142,12 @@ static void aws_output_draw_shadow(struct aws_backend *output, int x, int y, int
 	for (row = top; row < bottom; row++) {
 		int dy;
 
-		if (row < 0 || row >= output->height) {
+		/* **AND NOTHING BEHIND THE MENU BAR CASTS A SHADOW ONTO IT.** The bar is the server's own furniture and the
+		 * topmost thing on the screen; a pop-down menu opens with its top edge AT the bar's bottom, so its shadow
+		 * would otherwise paint UPWARDS across the strip — a dark band above every open menu, which reads as a dirty
+		 * bar rather than as a shadow under a window. THE BAR'S OWN SHADOW FALLS BELOW THE STRIP and is unaffected by
+		 * this line, because its rectangle begins at the strip's own bottom edge. */
+		if (row < AWS_MENU_BAR_HEIGHT || row >= output->height) {
 			continue;
 		}
 		dy = (row > cy ? row - cy : cy - row) - innerH;
@@ -270,7 +275,11 @@ void aws_output_render(struct aws_server *server)
 	 *
 	 * AND IT IS DRAWN FIRST, WHICH IS A DECISION RATHER THAN AN ORDER: a window may be given a frame that
 	 * overlaps the bar, because the application's frame is honoured, and until the strip has a LEVEL of its own
-	 * such a window covers it. The level is the next step and the honest place to leave it. */
+	 * such a window covers it. The level is the next step and the honest place to leave it. **AND A SHADOW IS THE
+	 * ONE THING THAT MAY NOT COVER IT**: a pop-down menu opens at the strip's bottom edge and its shadow would
+	 * otherwise be painted up across the bar before the bar's own window covers its own small part of it, so
+	 * `aws_output_draw_shadow` stops at the bar's bottom edge. The bar is above everything here; nothing behind it
+	 * may paint on it, and a shadow is something behind it. */
 	{
 		int row, column;
 
