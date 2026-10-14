@@ -142,6 +142,27 @@ int main(int argc, char **argv)
 		 * the DRM descriptor, which is on this loop, and the loop comes back round to here. That is the whole
 		 * difference from waiting inside `present`: the wait is spent in the event loop, where the rest of the
 		 * compositor keeps working, instead of inside a function that can do nothing else. */
+		/* **AND THE SERVER SAYS WHAT IT IS DOING, ONCE A SECOND, IN ITS OWN WORDS.** Every attempt so far has read
+		 * the CLIENT's side of this and none has asked the compositor what it thinks: how often it renders, and
+		 * what it sees for each surface it holds. The headless backend shows the menu opening on one click every
+		 * time and a live X11 session does not, and those two differ in the backend AND in the input source — so
+		 * the next question has to be answered by the half of the system nobody has measured. */
+		if (getenv("AWS_RENDER_DEBUG") != NULL) {
+			static int s_tick;
+
+			if (server->render_pending || ++s_tick >= 60) {
+				struct aws_surface *s;
+
+				s_tick = 0;
+				fprintf(stderr, "  DIAG server: %s\n",
+					server->render_pending ? "PAINTED (a render was due)"
+							       : "IDLE (nothing was due)");
+				wl_list_for_each(s, &server->surfaces, link) {
+					fprintf(stderr, "    surface: mapped=%d visible=%d level=%d buffer=%d\n",
+						s->mapped, s->visible, s->level, s->current_buffer != NULL);
+				}
+			}
+		}
 		if (server->render_pending && !aws_backend_busy(server)) {
 			server->render_pending = 0;
 			aws_output_render(server);

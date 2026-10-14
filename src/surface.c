@@ -105,6 +105,11 @@ static void buffer_destroyed(struct wl_listener *listener, void *data)
 	surface->has_buffer_listener = 0;
 	surface->mapped = 0;
 	aws_server_schedule_render(surface->server);
+	/* A SURFACE JUST LEFT THE SCREEN: whatever the pointer is over has changed, and the client that had it owes
+	 * a `leave` as certainly as the one that gains it owes an `enter`. */
+	aws_seat_pointer_recheck(surface->server);
+	/* AND IF IT HAD THE KEYBOARD, ONE THAT IS STILL THERE TAKES IT — see `aws_seat_reassign_keyboard_focus`. */
+	aws_seat_reassign_keyboard_focus(surface->server);
 }
 
 static struct aws_surface *aws_surface_from_resource(struct wl_resource *resource)
@@ -136,7 +141,12 @@ static void surface_destroy_resource(struct wl_resource *resource)
 	}
 	free(surface->title);
 	free(surface->app_id);
+	/* **FORGET IT FIRST, THEN TAKE IT OUT, THEN RE-DECIDE.** The focus has to stop naming this surface BEFORE
+	 * it is freed, and no event may name it while it is being destroyed — see `aws_seat_surface_gone`. Taking it
+	 * out of the list and rechecking afterwards is what hands the focus to whatever is left under the pointer. */
+	aws_seat_surface_gone(surface->server, surface);
 	wl_list_remove(&surface->link);
+	aws_seat_pointer_recheck(surface->server);
 	free(surface);
 }
 
@@ -296,6 +306,11 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
 		surface->mapped = 0;
 	}
 	aws_server_schedule_render(server);
+	/* **AND THE POINTER IS RE-DECIDED HERE, WHICH IS WHERE THIS BUG LIVED.** A surface that maps under a
+	 * stationary pointer — the menu bar at startup is the one a person meets — gets no motion, so before this
+	 * line it got no `enter` either, and the first click on it went to nobody. See
+	 * `aws_seat_pointer_recheck`. */
+	aws_seat_pointer_recheck(server);
 }
 
 static void surface_set_buffer_transform(struct wl_client *client, struct wl_resource *resource, int32_t transform)

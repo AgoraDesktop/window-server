@@ -153,6 +153,8 @@ void aws_shell_place_status_items(struct aws_server *server)
 		surface->frame_height = AWS_MENU_BAR_HEIGHT;
 	}
 	aws_server_schedule_render(server);
+	/* AN ITEM JUST MOVED, so the surface under the pointer may be a different one now. */
+	aws_seat_pointer_recheck(server);
 }
 
 /* **THE APPLICATION'S FRAME, WRITTEN DOWN AND HONOURED.** Not a hint, not a request to be negotiated: this is the
@@ -178,6 +180,7 @@ static void window_set_frame(struct wl_client *client, struct wl_resource *resou
 		return;
 	}
 	aws_server_schedule_render(surface->server);
+	aws_seat_pointer_recheck(surface->server);
 }
 
 /* **THE ONE KIND OF WINDOW THE SERVER PLACES, AND THE HEADER SAYS WHY.** `NSStatusItem` has a LENGTH and no
@@ -210,6 +213,11 @@ static void window_set_visible(struct wl_client *client, struct wl_resource *res
 	}
 	surface->visible = visible ? 1 : 0;
 	aws_server_schedule_render(surface->server);
+	/* SHOWN OR HIDDEN, the set of surfaces the pointer can be over has changed. */
+	aws_seat_pointer_recheck(surface->server);
+	/* **AND THE KEYBOARD MOVES OFF A WINDOW THAT WAS JUST HIDDEN, OR BACK ONTO ONE THAT WAS SHOWN WHILE NOTHING HAD
+	 * IT.** Either way a visible window is key, so a desktop is never left with no menu bar. */
+	aws_seat_reassign_keyboard_focus(surface->server);
 }
 
 /* AN INTEGER, AND THE SERVER DOES NOT CARE WHICH ONE. The level names belong to the window server's vocabulary
@@ -224,6 +232,7 @@ static void window_set_level(struct wl_client *client, struct wl_resource *resou
 	}
 	surface->level = (int)level;
 	aws_server_schedule_render(surface->server);
+	aws_seat_pointer_recheck(surface->server);
 }
 
 /* RAISE AND LOWER MOVE A WINDOW WITHIN ITS LEVEL, which is why they are a list operation and not a level
@@ -239,6 +248,7 @@ static void window_raise(struct wl_client *client, struct wl_resource *resource)
 	wl_list_remove(&surface->link);
 	wl_list_insert(surface->server->surfaces.prev, &surface->link);
 	aws_server_schedule_render(surface->server);
+	aws_seat_pointer_recheck(surface->server);
 }
 
 static void window_lower(struct wl_client *client, struct wl_resource *resource)
@@ -252,6 +262,34 @@ static void window_lower(struct wl_client *client, struct wl_resource *resource)
 	wl_list_remove(&surface->link);
 	wl_list_insert(&surface->server->surfaces, &surface->link);
 	aws_server_schedule_render(surface->server);
+	aws_seat_pointer_recheck(surface->server);
+}
+
+/* **THE POINTER FALLBACK A POPUP NEEDS.** While this is set, a pointer event that would go to NO surface — the
+ * pointer is over the desktop — is delivered to THIS one instead, with coordinates relative to it, so a menu can
+ * hear the click that lands outside it and dismiss. It is NOT a real grab: a surface under the pointer still gets
+ * the event, because the menu bar is a separate window from the menu and the pointer has to be able to cross back
+ * to it. Destroying the surface releases it too (see `aws_seat_surface_gone`). */
+static void window_set_pointer_grab(struct wl_client *client, struct wl_resource *resource, int32_t grab)
+{
+	struct aws_surface *surface = wl_resource_get_user_data(resource);
+
+	(void)client;
+	if (surface == NULL) {
+		return;
+	}
+	surface->pointer_grab = grab ? 1 : 0;
+	if (grab) {
+		/* ONE AT A TIME: a second menu taking the fallback takes it FROM the first, which is what a client
+		 * opening a new popup before closing the last is asking for. */
+		surface->server->pointer_grab = surface;
+	} else if (surface->server->pointer_grab == surface) {
+		surface->server->pointer_grab = NULL;
+	}
+	/* THE FOCUS IS RE-DECIDED NOW, because whether the pointer is over a surface does not change but WHERE an
+	 * event would go does: taking the fallback while the pointer is already over the desktop must deliver to the
+	 * surface that just asked, and giving it back must stop. */
+	aws_seat_pointer_recheck(surface->server);
 }
 
 static void window_set_title(struct wl_client *client, struct wl_resource *resource, const char *title)
@@ -286,7 +324,8 @@ static const struct agora_window_interface agora_window_implementation = {
 	window_lower,
 	window_set_title,
 	window_set_app_id,
-	window_set_visible,	/* the protocol's order: this door is declared just before `destroy` */
+	window_set_visible,	/* the protocol's order: this door is declared just before `set_pointer_grab` */
+	window_set_pointer_grab,
 	window_destroy,
 };
 
@@ -326,6 +365,17 @@ static void shell_get_window(struct wl_client *client, struct wl_resource *resou
 	surface->agora_window = window;
 	wl_resource_set_implementation(window, &agora_window_implementation, surface,
 				       agora_window_destroy_resource);
+}
+
+/* **THE POINTER'S ABSOLUTE POSITION, WHICH A CLIENT-SIDE DRAG NEEDS AND CANNOT DERIVE.** Sent alongside the
+ * relative `wl_pointer.motion` (see the protocol's `pointer_global` for the measured reason), and a no-op for a
+ * surface with no agora window — one that is still an `xdg_toplevel`, or has no role yet. */
+void aws_window_send_pointer_global(struct aws_surface *surface, int x, int y)
+{
+	if (surface == NULL || surface->agora_window == NULL) {
+		return;
+	}
+	agora_window_send_pointer_global(surface->agora_window, x, y);
 }
 
 static void shell_get_output(struct wl_client *client, struct wl_resource *resource, uint32_t id,

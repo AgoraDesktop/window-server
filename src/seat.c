@@ -278,27 +278,64 @@ static void bind_seat(struct wl_client *client, void *data, uint32_t version, ui
  * focus, and the four things a backend can say
  * --------------------------------------------------------------------------------------------------- */
 
-/* THE SURFACE AT A POINT: the TOPMOST one containing it, and the list is back-to-front, so the walk is
- * reverse. A surface with no buffer is not there, and a surface is as big as the buffer it committed. */
+/* THE SURFACE AT A POINT: the TOPMOST one containing it. A surface with no buffer is not there, and a surface is
+ * as big as the buffer it committed.
+ *
+ * **"TOPMOST" HAS TO MEAN THE SAME THING HERE AS IT DOES TO THE COMPOSITOR, AND THAT IS THE WHOLE OF A BUG A PERSON
+ * MET.** The compositor draws by LEVEL first and then by list order, and it SKIPS a surface the application has
+ * HIDDEN (`!visible`) — but this walk did neither. So a menu that had been CLOSED still had its surface mapped
+ * with `visible = 0`, the pointer moved over the GHOST, and focus went to a window nobody could see. MEASURED, from
+ * the bar's own log: an event arrived from a window the CURRENT menu did not own (`win=12` while the open menu was
+ * another), the bar read that window's coordinates as its own, its hit test landed on the first title, and it
+ * "switched" there — which is exactly "the menubar loses track of which menu is supposed to be open". A surface
+ * the compositor will not draw is a surface the pointer cannot be over. */
 struct aws_surface *aws_surface_at(struct aws_server *server, int x, int y)
 {
 	struct aws_surface *surface;
+	int highest = 0, lowest = 0, level, first = 1;
 
-	wl_list_for_each_reverse(surface, &server->surfaces, link) {
-		struct wl_shm_buffer *shm;
-		int width, height;
-
-		if (!surface->mapped || surface->current_buffer == NULL) {
+	/* THE LEVEL RANGE THAT HAS ANYTHING VISIBLE, which is what the search walks. */
+	wl_list_for_each(surface, &server->surfaces, link) {
+		if (!surface->mapped || !surface->visible || surface->current_buffer == NULL) {
 			continue;
 		}
-		shm = wl_shm_buffer_get(surface->current_buffer);
-		if (shm == NULL) {
-			continue;
+		if (first || surface->level > highest) {
+			highest = surface->level;
 		}
-		width = wl_shm_buffer_get_width(shm);
-		height = wl_shm_buffer_get_height(shm);
-		if (x >= surface->x && x < surface->x + width && y >= surface->y && y < surface->y + height) {
-			return surface;
+		if (first || surface->level < lowest) {
+			lowest = surface->level;
+		}
+		first = 0;
+	}
+	if (first) {
+		return NULL;
+	}
+	/* **FROM THE HIGHEST LEVEL DOWN, AND ONLY THEN THE LAST-MAPPED SURFACE WITHIN ONE.** The highest level is
+	 * where the search STARTS, not where it stops: a point over a level-0 window is not over the level-24 menu
+	 * bar just because the bar is the highest thing on the screen. MEASURED, the first version of this returned
+	 * the highest level's surfaces and nothing else, so the dropdown a click had just opened was never found —
+	 * the pointer's focus belonged to the bar and the menu never heard the mouse. Within a level the walk is
+	 * reverse, which is the same "last mapped is on top" the compositor's inner loop uses. */
+	for (level = highest; level >= lowest; level--) {
+		wl_list_for_each_reverse(surface, &server->surfaces, link) {
+			struct wl_shm_buffer *shm;
+			int width, height;
+
+			if (!surface->mapped || !surface->visible || surface->current_buffer == NULL) {
+				continue;
+			}
+			if (surface->level != level) {
+				continue;
+			}
+			shm = wl_shm_buffer_get(surface->current_buffer);
+			if (shm == NULL) {
+				continue;
+			}
+			width = wl_shm_buffer_get_width(shm);
+			height = wl_shm_buffer_get_height(shm);
+			if (x >= surface->x && x < surface->x + width && y >= surface->y && y < surface->y + height) {
+				return surface;
+			}
 		}
 	}
 	return NULL;
@@ -349,6 +386,48 @@ static void pointer_set_focus(struct aws_server *server, struct aws_surface *sur
 	}
 }
 
+/* **THE POINTER'S FOCUS IS A FUNCTION OF WHERE THE POINTER IS AND WHAT IS UNDER IT, so it has to be recomputed
+ * whenever WHAT IS UNDER IT changes.** Motion is the ordinary way that changes, and it used to be the ONLY way —
+ * which is a bug with a person's name on it: a surface can APPEAR under a pointer that has not moved (the menu
+ * bar mapped at startup, a menu opened under a resting hand, a window raised over one), and with no motion to
+ * follow, the focus stayed NULL or on whatever used to be there. THE FIRST CLICK AIMED AT THE NEW SURFACE THEN
+ * WENT NOWHERE, AND THE NEXT MOUSE MOVE MADE IT WORK — which is exactly "the click does nothing until I move
+ * the mouse".
+ *
+ * THAT IS A PROTOCOL OBLIGATION, not a nicety: a compositor owes a surface that comes under the pointer a
+ * `wl_pointer.enter` before it owes it any other event. Every door that changes the set of surfaces or their
+ * geometry calls this, and it is idempotent — `pointer_set_focus` does nothing when the answer has not changed. */
+void aws_seat_pointer_recheck(struct aws_server *server)
+{
+	if (!server->pointer_inside) {
+		return;	/* the pointer is not in the output, so there is nothing under it to be over */
+	}
+	pointer_set_focus(server, aws_surface_at(server, server->pointer_x, server->pointer_y));
+}
+
+void aws_seat_surface_gone(struct aws_server *server, struct aws_surface *surface)
+{
+	/* **NO LEAVE IS SENT, WHICH IS THE WHOLE POINT.** This runs from the surface's own destroy handler, where
+	 * the `wl_resource` a `leave` would name is the one being torn down — MEASURED, sending it there took the
+	 * SERVER down. The client destroyed the surface, so it already knows; there is nothing to tell it. */
+	if (server->pointer_focus == surface) {
+		server->pointer_focus = NULL;
+	}
+	if (server->keyboard_focus == surface) {
+		server->keyboard_focus = NULL;
+	}
+	/* AND THE POINTER FALLBACK TOO, or a destroyed menu would go on being the surface a desktop click is
+	 * delivered to. */
+	if (server->pointer_grab == surface) {
+		server->pointer_grab = NULL;
+	}
+	/* **AND THE KEYBOARD GOES SOMEWHERE ELSE RATHER THAN NOWHERE.** The window that had it is gone; a desktop with
+	 * no key window can offer no menu bar, so the focus moves to the topmost window that is left. */
+	if (server->keyboard_focus == NULL) {
+		aws_seat_reassign_keyboard_focus(server);
+	}
+}
+
 static void keyboard_send_modifiers(struct aws_server *server)
 {
 	struct aws_keyboard *keyboard;
@@ -381,9 +460,16 @@ void aws_seat_set_keyboard_focus(struct aws_server *server, struct aws_surface *
 	if (server->keyboard_focus != NULL) {
 		struct aws_keyboard *k;
 
-		wl_list_for_each(k, &server->keyboards, link) {
-			if (same_client(k->resource, server->keyboard_focus->resource)) {
-				wl_keyboard_send_leave(k->resource, serial, server->keyboard_focus->resource);
+		/* **AND A CLIENT MOVING FOCUS BETWEEN ITS OWN WINDOWS IS NOT DEACTIVATED.** The leave is what tells an
+		 * application it has LOST the keyboard, and a client owns the keyboard as long as ANY of its windows has
+		 * it — so a leave sent before the enter for a second window of the SAME client would say "you are
+		 * inactive" and then "you are active" in one breath, and an application that shows its menu bar only
+		 * while active would blink it. The leave is for the client actually giving the keyboard up. */
+		if (surface == NULL || !same_client(server->keyboard_focus->resource, surface->resource)) {
+			wl_list_for_each(k, &server->keyboards, link) {
+				if (same_client(k->resource, server->keyboard_focus->resource)) {
+					wl_keyboard_send_leave(k->resource, serial, server->keyboard_focus->resource);
+				}
 			}
 		}
 	}
@@ -396,6 +482,41 @@ void aws_seat_set_keyboard_focus(struct aws_server *server, struct aws_surface *
 		}
 	}
 	wl_array_release(&keys);
+}
+
+/* **THE TOPMOST WINDOW, BY THE SAME RULE THE COMPOSITOR STACKS BY: the highest LEVEL, and within a level the
+ * LAST-mapped surface.** A surface the application has HIDDEN is not a candidate — it is not on the screen, so it
+ * cannot be the window a keystroke goes to — and neither is one with no buffer, which is not a window yet. */
+static struct aws_surface *topmost_surface(struct aws_server *server)
+{
+	struct aws_surface *surface;
+	struct aws_surface *best = NULL;
+	int best_level = 0;
+
+	wl_list_for_each(surface, &server->surfaces, link) {
+		if (!surface->mapped || !surface->visible || surface->current_buffer == NULL) {
+			continue;
+		}
+		/* `>=` AND NOT `>`: the list runs back-to-front, so the LATER surface at the same level is the one on top
+		 * of the other, which is exactly the tie the compositor's own inner loop breaks the same way. */
+		if (best == NULL || surface->level >= best_level) {
+			best = surface;
+			best_level = surface->level;
+		}
+	}
+	return best;
+}
+
+void aws_seat_reassign_keyboard_focus(struct aws_server *server)
+{
+	struct aws_surface *focus = server->keyboard_focus;
+
+	/* STILL VALID, SO NOTHING TO DO. This is what makes it safe to call after any change: it only acts when the
+	 * window that had the keyboard is gone or hidden. */
+	if (focus != NULL && focus->mapped && focus->visible && focus->current_buffer != NULL) {
+		return;
+	}
+	aws_seat_set_keyboard_focus(server, topmost_surface(server));
 }
 
 void aws_seat_pointer_enter(struct aws_server *server, int x, int y)
@@ -422,10 +543,21 @@ void aws_seat_pointer_motion(struct aws_server *server, int x, int y)
 		return;
 	}
 	surface = aws_surface_at(server, x, y);
+	/* **AND OVER NO SURFACE AT ALL, THE POPUP THAT ASKED FOR THE POINTER GETS IT.** This is the fallback the
+	 * protocol's `set_pointer_grab` describes: a click on the desktop has no surface to go to, and a menu that
+	 * is tracking needs to hear it to dismiss. A surface under the pointer is untouched, which is what keeps the
+	 * menu bar's own switching and the menu's hover working. */
+	if (surface == NULL) {
+		surface = server->pointer_grab;
+	}
 	pointer_set_focus(server, surface);
 	if (surface == NULL) {
 		return;
 	}
+	/* **AND WHERE THE POINTER REALLY IS, FOR A CLIENT-SIDE DRAG.** The relative `wl_pointer.motion` below is
+	 * relative to THIS surface; the absolute one is what lets a window being moved follow the pointer without
+	 * chasing its own tail. Sent FIRST, so a client that pairs them sees the absolute before the relative. */
+	aws_window_send_pointer_global(surface, x, y);
 	sx = wl_fixed_from_int(x - surface->x);
 	sy = wl_fixed_from_int(y - surface->y);
 	wl_list_for_each(pointer, &server->pointers, link) {
@@ -441,17 +573,36 @@ void aws_seat_pointer_button(struct aws_server *server, uint32_t evdev_button, i
 	struct aws_pointer *pointer;
 	uint32_t serial = wl_display_next_serial(server->display);
 
+	/* **A CLICK GOES TO THE SURFACE UNDER THE POINTER, AND THAT IS ESTABLISHED HERE RATHER THAN ASSUMED.** Focus
+	 * is normally set by motion and a click is not a motion, so a surface that appeared under a stationary
+	 * pointer would otherwise have this press sent to whatever held the focus, or to nobody. `-recheck` is
+	 * idempotent when the focus is already right, and when it is not it sends the `enter` the client is owed
+	 * BEFORE the button. */
+	surface = aws_surface_at(server, server->pointer_x, server->pointer_y);
+	/* AND THE SAME FALLBACK A CLICK USES — see `aws_seat_pointer_motion`. A press on the desktop belongs to the
+	 * popup that is tracking, which is how a click outside a menu dismisses it. */
+	if (surface == NULL) {
+		surface = server->pointer_grab;
+	}
+	pointer_set_focus(server, surface);
 	/* CLICK-TO-FOCUS, AND IT HAPPENS ON THE WAY DOWN: the window being clicked is the window the keyboard
 	 * should be talking to, and a client that heard the button before the focus would be drawing a focused
-	 * control in an unfocused window. */
-	if (pressed) {
-		surface = aws_surface_at(server, server->pointer_x, server->pointer_y);
+	 * control in an unfocused window.
+	 *
+	 * **AND A CLICK OVER NO WINDOW AT ALL DOES NOT CLEAR IT.** A press on the DESKTOP has no surface to give the
+	 * keyboard to, and taking it away would leave the desktop with NO key application — no menu bar, no key
+	 * equivalents, nowhere for a keystroke to go. The Mac's answer is that the click activates whoever IS in front
+	 * (its Finder, which this tier has not got); the honest version of it here is to leave the focus exactly where
+	 * it was. */
+	if (pressed && surface != NULL) {
 		aws_seat_set_keyboard_focus(server, surface);
 	}
-	surface = server->pointer_focus;
 	if (surface == NULL) {
 		return;
 	}
+	/* **AND THE SAME ABSOLUTE POSITION WITH A BUTTON, BECAUSE A DRAG'S GRAB POINT IS A PRESS.** The client needs to
+	 * know where the pointer was when the button went down, not only where it is on the way. */
+	aws_window_send_pointer_global(surface, server->pointer_x, server->pointer_y);
 	wl_list_for_each(pointer, &server->pointers, link) {
 		if (same_client(pointer->resource, surface->resource)) {
 			wl_pointer_send_button(pointer->resource, serial, seat_now_ms(), evdev_button,

@@ -203,6 +203,23 @@
       <arg name="visible" type="int" summary="zero takes it off the screen; anything else puts it back"/>
     </request>
 
+    <request name="set_pointer_grab">
+      <description summary="receive the pointer when it is over no surface at all">
+        **THE DOOR A POPUP NEEDS, AND THE ONE THING A MOUSE CLICK CANNOT OTHERWISE SAY.** A Wayland compositor
+        sends pointer events to the surface UNDER the pointer and to nobody when the pointer is over the
+        desktop — so a menu could not hear the click that lands outside it, and "click anywhere to dismiss"
+        was not expressible. While this is set, events that would go to NO surface are delivered to THIS one
+        instead, with coordinates relative to it (which may fall outside its frame — that is how the client
+        learns a click was outside).
+
+        IT IS A FALLBACK AND NOT A REAL GRAB, ON PURPOSE: a surface under the pointer still receives the
+        event. A menu bar is the reason — the bar is a SEPARATE window from the menu it opened and the pointer
+        must be able to cross back to it to switch menus, so routing EVERY event to the menu would break the
+        one gesture a menu bar is for. `zero` releases it; destroying the surface releases it too.
+      </description>
+      <arg name="grab" type="int" summary="nonzero takes it; zero gives it back"/>
+    </request>
+
     <request name="destroy" type="destructor">
       <description summary="the window is gone">
         Destroys the object. The surface outlives it and may be given another role, as it may under
@@ -227,6 +244,23 @@
       <arg name="y" type="int"/>
       <arg name="width" type="int"/>
       <arg name="height" type="int"/>
+    </event>
+
+    <event name="pointer_global">
+      <description summary="where the pointer really is, in OUTPUT coordinates">
+        **THE ONE COORDINATE A CLIENT-SIDE DRAG CANNOT DERIVE FOR ITSELF, AND THE REASON A FAST ONE WENT WRONG.**
+        The title bar is the application's, so the drag is the application's too — but `wl_pointer.motion` reports
+        the pointer RELATIVE TO THIS WINDOW, and a window that is being MOVED makes that a moving target: a hand
+        that outruns the window puts the pointer on the desktop, the relative number chases its own tail, and the
+        corrections COMPOUND. MEASURED: a fast drag moved the window zero pixels before the pointer grab, and
+        hundreds of pixels past the pointer after it.
+
+        This is the ABSOLUTE position the relative one was computed from, sent immediately BEFORE it, so a client
+        holding a grabbed point under the pointer can do it with one subtraction that does not depend on where the
+        window happens to be. It is sent with button events too, because a drag's grab point is a button press.
+      </description>
+      <arg name="x" type="int" summary="left, in output coordinates"/>
+      <arg name="y" type="int" summary="top, in output coordinates"/>
     </event>
   </interface>
 

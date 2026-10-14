@@ -98,6 +98,11 @@ struct aws_surface {
 	 * anyone should see: `-orderOut:` is a real thing, and without this the server painted every window a client had
 	 * ever hidden — which is what "the menus never close" looks like from the outside. */
 	int visible;
+	/* **WHETHER THIS WINDOW IS TAKING THE POINTER WHEN IT IS OVER NO SURFACE.** A menu sets this while it tracks,
+	 * so the click that lands outside it — on the desktop, where the compositor would otherwise have nobody to
+	 * tell — still reaches the client, which is how "click anywhere to dismiss" is said. See the protocol's
+	 * `set_pointer_grab`. */
+	int pointer_grab;
 	struct wl_resource *agora_window;	/* the role, when this surface's client is an Agora one */
 
 	int x;					/* where the compositor has put it, in output coordinates */
@@ -168,6 +173,7 @@ struct aws_server {
 	struct wl_list pointers;		/* struct aws_pointer, one per client that asked */
 	struct wl_list keyboards;		/* struct aws_keyboard */
 	struct aws_surface *pointer_focus;	/* the surface the pointer is over, or NULL */
+	struct aws_surface *pointer_grab;	/* the surface that takes the pointer over NO surface, or NULL */
 	struct aws_surface *keyboard_focus;	/* the surface the keyboard goes to, or NULL */
 	int pointer_x;				/* the pointer, in OUTPUT coordinates */
 	int pointer_y;
@@ -266,6 +272,22 @@ void aws_seat_pointer_enter(struct aws_server *server, int x, int y);
 void aws_seat_pointer_leave(struct aws_server *server);
 void aws_seat_pointer_motion(struct aws_server *server, int x, int y);
 void aws_seat_pointer_button(struct aws_server *server, uint32_t evdev_button, int pressed);
+/* **RE-DECIDE WHAT THE POINTER IS OVER, WITHOUT WAITING FOR IT TO MOVE.** What is under the pointer changes when
+ * a surface is mapped, unmapped, moved, shown, hidden or restacked — none of which is a motion — so every one of
+ * those doors calls this. Without it a surface that appears under a stationary pointer never gets the
+ * `wl_pointer.enter` the protocol owes it, and the first click aimed at it goes to nobody: a click that does
+ * nothing until the mouse is moved. */
+void aws_seat_pointer_recheck(struct aws_server *server);
+/* **A SURFACE IS GOING AWAY, SO FORGET IT BEFORE IT IS FREED.** It is called from the surface's own destroy
+ * handler, where sending a `leave` is not an option: the `wl_resource` it would name is the one being
+ * destroyed. Clearing the focus here is what keeps `pointer_focus`/`keyboard_focus` from pointing at freed
+ * memory — and a recheck afterwards lets whatever is now under the pointer take the focus. */
+void aws_seat_surface_gone(struct aws_server *server, struct aws_surface *surface);
+/* **THERE IS ALWAYS A KEY APPLICATION, WHICH IS TO SAY THE KEYBOARD IS NEVER LEFT ON NOBODY WHILE A WINDOW EXISTS.**
+ * A desktop with no key window can offer no menu bar, no key equivalents and nowhere for a keystroke to go — so
+ * this re-decides the focus whenever the surface that had it WENT AWAY or was HIDDEN, picking the topmost window
+ * that is left. It is the server's policy, not a client's: a client cannot see the other clients' windows. */
+void aws_seat_reassign_keyboard_focus(struct aws_server *server);
 void aws_seat_key(struct aws_server *server, uint32_t evdev_keycode, int pressed);
 
 /* input.c — choosing an input source, and shutting it down */
@@ -286,5 +308,11 @@ struct aws_surface *aws_surface_at(struct aws_server *server, int x, int y);
 
 /* SEND A SURFACE ITS FRAME CALLBACKS, which is how a client learns its frame was taken. */
 void aws_surface_frame_done(struct aws_surface *surface, uint32_t time);
+
+/* **THE POINTER'S ABSOLUTE POSITION, TO THE WINDOW'S OWN CLIENT.** `wl_pointer.motion` reports the pointer RELATIVE
+ * to the surface, which a window being MOVED turns into a moving target — so the absolute position is sent
+ * alongside it (the protocol's `pointer_global`), and a client-side drag can hold a grabbed point under the
+ * pointer without depending on where the window is. A no-op for a surface with no agora window. */
+void aws_window_send_pointer_global(struct aws_surface *surface, int x, int y);
 
 #endif /* AGORA_WINDOW_SERVER_H */
