@@ -22,6 +22,7 @@
 
 #include "server.h"
 
+#include <math.h>	/* sqrt — the one place a distance is needed */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,11 +31,13 @@
 /* THE DESKTOP'S OWN COLOUR, for the area no client covers — and the one piece of "drawing" this version does.
  * A distinct colour rather than black, because a black background is indistinguishable from a client that
  * painted black, and this has to be checkable from a screenshot. */
-/* **AND THE WALLPAPER, WHICH IN THE SAMPLE IS A GRADIENT AND IS ONE COLOUR HERE.** Argentum's desktop runs from a
- * warm amber at the left edge — (72,36,14) and (108,55,29) — down to near-black at the bottom corners, (18,14,5).
- * A flat fill is the honest first step and a vertical ramp is the next one; the samples are recorded in
- * `ARGENTUM.md` so the next person does not have to re-measure the mockup to find them. */
-#define AWS_BACKGROUND 0xFF2A1D0Du
+/* **AND THE WALLPAPER: A LIGHT BLUE-GREEN "AQUA", WHICH IS A CHOICE AND NOT A SAMPLE.** Argentum's own desktop runs
+ * from a warm amber at the left edge — (72,36,14) and (108,55,29) — down to near-black at the bottom corners,
+ * (18,14,5); those numbers stay in `ARGENTUM.md`, where they are the record of the mockup, and THIS FILL NO LONGER
+ * FOLLOWS THEM. The desktop is aqua BY REQUEST: (168,222,217), `#A8DED9` — light, and green-leaning, so it reads as
+ * water rather than as sky. It is still ONE COLOUR rather than the sample's gradient, which is the honest first step
+ * and a vertical ramp is still the next one. */
+#define AWS_BACKGROUND 0xFFA8DED9u
 
 static uint32_t aws_now_ms(void)
 {
@@ -52,12 +55,12 @@ static uint32_t aws_now_ms(void)
 /* **THE ONE THING IN THE BAR THAT IS THE SERVER'S, AND THE FIRST THING HERE THAT IS DRAWN RATHER THAN FILLED.**
  * Every other pixel in this file is a background or a client's buffer; the System menu is neither. Its glyph is the
  * hamburger — U+2630 — which IS three horizontal bars, so its shape is arithmetic and no font is needed: three
- * bars of THICKNESS, two gaps of GAP, centred in a square of WIDTH. A font arrives with the first thing whose
- * shape is NOT already known. See DESIGN.md for why it is not the Apple logo. */
+ * bars of THICKNESS, two gaps of GAP, placed by their LEFT MARGIN in a square of WIDTH. A font arrives with the
+ * first thing whose shape is NOT already known. See DESIGN.md for why it is not the Apple logo. */
 static void aws_output_draw_system_menu(struct aws_backend *backend)
 {
 	const int glyph_height = 3 * AWS_SYSTEM_MENU_BAR_THICKNESS + 2 * AWS_SYSTEM_MENU_BAR_GAP;
-	const int left = (AWS_SYSTEM_MENU_WIDTH - AWS_SYSTEM_MENU_GLYPH_WIDTH) / 2;
+	const int left = AWS_SYSTEM_MENU_LEFT_MARGIN;
 	const int top = (AWS_MENU_BAR_HEIGHT - glyph_height) / 2;
 	int bar, row, column;
 
@@ -76,6 +79,103 @@ static void aws_output_draw_system_menu(struct aws_backend *backend)
 				backend->pixels[(size_t)row * (size_t)backend->width + (size_t)column] =
 					AWS_SYSTEM_MENU_GLYPH_COLOUR;
 			}
+		}
+	}
+}
+
+/* ============================================================================================ *
+ * THE SHADOW, WHICH IS THE SERVER'S SHARE AND NOT THE CLIENT'S.                               *
+ *                                                                                                *
+ * `agora-shell.xml` says so in its own words — "the server's share of the Mac's model is the    *
+ * shadow, the work area, and knowing who is in front" — and it is the right division: a shadow   *
+ * falls on WHAT IS BEHIND THE WINDOW, and no client can see that. A client that drew its own     *
+ * would be drawing over its neighbours, and one that drew it INSIDE its own frame would be       *
+ * shrinking its content to make room for a lie.                                                  *
+ *                                                                                                *
+ * IT IS SEMITRANSPARENT, AND THAT IS THE WHOLE OF WHAT IT IS: the frame buffer is opaque, so     *
+ * every pixel of shadow is a BLEND against whatever the compositor has already put there — the  *
+ * same source-over arithmetic `composite_surface` does for a client's own alpha, which is why    *
+ * the two share a shape and not a function.                                                      *
+ * ============================================================================================ */
+
+/* The shadow's three numbers. The DEPTH is how far it reaches from the frame's edge and is the one a person
+ * notices; the ALPHA is what it starts at AT that edge, before the falloff takes it to nothing; the RADIUS is the
+ * frame's own corner, and it MIRRORS THE CLIENT'S `NS_CELL_BEZEL_RADIUS` — the protocol does not carry the radius
+ * yet, so this is the one number in this file that is a copy rather than a fact, and it is named as one. */
+#define AWS_SHADOW_DEPTH  10
+#define AWS_SHADOW_ALPHA  120
+#define AWS_SHADOW_RADIUS 4
+/* **AND THE RADIUS IS AN ARGUMENT, BECAUSE THE SHADOW FOLLOWS THE SHAPE THAT CASTS IT.** A window's corners are
+ * rounded and its shadow's are too; the MENU BAR's are square and its shadow's must be as well. MEASURED, passing
+ * the window's radius for the bar's shadow painted a dark smudge INSIDE the bar's own corners — the distance
+ * function reads a square corner as being outside a rounded shape, which is true and is not what a bar wants. */
+
+/* ONE PIXEL OF SHADOW: black, over what is already there, at `alpha` of 255. */
+static uint32_t aws_shadow_pixel(uint32_t destination, uint32_t alpha)
+{
+	uint32_t inverse = 255u - alpha;
+	uint32_t r = ((destination >> 16) & 0xFFu) * inverse / 255u;
+	uint32_t g = ((destination >> 8) & 0xFFu) * inverse / 255u;
+	uint32_t b = (destination & 0xFFu) * inverse / 255u;
+
+	return 0xFF000000u | (r << 16) | (g << 8) | b;
+}
+
+/* **AND THE SHADOW IS THE DISTANCE TO A ROUNDED RECTANGLE, WHICH IS WHY IT HAS ROUNDED CORNERS.** A rectangle's
+ * shadow under a rounded window shows four square shoulders — the corners are exactly where a shadow is most
+ * visible, because that is where it is widest. The signed distance to a rounded rectangle is three lines: clamp the
+ * point into the rectangle's INNER box (the rectangle shrunk by the radius on every side), measure from there, and
+ * take the radius off — negative inside the shape, positive outside, and the same expression at every corner. The
+ * ALPHA then falls off as the square of the distance, which is what makes a hard edge read as a soft one. */
+static void aws_output_draw_shadow(struct aws_backend *output, int x, int y, int w, int h, int radius)
+{
+	int left = x - AWS_SHADOW_DEPTH, top = y - AWS_SHADOW_DEPTH;
+	int right = x + w + AWS_SHADOW_DEPTH, bottom = y + h + AWS_SHADOW_DEPTH;
+	int halfW = w / 2, halfH = h / 2;
+	int cx = x + halfW, cy = y + halfH;
+	int innerW = halfW - radius, innerH = halfH - radius;
+	int row, column;
+
+	if (w <= 0 || h <= 0) {
+		return;
+	}
+	for (row = top; row < bottom; row++) {
+		int dy;
+
+		if (row < 0 || row >= output->height) {
+			continue;
+		}
+		dy = (row > cy ? row - cy : cy - row) - innerH;
+		if (dy < 0) {
+			dy = 0;
+		}
+		for (column = left; column < right; column++) {
+			int dx, distance;
+			double t, falloff;
+			uint32_t alpha;
+
+			if (column < 0 || column >= output->width) {
+				continue;
+			}
+			dx = (column > cx ? column - cx : cx - column) - innerW;
+			if (dx < 0) {
+				dx = 0;
+			}
+			/* THE INTEGER SQUARE ROOT IS ENOUGH: a distance in pixels is the unit a falloff wants, and
+			 * `sqrt` here would be the only double in the compositor's inner loop. */
+			distance = (int)sqrt((double)(dx * dx + dy * dy)) - radius;
+			if (distance <= 0 || distance > AWS_SHADOW_DEPTH) {
+				continue;	/* inside the frame, or past the shadow's reach */
+			}
+			t = 1.0 - (double)distance / (double)AWS_SHADOW_DEPTH;
+			falloff = t * t;
+			alpha = (uint32_t)((double)AWS_SHADOW_ALPHA * falloff);
+			if (alpha == 0) {
+				continue;
+			}
+			output->pixels[(size_t)row * (size_t)output->width + (size_t)column] =
+				aws_shadow_pixel(output->pixels[(size_t)row * (size_t)output->width + (size_t)column],
+						 alpha);
 		}
 	}
 }
@@ -181,6 +281,13 @@ void aws_output_render(struct aws_server *server)
 		}
 	}
 	aws_output_draw_system_menu(backend);
+	/* **AND THE BAR'S OWN SHADOW, WHICH FALLS BELOW IT ON THE WALLPAPER.** The bar and the work area are the
+	 * server's, and this is the one shadow here with nothing behind it but the desktop — it is what makes the strip
+	 * read as a SURFACE rather than as the top of the screen. The same helper draws it: the strip's rectangle is
+	 * expanded and the falloff computed the same way, and the three sides that run off the top, the left and the
+	 * right are dropped by the bounds check, so the edge below is the only one that survives. It goes before the
+	 * windows, for the same reason every other shadow does. */
+	aws_output_draw_shadow(backend, 0, 0, backend->width, AWS_MENU_BAR_HEIGHT, 0);
 	/* MAPPING ORDER IS THE STACKING: the list is walked front-to-back, so the last mapped is on top. A
 	 * compositor that has raised a window has reordered this list; this version never reorders it. */
 	/* **BY LEVEL FIRST, THEN BY MAPPING ORDER WITHIN ONE.** A level is an `NSWindow` level — an integer the
@@ -231,6 +338,24 @@ void aws_output_render(struct aws_server *server)
 							: "<- A DIFFERENT LEVEL, and no pass will reach it");
 					}
 					continue;
+				}
+				/* **AND NOTHING THAT LIVES IN THE MENU BAR CASTS A SHADOW — ONE RULE, TWO CASES.** `agora-shell.xml` gives
+				 * the server the shadow because a shadow falls on WHAT IS BEHIND, and the bar's own contents have nothing
+				 * behind them: they are ON the strip the server paints. The two that do this are different in every other
+				 * way and identical here — a STATUS ITEM (`NSStatusItem`, placed by `shell.c` because it has a length and
+				 * no position, `status_length` non-zero) and THE APPLICATION'S OWN MENU TITLES (an ordinary client window
+				 * that happens to be given the bar's rows). A shadow around either is a dark smudge INSIDE the bar.
+				 *
+				 * SO THE TEST IS THE GEOMETRY AND NOT THE KIND. The first version asked `status_length`, which caught the
+				 * item and let the menu titles through — MEASURED, a shadow under the application's menu. Any surface
+				 * lying ENTIRELY inside the bar's rows is part of the bar, whichever client drew it and whatever it is
+				 * called.
+				 *
+				 * AND A SHADOW GOES DOWN BEFORE THE WINDOW DOES, which is the only order that means anything: it is a
+				 * shadow ON THE THINGS BEHIND, so anything painted after it would be painted over it. */
+				if (surface->y < 0 || surface->y + surface->frame_height > AWS_MENU_BAR_HEIGHT) {
+					aws_output_draw_shadow(backend, surface->x, surface->y, surface->frame_width,
+							       surface->frame_height, AWS_SHADOW_RADIUS);
 				}
 				composite_surface(backend, surface);
 

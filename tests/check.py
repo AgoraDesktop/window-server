@@ -12,10 +12,10 @@ frame at (0,0) as well, ON PURPOSE, so every assertion about where it ended up i
 import sys
 from PIL import Image
 
-BACKGROUND = (42, 29, 13)        # aws_output.c's AWS_BACKGROUND — Argentum's wallpaper, flattened
+BACKGROUND = (168, 222, 217)      # aws_output.c's AWS_BACKGROUND — aqua BY REQUEST, not the mockup's amber
 MENU_BAR = (235, 235, 235)       # server.h's AWS_MENU_BAR_COLOUR — Argentum's bar, drawn by the SERVER
 MENU_BAR_HEIGHT = 24
-SYSTEM_MENU_MID = 13             # the middle of the glyph in the System menu's square (server.h)
+SYSTEM_MENU_MID = 17             # a column THROUGH the glyph: server.h places it at 10..25 (AWS_SYSTEM_MENU_LEFT_MARGIN)
 GLYPH = (0, 0, 0)                # server.h's AWS_SYSTEM_MENU_GLYPH_COLOUR — Argentum's ink
 TOP_AT = (100, 80)               # the first client's frame, asked for with agora_window.set_frame
 BOTTOM_AT = (150, 110)           # the second's — created LATER and at a LOWER level
@@ -53,8 +53,12 @@ def main():
         # **THE ORIGIN IS NO LONGER THE SERVER'S TO LEAVE ALONE**: the strip the server draws now owns the top
         # rows, so this samples where a cascade would have put a WINDOW and the strip cannot reach — and the
         # check is stronger for it, since a window at (0,0) would once have been visible and is now covered.
+        # **AND THE SAMPLE CLEARS THE BAR'S OWN SHADOW, WHICH IS NEW.** The strip now casts a semitransparent
+        # shadow onto the wallpaper below it, so the first rows under the bar are no longer the plain background —
+        # asserting they were was asserting that the bar has no shadow, which is the opposite of what it now does.
+        # The depth is `AWS_SHADOW_DEPTH` in output.c and this starts one row past it.
         ("nothing is at the origin, where a cascade would have put them",
-         px[2, MENU_BAR_HEIGHT + 2] == BACKGROUND and px[42, MENU_BAR_HEIGHT + 2] == BACKGROUND),
+         px[2, MENU_BAR_HEIGHT + 12] == BACKGROUND and px[42, MENU_BAR_HEIGHT + 12] == BACKGROUND),
         # **THE STRIP IS THE SERVER'S; WHAT IS IN IT IS A CLIENT'S.** So the strip is sampled only to the LEFT of
         # the item — a sample taken through the item would be asserting the server's pixels were never covered,
         # which is the opposite of what a status area is.
@@ -65,6 +69,12 @@ def main():
         (f"the status item is at the RIGHT EDGE of the strip, {status_len} wide",
          px[1280 - 2, MENU_BAR_HEIGHT // 2] == cstatus and
          px[1280 - status_len + 2, MENU_BAR_HEIGHT // 2] == cstatus),
+        # **AND WHAT IS NOT COVERED HERE IS THE OTHER CASE OF THE SAME RULE.** A surface inside the bar casts no
+        # shadow either — that is what stopped the application's own menu titles smudging the strip — and the check
+        # above reaches it only through the ITEM, which both the old rule ("is it a status item?") and the new one
+        # ("does it lie inside the bar?") catch, so it cannot tell them apart. The case that CAN is an ordinary
+        # window given the bar's rows, and this client has only one window: it is named as owed rather than faked
+        # with a check that would pass either way.
         ("and it does not reach past its own left edge, where the strip shows",
          px[1280 - status_len - 3, MENU_BAR_HEIGHT // 2] == MENU_BAR),
         # Its buffer is 320x200 — BIGGER than the 64x24 box the server put it in — so this is the clipping, not

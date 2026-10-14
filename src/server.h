@@ -222,12 +222,20 @@ int aws_backend_drm_start(struct aws_server *server);
 #define AWS_MENU_BAR_COLOUR 0xFFEBEBEBu		/* Argentum: the bar's face, sampled 235,235,235 */
 
 /* **THE SYSTEM MENU, WHICH IS THE SERVER'S OWN.** A square at the left of the bar, and inside it the hamburger —
- * `☰`, U+2630 — which IS three horizontal bars, so it is drawn rather than typeset and needs no font. The three
- * numbers below are the whole of the character: its bars, the gaps between them, and how wide the mark is. */
+ * `☰`, U+2630 — which IS three horizontal bars, so it is drawn rather than typeset and needs no font. The numbers
+ * below are the whole of the character: its bars, the gaps between them, how wide the mark is, AND HOW FAR IT SITS
+ * FROM THE BAR'S LEFT EDGE. */
 #define AWS_SYSTEM_MENU_WIDTH 28
 #define AWS_SYSTEM_MENU_GLYPH_WIDTH 16
 #define AWS_SYSTEM_MENU_BAR_THICKNESS 3
 #define AWS_SYSTEM_MENU_BAR_GAP 3
+/* **THE MARK IS PLACED, NOT CENTRED.** The square is 28 wide and the mark 16, so CENTRING it leaves six pixels on
+ * each side — and a person looking at the bar asked for more room ON THE LEFT, which is the side the bar begins at
+ * and the side a hand comes from. Ten pixels puts the mark at 10..25, which leaves the SAME ten pixels between it
+ * and an application's first menu (2 to the square's edge, then the 8-pixel gap below) — equal air on both sides,
+ * which is what an eye is reading when it says one side looks cramped. IT IS A MARGIN AND NOT A SHIFT because the
+ * number to change is the distance from the edge, not an offset from a centre nobody chose. */
+#define AWS_SYSTEM_MENU_LEFT_MARGIN 10
 #define AWS_SYSTEM_MENU_GLYPH_COLOUR 0xFF000000u	/* Argentum: the bar's ink, sampled pure black */
 
 /* **AND THE AIR BETWEEN IT AND AN APPLICATION'S OWN MENUS, WHICH IS THE BAR'S AND NOT THE SQUARE'S.** The square is

@@ -20,8 +20,11 @@ are what it uses rather than a layout to reproduce pixel for pixel.
 | the wallpaper | **a gradient** | see below |
 
 **The wallpaper is the one thing that is not one colour.** The sample runs from a warm amber at the left edge —
-`(72,36,14)` and `(108,55,29)` — to near-black at the bottom corners, `(18,14,5)` and `(23,16,6)`. The server
-currently fills `#2A1D0D`, a flattened approximation, and a vertical ramp is the honest next step.
+`(72,36,14)` and `(108,55,29)` — to near-black at the bottom corners, `(18,14,5)` and `(23,16,6)`. **THE SERVER DOES
+NOT FILL ANY OF THEM: it fills `#A8DED9` (168,222,217), a light blue-green aqua, BY REQUEST** — a departure from the
+mockup and recorded as one, so the numbers above stay the record of what the sample shows rather than a description
+of what the desktop does. The fill is still one colour rather than the sample's gradient, and a vertical ramp is
+still the honest next step.
 
 ## What the sample also says about LAYOUT
 
