@@ -125,13 +125,19 @@ it carries the one that says there is a list down here. Neither arrow is this ti
 interchangeable: the pair is the sample's own way of telling two controls apart at a glance, which is why the drawing
 demo puts them side by side on one row rather than on two.
 
-**AND THE ONE THING THIS TIER CANNOT YET DO IS TYPE INTO IT, WHICH IS A ROW RATHER THAN AN OVERSIGHT.** Apple builds
-an `NSComboBoxCell` on an `NSTextFieldCell` and THAT is where a combo box's editing lives. This tier has neither
-`NSTextFieldCell` nor `NSTextField` — its `NSText` is a view that edits its own single line — so there is no field cell
-to derive from, the control and its cell start at the nearest base that exists (`NSControl` and `NSActionCell`), and
-editing is the slice that opens with the field cell. What is drawn and modelled here is the field, the chip, the list
-of objects and the selection — which is the whole of what a gallery row shows, since a gallery row is a still picture
-of a closed control.
+**AND IT CAN BE TYPED INTO, WHICH IS THE ONE THING THE FIRST SLICE OF IT COULD NOT DO.** Apple builds an
+`NSComboBoxCell` on an `NSTextFieldCell`, and that base is where a combo box's string, its selection and its edit
+session come from; this tier had no such class, so the cell started at `NSActionCell` and its header recorded the row.
+The field cell now exists — it owns the face, the string and the three doors of an edit — and the combo box derives
+from it, so what is left in the combo box's own file is what is actually a combo box's: the list, the chip, the fill a
+control's field takes, and one measurement that stops its text at the chip.
+
+**AND THE EDITOR IS THE WINDOW'S RATHER THAN THE CONTROL'S.** A window lends ONE editor to whichever field is being
+typed into (`-fieldEditor:forObject:`), the cell is told to begin a session with it, and the cell is what it reports
+back to — because the string belongs to the cell. That door was REFUSED in this tree with the reason "a field editor IS
+an `NSText`, and the text system is stage F", written when the tree had no `NSText` at all; `NSText` has existed since
+the text slice, so the refusal's ground had expired and the door is a door again. THE TITLE'S MARGIN IS UNCHANGED and
+still four points.
 
 ## The prelight, which is a departure rather than a reading
 
