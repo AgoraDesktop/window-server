@@ -132,6 +132,17 @@ The field cell now exists — it owns the face, the string and the three doors o
 from it, so what is left in the combo box's own file is what is actually a combo box's: the list, the chip, the fill a
 control's field takes, and one measurement that stops its text at the chip.
 
+**AND THE CHIP OPENS THE LIST, WHICH IS THE ONE THING IT IS FOR.** A press on the chip opens the list of values; a
+press anywhere else in the field begins an edit. That split is the control's whole notion of a press, and MEASURED on
+the demonstration the chip did nothing at all until it existed — the ink was drawn and the list behind it was not.
+
+**AND THE LIST IS DRAWN AS A MENU, WHICH IS A DEPARTURE WORTH NAMING.** Apple's combo box opens a borderless LIST
+WINDOW of its own; this tier opens the session `NSMenu` already has — the same one the pop-up beside it raises — and
+builds the rows from the cell's objects on the way in. What that buys is a session that starts, tracks, is dismissed
+and sends a pick, none of which had to be written twice; what it costs is that the rows wear a MENU's ink rather than a
+list's, and that the row a box currently holds is not marked when the list opens. The rows and the pick are the combo
+box's; the SKIN is borrowed, and a list window of its own is the row that opens when the skin matters.
+
 **AND THE EDITOR IS THE WINDOW'S RATHER THAN THE CONTROL'S.** A window lends ONE editor to whichever field is being
 typed into (`-fieldEditor:forObject:`), the cell is told to begin a session with it, and the cell is what it reports
 back to — because the string belongs to the cell. That door was REFUSED in this tree with the reason "a field editor IS
