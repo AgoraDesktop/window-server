@@ -152,12 +152,23 @@ measured in its own arithmetic — so the anchor a control hands over IS the ali
 `NSCell` for both controls rather than computed in each: the anchor was in two files, and the combo box's had drifted
 to its CHIP.
 
-**AND THE LIST IS DRAWN AS A MENU, WHICH IS A DEPARTURE WORTH NAMING.** Apple's combo box opens a borderless LIST
-WINDOW of its own; this tier opens the session `NSMenu` already has — the same one the pop-up beside it raises — and
-builds the rows from the cell's objects on the way in. What that buys is a session that starts, tracks, is dismissed
-and sends a pick, none of which had to be written twice; what it costs is that the rows wear a MENU's ink rather than a
-list's, and that the row a box currently holds is not marked when the list opens. The rows and the pick are the combo
-box's; the SKIN is borrowed, and a list window of its own is the row that opens when the skin matters.
+**AND THE LIST IS DRAWN AS A MENU, WHICH IS A DEPARTURE WORTH NAMING — AND HALF PAID FOR.** Apple's combo box opens a
+borderless LIST WINDOW of its own; this tier opens the session `NSMenu` already has — the same one the pop-up beside it
+raises — and builds the rows from the cell's objects on the way in. What that buys is a session that starts, tracks, is
+dismissed and sends a pick, none of which had to be written twice.
+
+**THE ROW THE BOX HOLDS IS NOW MARKED, WHICH WAS THE HALF A PERSON ACTUALLY MISSES.** MEASURED, the list used to open
+with every row looking alike, so the one question a combo box's list exists to answer — which row am I on — had to be
+answered by reading the whole list and comparing it with the field. The held row now wears the same chip the pointer
+wears, because a chip is what this session's highlight IS (`NSMenuView -drawRect:` owns its shape, colour and inset) and
+a second kind of mark would be one session drawing two vocabularies for one question. `NSMenuView` gained a door a
+subclass can answer about a row the pointer is not on, `NSMenu` gained the ability to say which view draws its rows, and
+the combo box's own view answers it from the item's state — the menu's own way of saying "this is the current choice".
+
+**AND THE SKIN IS STILL OWED, WHICH IS SAID PLAINLY RATHER THAN COUNTED AS DONE.** A menu's rows carry a check-mark
+gutter and a shortcut column, and their highlight is a chip INSET inside the row — that inset-and-round is most of what
+makes a Mac menu read as a menu. A list's row is plain text with a full-width fill. Changing that means a row CELL as
+well as a row VIEW, and it is the next thing this control owes rather than something the mark finished.
 
 **AND THE EDITOR IS THE WINDOW'S RATHER THAN THE CONTROL'S.** A window lends ONE editor to whichever field is being
 typed into (`-fieldEditor:forObject:`), the cell is told to begin a session with it, and the cell is what it reports
