@@ -62,6 +62,34 @@ rather than the window, so the knob takes the white and the groove takes the gre
 than all three of the raised faces above (`#F9F9F9`, `#EBEBEB`, white), which is what keeps the knob reading as
 raised even with four surfaces in play.
 
+## The pop-up button
+
+**The sample draws this control as a FIELD with a chip in it**, not as a raised button with an arrow beside the words:
+a white rectangle with a one-point border — which is what makes it read as a text field — holding an accent-filled
+chip at its right end.
+
+| role | value | sampled from |
+|---|---|---|
+| the field's face | `#FFFFFF` | the row's interior |
+| the field's border | `#BCBCBC` (188,188,188) | x=919, x=1069 and y=398 of the row, one point each |
+| the field's corners | **4 px** | the radius a text field also takes |
+| the chip | **20 x 20**, inset **5** from the field's right border | the accent region at x=1045..1064, y=402..421 |
+| the chip's face | `#A49AFF` | the platform's accent |
+| the chip's corners | **4 px** | the same radius again |
+| the chevrons | **10 wide, 5 tall, 2 apart**, in the field's white | the knocked-out triangles, x=1050..1059 |
+| the field's height | **26 px** | y=398..423 — this tree's controls are 23 |
+
+**AND THE TWO CHEVRONS ARE THIS CONTROL'S OWN SIGN.** The `NSComboBox` beside it in the same gallery is the same field
+with ONE triangle: a pop-up chooses both ways through its list and a combo box opens one. The label on each row of
+that gallery names the control drawn there, which is how the pair is told apart.
+
+**THE ARROWS ARE WHITE BECAUSE THEY ARE HOLES, NOT MARKS** — they are knocked out of the chip rather than drawn on it,
+which is why the chip's own fill is the accent and the triangles take the field's white.
+
+**AND `#BCBCBC` IS THE TIER'S BORDER GREY TOO** — `+controlDarkShadowColor` — so this field, a button beside it and a
+scroller's knob are all outlined in one value, which is the relationship `NSText` argues for where it draws the same
+face for a text field.
+
 ## What the sample also says about LAYOUT
 
 Measured, and worth keeping because two of them are things this desktop does not do yet:
