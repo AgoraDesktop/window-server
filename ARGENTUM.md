@@ -136,6 +136,13 @@ control's field takes, and one measurement that stops its text at the chip.
 press anywhere else in the field begins an edit. That split is the control's whole notion of a press, and MEASURED on
 the demonstration the chip did nothing at all until it existed — the ink was drawn and the list behind it was not.
 
+**AND BOTH THIS CONTROL AND THE POP-UP RAISE THEIR WINDOW AT THE CONTROL'S OWN LEFT EDGE.** The sample's pair sit on
+consecutive rows with their fields starting at the same x, and a list that opened under the arrow rather than under the
+field would break the line the two controls are drawn on. `NSMenu`'s placement puts its window at `location.x` —
+measured in its own arithmetic — so the anchor a control hands over IS the alignment, and it is now named once in
+`NSCell` for both controls rather than computed in each: the anchor was in two files, and the combo box's had drifted
+to its CHIP.
+
 **AND THE LIST IS DRAWN AS A MENU, WHICH IS A DEPARTURE WORTH NAMING.** Apple's combo box opens a borderless LIST
 WINDOW of its own; this tier opens the session `NSMenu` already has — the same one the pop-up beside it raises — and
 builds the rows from the cell's objects on the way in. What that buys is a session that starts, tracks, is dismissed
