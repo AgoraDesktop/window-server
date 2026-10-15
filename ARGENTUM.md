@@ -125,6 +125,15 @@ it carries the one that says there is a list down here. Neither arrow is this ti
 interchangeable: the pair is the sample's own way of telling two controls apart at a glance, which is why the drawing
 demo puts them side by side on one row rather than on two.
 
+**AND A FIELD'S PADDING IS FOUR POINTS ON ALL FOUR SIDES, WHERE THE SAMPLE'S IS TWO.** MEASURED on the sample, its
+field label begins two points inside the border; that is where this tier began, and the field beside the others read as
+crowded. Four is the design owner's correction, on the same footing as the prelight's colour and the pop-up's fill —
+the sample stays the record of what IT shows, and the departure is written here rather than folded into the reading.
+IT IS ALSO ONE NUMBER NOW: the view that draws a field (`NSText`) and the cell that draws one (`NSTextFieldCell`) each
+had their own, and they disagreed on the vertical axis while agreeing across it by coincidence. Both read
+`NS_TEXT_INSET`, and `NS_CELL_CONTENT_GAP` keeps its own job — the margin between a control's MARK and its words, which
+is a checkbox's box and its label or a pop-up's arrow and its title. A FIELD has no mark.
+
 **AND IT CAN BE TYPED INTO, WHICH IS THE ONE THING THE FIRST SLICE OF IT COULD NOT DO.** Apple builds an
 `NSComboBoxCell` on an `NSTextFieldCell`, and that base is where a combo box's string, its selection and its edit
 session come from; this tier had no such class, so the cell started at `NSActionCell` and its header recorded the row.
