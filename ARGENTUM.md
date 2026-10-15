@@ -26,6 +26,37 @@ mockup and recorded as one, so the numbers above stay the record of what the sam
 of what the desktop does. The fill is still one colour rather than the sample's gradient, and a vertical ramp is
 still the honest next step.
 
+## The scroller
+
+The sample draws a scroller along a scroll view's **right and bottom** edges, and every part of it is custom drawing
+rather than a toolkit's widget — so these numbers are the design, and not a reading of some other toolkit's:
+
+| role | value | sampled from |
+|---|---|---|
+| the groove the knob runs in | `#D9D9D9` (217,217,217) | the track, x=764..780 |
+| the knob's face | `#FFFFFF` | the knob's body, y=225..266 |
+| the knob's edge, and its dimples | `#BCBCBC` (188,188,188) | the knob's outline, and the darkest point inside a dimple |
+| an arrow's ink | `#000000` | the glyph, x=770..775 |
+| the bar's thickness | **17 px** | the track's width — this tree builds scrollers 15 wide |
+| an arrow | **6 wide, 4 tall** | the glyph's bounding box, and it is WIDER THAN IT IS TALL |
+
+The knob carries **three RINGS down its centre**, 9 px apart. They are rings and not filled dots because that is what
+the sample shows and not an artifact of the export: the darkest value in one is 188 while its middle is 255, so the
+knob's own white shows through the centre. The hole is only a couple of points across, which is why it survived a
+downscaled export at all.
+
+**The sample is a BITMAP EXPORTED FROM AFFINITY DESIGNER, which is the one thing to know before reading any edge in
+it.** Every boundary in the file is blended — the arrow's sides run 194, 212, 229, 243 and 128, 181 through a 255
+ground — and that is what rasterizing a curve does, not a statement about how sharp the design wants its arrow. So
+the SHAPES and the GREYS above are the design and the edge values are the export, which is also why the arrow's box
+is measured a pixel generous at each side.
+
+**And the knob is BRIGHTER THAN ITS GROUND, which is the one place the sample inverts the rule the rest of this file
+is about.** Everywhere else a raised thing is lighter than the window beneath it; a scroller's ground is the GROOVE
+rather than the window, so the knob takes the white and the groove takes the grey — and `#D9D9D9` is still darker
+than all three of the raised faces above (`#F9F9F9`, `#EBEBEB`, white), which is what keeps the knob reading as
+raised even with four surfaces in play.
+
 ## What the sample also says about LAYOUT
 
 Measured, and worth keeping because two of them are things this desktop does not do yet:
