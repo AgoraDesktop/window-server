@@ -165,10 +165,18 @@ a second kind of mark would be one session drawing two vocabularies for one ques
 subclass can answer about a row the pointer is not on, `NSMenu` gained the ability to say which view draws its rows, and
 the combo box's own view answers it from the item's state — the menu's own way of saying "this is the current choice".
 
-**AND THE SKIN IS STILL OWED, WHICH IS SAID PLAINLY RATHER THAN COUNTED AS DONE.** A menu's rows carry a check-mark
-gutter and a shortcut column, and their highlight is a chip INSET inside the row — that inset-and-round is most of what
-makes a Mac menu read as a menu. A list's row is plain text with a full-width fill. Changing that means a row CELL as
-well as a row VIEW, and it is the next thing this control owes rather than something the mark finished.
+**AND THE ROW IS A LIST'S NOW: NO CHECK-MARK GUTTER, NO SHORTCUT COLUMN, AND THE MARK FILLS IT.** A menu lays a row
+out in four strips — the state image's gutter, the image, the title, the key equivalent — and a list needs one of them,
+so the tier has a row cell of its own that gives the title the whole row and inks nothing in the two columns a list
+does not have. The mark became the whole row rather than a chip inside it, because that is the difference between a row
+and a menu item. NEITHER CHANGE TOUCHES A MENU: the doors that ask (`-cg_newItemCell`, `-cg_markRectForRow:`) answer
+the menu's own answers until a subclass says otherwise, and the probe asserts that a plain menu view still makes the
+menu's cell and still draws the menu's chip.
+
+**AND TWO THINGS ARE STILL THE MENU'S, WHICH IS SAID RATHER THAN LEFT TO BE NOTICED.** The ROW HEIGHT is the menu's
+(`NSMenuRowHeight`) and the mark's CORNER RADIUS is the menu's constant, so a list's rows are a menu's height and its
+fill has a menu chip's rounding. Both are one number each if a list wants its own, and neither is a thing this slice
+pretended to have done.
 
 **AND THE EDITOR IS THE WINDOW'S RATHER THAN THE CONTROL'S.** A window lends ONE editor to whichever field is being
 typed into (`-fieldEditor:forObject:`), the cell is told to begin a session with it, and the cell is what it reports
