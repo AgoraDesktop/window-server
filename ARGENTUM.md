@@ -40,6 +40,11 @@ rather than a toolkit's widget — so these numbers are the design, and not a re
 | the bar's thickness | **17 px** | the track's width — this tree builds scrollers 15 wide |
 | an arrow | **6 wide, 4 tall** | the glyph's bounding box, and it is WIDER THAN IT IS TALL |
 
+**AND `#BCBCBC` IS EVERY BORDER IN THE TIER, NOT A SCROLLER'S OWN.** 188 is what `+controlDarkShadowColor` answers, so
+a knob's outline, its three dimples, a text field's edge, a button's bezel and a slider's track are ONE value — the
+sample uses it for all of them, which is what says it is a value of the design rather than a grey each control picks
+for itself. It was 0.55 in the tier until the sample was measured.
+
 The knob carries **three RINGS down its centre**, 9 px apart. They are rings and not filled dots because that is what
 the sample shows and not an artifact of the export: the darkest value in one is 188 while its middle is 255, so the
 knob's own white shows through the centre. The hole is only a couple of points across, which is why it survived a
