@@ -79,10 +79,17 @@ chip at its right end.
 | the chevrons | **10 wide, 5 tall, 2 apart**, in the field's white | the knocked-out triangles, x=1050..1059 |
 | the field's height | **26 px** | y=398..423 — this tree's controls are 23 |
 
-**AND THE FIELD'S FACE IS THE ONE VALUE HERE THIS TIER DOES NOT FOLLOW.** The sample paints `#FFFFFF` on a `#F9F9F9`
+**AND THE FIELD'S FACE IS ONE OF TWO VALUES HERE THIS TIER DOES NOT FOLLOW.** The sample paints `#FFFFFF` on a `#F9F9F9`
 window; this tier paints every control the other way — a face slightly DARKER than the surface under it, and a disabled
 one a step below that — so a pop-up's field takes the face the push button beside it takes and the two AGREE. The
 SHAPE is the sample's and the FILL is the tier's, and it is a departure rather than a reading.
+
+**AND THE TITLE'S MARGIN IS THE OTHER.** MEASURED, the sample's label begins two points inside the field's border —
+the ink starts at x=921 with the border at x=919 — and this tier begins it four, which is `NS_CELL_CONTENT_GAP`: the
+SAME margin a checkbox leaves between its box and its label, named once in `NSCell.h` so the two controls cannot come
+to disagree. A pop-up sitting above a checkbox in one window is where two answers to "how far in do the words begin"
+are visible at once, and the tier takes its own controls' answer. THE FIELD STILL READS AS A FIELD because of its shape
+— one border, radius four — and not because its first letter is two points rather than four from the edge.
 
 **AND THE TWO CHEVRONS ARE THIS CONTROL'S OWN SIGN.** The `NSComboBox` beside it in the same gallery is the same field
 with ONE triangle: a pop-up chooses both ways through its list and a combo box opens one. The label on each row of
