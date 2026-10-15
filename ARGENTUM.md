@@ -102,6 +102,37 @@ which is why the chip's own fill is the accent and the triangles take the field'
 scroller's knob are all outlined in one value, which is the relationship `NSText` argues for where it draws the same
 face for a text field.
 
+## The combo box, which is the same field with ONE triangle
+
+**The sample draws this control on the row below the pop-up's and draws it as the SAME CONTROL**, which is the most
+useful thing in that gallery: one field, one chip, and one mark between them that differs.
+
+| | the pop-up's chip | the combo box's chip |
+|---|---|---|
+| the chip | 20 x 20 at x=1045..1064 | **identical** — x=1045..1064 |
+| white runs down the centre column | **two**: y=405..409 and y=414..418 | **one**: y=447..451 |
+| the widest white row | at each run's BOTTOM | at the run's **TOP** |
+| what that is | an up triangle above a down one | a single down triangle |
+
+The centre column is the measurement that settles it, because it needs no inference: two runs of white mean two
+triangles knocked out of the accent and one run means one. And the widest row's POSITION says which way the single one
+points — a down triangle is widest at its top and an up triangle at its bottom — so "down" is read off the ink rather
+than assumed from the arrow's usual direction.
+
+**AND THE DIFFERENCE IS A SENTENCE ABOUT BEHAVIOUR RATHER THAN A DECORATION.** A pop-up chooses both ways through its
+list, so it carries both arrows; a combo box opens one list and leaves the choosing to a person who may also type, so
+it carries the one that says there is a list down here. Neither arrow is this tier's invention and neither is
+interchangeable: the pair is the sample's own way of telling two controls apart at a glance, which is why the drawing
+demo puts them side by side on one row rather than on two.
+
+**AND THE ONE THING THIS TIER CANNOT YET DO IS TYPE INTO IT, WHICH IS A ROW RATHER THAN AN OVERSIGHT.** Apple builds
+an `NSComboBoxCell` on an `NSTextFieldCell` and THAT is where a combo box's editing lives. This tier has neither
+`NSTextFieldCell` nor `NSTextField` — its `NSText` is a view that edits its own single line — so there is no field cell
+to derive from, the control and its cell start at the nearest base that exists (`NSControl` and `NSActionCell`), and
+editing is the slice that opens with the field cell. What is drawn and modelled here is the field, the chip, the list
+of objects and the selection — which is the whole of what a gallery row shows, since a gallery row is a still picture
+of a closed control.
+
 ## The prelight, which is a departure rather than a reading
 
 **The sample states its four control states outright**, in a legend at the bottom right of the widgets panel — four
