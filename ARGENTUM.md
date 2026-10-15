@@ -79,6 +79,11 @@ chip at its right end.
 | the chevrons | **10 wide, 5 tall, 2 apart**, in the field's white | the knocked-out triangles, x=1050..1059 |
 | the field's height | **26 px** | y=398..423 — this tree's controls are 23 |
 
+**AND THE FIELD'S FACE IS THE ONE VALUE HERE THIS TIER DOES NOT FOLLOW.** The sample paints `#FFFFFF` on a `#F9F9F9`
+window; this tier paints every control the other way — a face slightly DARKER than the surface under it, and a disabled
+one a step below that — so a pop-up's field takes the face the push button beside it takes and the two AGREE. The
+SHAPE is the sample's and the FILL is the tier's, and it is a departure rather than a reading.
+
 **AND THE TWO CHEVRONS ARE THIS CONTROL'S OWN SIGN.** The `NSComboBox` beside it in the same gallery is the same field
 with ONE triangle: a pop-up chooses both ways through its list and a combo box opens one. The label on each row of
 that gallery names the control drawn there, which is how the pair is told apart.
