@@ -95,6 +95,39 @@ which is why the chip's own fill is the accent and the triangles take the field'
 scroller's knob are all outlined in one value, which is the relationship `NSText` argues for where it draws the same
 face for a text field.
 
+## The prelight, which is a departure rather than a reading
+
+**The sample states its four control states outright**, in a legend at the bottom right of the widgets panel — four
+chips with their names written on them — so this is the one part of the mockup that needs no inference at all:
+
+| state | the sample's fill | measured from |
+|---|---|---|
+| Normal | `#BDBDBD` (189,189,189) | the "Normal" chip, interior x=847..919 |
+| Prelight | `#E5E3FF` (229,227,255) | the "Prelight" chip, interior x=929..1001 |
+| Pressed | `#A49AFF` (164,154,255) | the "Pressed" chip — the accent |
+| Disabled | `#E4E4E4` (228,228,228) | the "Disabled" chip |
+
+**AND THE SAMPLE'S PRELIGHT IS A LIGHTENED ACCENT — `#E5E3FF` against the `#A49AFF` it lightens.** THIS TIER DOES NOT
+PAINT THAT. A control the pointer rests on takes a GREY one step DARKER than its resting face, and the accent is left
+to the press. It is a DECISION BY THE DESIGN OWNER rather than something read off the mockup, which is exactly why it
+is written here: the sample disagrees with it, and a departure nobody wrote down is one that gets "corrected" back.
+
+Three things follow, and they are the whole argument for it:
+
+- **The accent means ONE thing.** In this tier it is the press — a button held down, a pop-up whose menu is up — and
+  it is already the selection's colour everywhere else (the bar's highlighted item, a list selection). A prelight that
+  was also an accent made the same hue say "being pointed at" as well, at a lightness of its own.
+- **The fill and the ink stop sharing one channel.** With a grey prelight the ink can stay `+controlTextColor` under the
+  pointer and turn white only under the press, so *where the pointer is* and *what is being used* become two
+  statements instead of one colour trying to carry both. MEASURED: the darkest ink inside a button's face is 0.00
+  idle, 0.00 prelit and 0.75 pressed.
+- **A control stays in one family of colour.** The greys read down a single line — window 0.93, face 0.90, prelight
+  0.88, disabled 0.86 — which is the same relationship the field's fill already departed for.
+
+**AND `+cg_accentPrelightColor` IS RETIRED WITH THE RULE**, rather than kept as a door with no readers. It WAS the
+lightened accent; its only callers were the prelight branches this change replaces. `NSColor.m` deletes one grey that
+two names pointed at; a colour with no readers is the same drift read the other way.
+
 ## What the sample also says about LAYOUT
 
 Measured, and worth keeping because two of them are things this desktop does not do yet:
