@@ -193,18 +193,21 @@ thing shaped like one is `NSSwitchButton`, which is a checkbox with a label. So 
 
 | | the sample | as fractions of the height |
 |---|---|---|
-| the track | **32 x 20**, with both ends round (x=756..787, y=603..622) | width is 1.6 x the height; the radius is half of it |
-| the knob | a white circle, **12** across, **flush** with the end it sits at | 0.6 of the track's height |
+| the track | **39 x 20**, with both ends round (its outline at x=752 and x=790 on one pill) | width is 1.95 x the height; the radius is half of it |
+| the knob | **15** across INCLUDING the ring round it | 0.75 of the track's height |
+| the band | **2.5**, the same beside the knob as above and below it | what the knob's being smaller than the track leaves |
+| both outlines | `#BCBCBC` — one point, and `+controlDarkShadowColor` | the track's edge and the knob's ring |
+| the knob at rest | the TRACK's own colour — `#E7E7E7` on `#E7E7E7` | so the ring is the only thing that shows it |
 | OFF | `#E7E7E7` — the same kind of grey as this tier's `+controlColor` | |
 | ON | `#A49AFF` — the accent | |
 | Prelight | `#E5E3FF` — the accent LIGHTENED | |
-| Pressed | the OFF track's own grey — a press is acknowledged by the knob moving | |
+| Pressed | the track's grey with a WHITE knob — a press is acknowledged by the knob | |
 | Disabled | `#E4E4E4` | |
 
-**AND THE KNOB'S FLUSHNESS IS A MEASUREMENT RATHER THAN A TIDINESS.** The sample's ON pill runs its accent x=801..819
-and its white knob x=822..833, so the track ENDS where the knob does: the only air around the knob is the vertical kind
-that comes from its being smaller than the track. Putting air at the ends as well would have been a guess with an answer
-already sitting in the file.
+**AND EVERY ONE OF THOSE WAS MEASURED TWICE, BECAUSE THE FIRST PASS GOT TWO OF THEM WRONG.** A scan that looks for runs
+of three pixels or more cannot see a one-point outline at all, so the first pass reported a track of 32 and a knob FLUSH
+with its end — having taken the knob's edge for the track's. Reading the outlines instead gives 39 and a knob with an
+even band of track around it: the numbers above are the second reading, and the ones the tier draws.
 
 ## The prelight, which is a departure rather than a reading
 
