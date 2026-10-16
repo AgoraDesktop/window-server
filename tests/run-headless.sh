@@ -16,6 +16,10 @@ TOP_COLOUR=FF0000
 BOTTOM_COLOUR=0000FF
 STATUS_COLOUR=00FF00
 STATUS_LENGTH=64
+# kCGDesktopWindowLevel = kCGBaseWindowLevel (INT32_MIN) + 20 — the level BELOW every window, from
+# libagora-drawing/CGWindowLevel.h. The server orders by the integer and does not care which; this is the one F4
+# asks a window to sit at, so the test proves a DESKTOP-level window stays under a normal one.
+DESKTOP_LEVEL=$(( -2147483648 + 20 ))
 
 cleanup() {
 	[ -n "${SPID:-}" ] && kill "${SPID}" 2>/dev/null
@@ -46,16 +50,17 @@ if [ ! -S "${RUNTIME}/${SOCK}" ]; then
 	exit 1
 fi
 
-# **TWO WINDOWS, AND THE LEVELS AND THE CREATION ORDER DISAGREE.** The first client is created at a HIGH level
-# and the second at a LOW one, OVERLAPPING it — so creation order alone would put the second on top, and only
-# ordering by level puts the first there. That disagreement is the whole test: with the levels agreeing with the
-# creation order it would pass whether the server ordered by level or not.
+# **TWO WINDOWS, AND THE LEVELS AND THE CREATION ORDER DISAGREE.** The first client is created at the NORMAL
+# level and the second at the DESKTOP level, OVERLAPPING it — so creation order alone would put the second on top,
+# and only ordering by level puts the first there. That disagreement is the whole test: with the levels agreeing
+# with the creation order it would pass whether the server ordered by level or not. AND THE LOWER ONE IS A DESKTOP
+# LEVEL, not another ordinary window level, because F4's claim is that a desktop-level window is below every window.
 WAYLAND_DISPLAY="${SOCK}" "${CLIENT}" --width "${CLIENT_W}" --height "${CLIENT_H}" \
-	--colour "${TOP_COLOUR}" --x 100 --y 80 --level 10 --frames 100000 >/dev/null 2>&1 &
+	--colour "${TOP_COLOUR}" --x 100 --y 80 --level 0 --frames 100000 >/dev/null 2>&1 &
 FIRST=$!
 sleep 0.5
 WAYLAND_DISPLAY="${SOCK}" "${CLIENT}" --width "${CLIENT_W}" --height "${CLIENT_H}" \
-	--colour "${BOTTOM_COLOUR}" --x 150 --y 110 --level 0 --frames 100000 >/dev/null 2>&1 &
+	--colour "${BOTTOM_COLOUR}" --x 150 --y 110 --level "${DESKTOP_LEVEL}" --frames 100000 >/dev/null 2>&1 &
 SECOND=$!
 # **AND A THIRD CLIENT THAT IS NOT A WINDOW AT ALL.** It asks for a frame AND to be a status item, so what is
 # measured is the SERVER's placement winning rather than a client that never asked to be anywhere. Nothing

@@ -304,21 +304,31 @@ void aws_output_render(struct aws_server *server)
 	 * above that, without this file knowing what any of those numbers mean. Within a level the list order is the
 	 * stacking, which is what raise and lower change. */
 	{
-		int lowest = 0, highest = 0, level, first = 1;
+		/* **AND THE WALK IS OVER THE LEVELS THAT ARE PRESENT, NOT OVER EVERY NUMBER BETWEEN THEM.** A level
+		 * is an arbitrary integer, and the desktop's is `INT32_MIN + 20` while an ordinary window's is 0 — so
+		 * a walk from `lowest` to `highest` is two billion passes PER FRAME. MEASURED: with a desktop-level
+		 * window and a normal one the server stopped compositing entirely, and the frame the harness waited for
+		 * never came. Each pass now finds the NEXT level above the last one drawn, so the cost is the number of
+		 * levels PRESENT and nothing else. */
+		int have = 0, lastLevel = 0;
 
-		wl_list_for_each(surface, &server->surfaces, link) {
-			if (!surface->mapped) {
-				continue;
+		for (;;) {
+			int level = 0, found = 0;
+			wl_list_for_each(surface, &server->surfaces, link) {
+				if (!surface->mapped) {
+					continue;
+				}
+				if (have && surface->level <= lastLevel) {
+					continue;
+				}
+				if (!found || surface->level < level) {
+					level = surface->level;
+					found = 1;
+				}
 			}
-			if (first || surface->level < lowest) {
-				lowest = surface->level;
+			if (!found) {
+				break;
 			}
-			if (first || surface->level > highest) {
-				highest = surface->level;
-			}
-			first = 0;
-		}
-		for (level = lowest; level <= highest; level++) {
 			wl_list_for_each(surface, &server->surfaces, link) {
 				/* **AND A WINDOW THE APPLICATION HAS TAKEN OFF THE SCREEN IS NOT COMPOSITED — AND IS NOT
 				 * RELEASED EITHER.** `-orderOut:` is a real door, and without this the server painted every window
@@ -381,6 +391,8 @@ void aws_output_render(struct aws_server *server)
 				 * draw again only once its picture is on screen. */
 				aws_surface_frame_done(surface, time);
 			}
+			lastLevel = level;
+			have = 1;
 		}
 
 		/* **ONE RELEASE PER SURFACE PER PASS, WHICHEVER LEVEL IT IS AT.** A Wayland buffer belongs to the

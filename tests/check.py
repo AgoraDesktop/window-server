@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Read the window server's own screenshot and assert what the two test clients put there.
 
-THE ASSERTION IS AN ORDER, NOT A PICTURE. Two clients draw flat colours and OVERLAP, and THE ONE THAT ASKED FOR
-THE HIGHER LEVEL IS ON TOP — while being the one that was created FIRST. That disagreement is deliberate: with
-the levels agreeing with the creation order this would pass whether the server ordered by level or not, which is
-the difference between a test and a decoration.
+THE ASSERTION IS AN ORDER, NOT A PICTURE. Two clients draw flat colours and OVERLAP, and THE NORMAL-LEVEL ONE IS
+ON TOP OF THE DESKTOP-LEVEL ONE — while being the one that was created FIRST. That disagreement is deliberate:
+with the levels agreeing with the creation order this would pass whether the server ordered by level or not, which
+is the difference between a test and a decoration. AND THE LOWER ONE IS AT A DESKTOP LEVEL, so what is shown is
+that a window below every other level stays below a normal window created before it.
 
 AND A THIRD CLIENT IS NOT A WINDOW AT ALL: it is a STATUS ITEM, which the server PLACES — the client asks for a
 frame at (0,0) as well, ON PURPOSE, so every assertion about where it ended up is the server's answer winning.
@@ -18,7 +19,7 @@ MENU_BAR_HEIGHT = 24
 SYSTEM_MENU_MID = 17             # a column THROUGH the glyph: server.h places it at 10..25 (AWS_SYSTEM_MENU_LEFT_MARGIN)
 GLYPH = (0, 0, 0)                # server.h's AWS_SYSTEM_MENU_GLYPH_COLOUR — Argentum's ink
 TOP_AT = (100, 80)               # the first client's frame, asked for with agora_window.set_frame
-BOTTOM_AT = (150, 110)           # the second's — created LATER and at a LOWER level
+BOTTOM_AT = (150, 110)           # the second's — created LATER and at the DESKTOP level
 WINDOW = (320, 200)
 
 
@@ -47,7 +48,7 @@ def main():
          px[TOP_AT[0] + 2, TOP_AT[1] + 2] == ctop),
         (f"the low-level client is at ITS frame ({BOTTOM_AT[0]},{BOTTOM_AT[1]})",
          px[BOTTOM_AT[0] + w - 2, BOTTOM_AT[1] + h - 2] == cbot),
-        (f"THE HIGHER LEVEL IS ON TOP at {over}, and it was created FIRST",
+        (f"THE NORMAL WINDOW IS ON TOP OF THE DESKTOP WINDOW at {over}, and the desktop window was created LAST",
          px[over[0], over[1]] == ctop),
         ("and it is not the later window showing through", px[over[0], over[1]] != cbot),
         # **THE ORIGIN IS NO LONGER THE SERVER'S TO LEAVE ALONE**: the strip the server draws now owns the top

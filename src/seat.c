@@ -292,31 +292,36 @@ static void bind_seat(struct wl_client *client, void *data, uint32_t version, ui
 struct aws_surface *aws_surface_at(struct aws_server *server, int x, int y)
 {
 	struct aws_surface *surface;
-	int highest = 0, lowest = 0, level, first = 1;
+	int have = 0, lastLevel = 0;
 
-	/* THE LEVEL RANGE THAT HAS ANYTHING VISIBLE, which is what the search walks. */
-	wl_list_for_each(surface, &server->surfaces, link) {
-		if (!surface->mapped || !surface->visible || surface->current_buffer == NULL) {
-			continue;
+	/* **AND THE WALK IS OVER THE LEVELS THAT ARE PRESENT, NOT OVER EVERY NUMBER BETWEEN THEM — the same fix
+	 * the compositor's loop carries, and for the same reason: a desktop level is `INT32_MIN + 20` while a
+	 * window's is 0, so a walk from `highest` down to `lowest` is two billion passes per hit test. MEASURED,
+	 * as a pointer that never found its window under a desktop-level surface. Each pass finds the NEXT level
+	 * BELOW the last one searched. */
+	for (;;) {
+		int level = 0, found = 0;
+		wl_list_for_each(surface, &server->surfaces, link) {
+			if (!surface->mapped || !surface->visible || surface->current_buffer == NULL) {
+				continue;
+			}
+			if (have && surface->level >= lastLevel) {
+				continue;
+			}
+			if (!found || surface->level > level) {
+				level = surface->level;
+				found = 1;
+			}
 		}
-		if (first || surface->level > highest) {
-			highest = surface->level;
+		if (!found) {
+			return NULL;
 		}
-		if (first || surface->level < lowest) {
-			lowest = surface->level;
-		}
-		first = 0;
-	}
-	if (first) {
-		return NULL;
-	}
-	/* **FROM THE HIGHEST LEVEL DOWN, AND ONLY THEN THE LAST-MAPPED SURFACE WITHIN ONE.** The highest level is
-	 * where the search STARTS, not where it stops: a point over a level-0 window is not over the level-24 menu
-	 * bar just because the bar is the highest thing on the screen. MEASURED, the first version of this returned
-	 * the highest level's surfaces and nothing else, so the dropdown a click had just opened was never found —
-	 * the pointer's focus belonged to the bar and the menu never heard the mouse. Within a level the walk is
-	 * reverse, which is the same "last mapped is on top" the compositor's inner loop uses. */
-	for (level = highest; level >= lowest; level--) {
+		/* **FROM THE HIGHEST LEVEL DOWN, AND ONLY THEN THE LAST-MAPPED SURFACE WITHIN ONE.** The highest level is
+		 * where the search STARTS, not where it stops: a point over a level-0 window is not over the level-24 menu
+		 * bar just because the bar is the highest thing on the screen. MEASURED, the first version of this returned
+		 * the highest level's surfaces and nothing else, so the dropdown a click had just opened was never found —
+		 * the pointer's focus belonged to the bar and the menu never heard the mouse. Within a level the walk is
+		 * reverse, which is the same "last mapped is on top" the compositor's inner loop uses. */
 		wl_list_for_each_reverse(surface, &server->surfaces, link) {
 			struct wl_shm_buffer *shm;
 			int width, height;
@@ -337,6 +342,8 @@ struct aws_surface *aws_surface_at(struct aws_server *server, int x, int y)
 				return surface;
 			}
 		}
+		lastLevel = level;
+		have = 1;
 	}
 	return NULL;
 }
