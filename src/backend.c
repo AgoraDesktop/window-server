@@ -22,7 +22,17 @@
 
 const char *aws_backend_names(void)
 {
-	return "headless, x11, drm";
+	/* NAMED AS BUILT, NOT AS IMAGINED: the backends are chosen by CMake options
+	 * (AWS_WITH_DRM, AWS_WITH_X11), so a build without one must not advertise it in
+	 * --help or in the "no backend named" message. */
+	return "headless"
+#ifdef AWS_HAVE_X11
+	       ", x11"
+#endif
+#ifdef AWS_HAVE_DRM
+	       ", drm"
+#endif
+	       ;
 }
 
 int aws_backend_init(struct aws_server *server, const char *name, int width, int height)

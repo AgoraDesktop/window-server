@@ -24,22 +24,55 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-# AND ONE OPTIONAL ONE. An X11 backend lets the compositor be run NESTED — in a window on a desktop — which is
-# how it is developed and demonstrated without taking over a machine's display. It is OPTIONAL on purpose: the
-# core does not link libX11 unless the backend is wanted, so "no X11-native target" stays true of the thing
-# that would be shipped. See src/backend-x11.c for why an X11 backend is not an X11 target.
+# ---------------------------------------------------------------------------
+# WHICH BACKENDS ARE BUILT IS A DECISION, NOT A GUESS.
+#
+# These were AUTO-DETECTED: pkg-config found a library, so the backend was
+# compiled in. That made the shipped binary depend on what the BUILD HOST
+# happened to have — a package built where libX11 was installed got an X11
+# backend, one built where it was not did not, and nothing recorded which.
+# Pinning a release does not help while the feature set still floats with the
+# machine.
+#
+# Now each option decides. When an option is ON its dependency is REQUIRED, so a
+# requested backend whose library is missing fails the configure instead of
+# silently vanishing; when it is OFF the library is not looked for at all, so a
+# present-but-unwanted library cannot slip into the binary.
+#
+# THE DEFAULTS ARE THE SHIPPING INTENT. The DRM/KMS output is the one that ships.
+# The X11 backend is a development convenience — run the compositor nested in a
+# window — and the top-level README's "no X11-native target" keeps it out of the
+# shipped thing. libinput is the real input path; the note at its option records
+# the one thing about it that is not settled.
+# ---------------------------------------------------------------------------
+option(AWS_WITH_DRM      "build the DRM/KMS output backend (the shipping output)" ON)
+option(AWS_WITH_X11      "build the nested X11 backend (development only)"        OFF)
+option(AWS_WITH_LIBINPUT "build the libinput device-input path"                   ON)
+
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WAYLAND_SERVER REQUIRED IMPORTED_TARGET wayland-server)
 # AND THE CLIENT SIDE TOO, for the TEST CLIENT only: the server speaks the protocol's server end, and the test
 # speaks its client end, so the two are different libraries and neither substitutes for the other.
 pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
 pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
-pkg_check_modules(X11 IMPORTED_TARGET x11)
-# AND libinput, ALSO OPTIONAL, for reading the machine's own devices. libudev comes with it.
-pkg_check_modules(LIBINPUT IMPORTED_TARGET libinput)
-pkg_check_modules(LIBUDEV IMPORTED_TARGET libudev)
-# AND libdrm, OPTIONAL, for the DRM/KMS output — the shipping backend.
-pkg_check_modules(DRM IMPORTED_TARGET libdrm)
+
+if(AWS_WITH_DRM)
+  pkg_check_modules(DRM REQUIRED IMPORTED_TARGET libdrm)
+endif()
+if(AWS_WITH_X11)
+  pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
+endif()
+if(AWS_WITH_LIBINPUT)
+  # LIINPUT'S UDEV PATH IS NOT SEPARABLE HERE, AND THAT IS A RECORDED CONFLICT. input-libinput.c calls
+  # udev_new(), libinput_udev_create_context() and libinput_udev_assign_seat(), so this path needs libinput
+  # AND libudev, and the seat assignment goes through logind. The top-level README excludes libudev and
+  # logind from Agora. Both cannot hold at once: a build that must honor the rule configures
+  # -DAWS_WITH_LIBINPUT=OFF, and then the shipping (DRM) output has NO device input, because this is the
+  # only device-input path written. Which side gives — accept udev/logind, or write an input path that does
+  # not need them — is the project's call; the option makes the choice explicit instead of silent.
+  pkg_check_modules(LIBINPUT REQUIRED IMPORTED_TARGET libinput)
+  pkg_check_modules(LIBUDEV REQUIRED IMPORTED_TARGET libudev)
+endif()
 find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
 
 find_file(XDG_SHELL_XML
@@ -106,28 +139,28 @@ target_link_libraries(window-server PRIVATE
   PkgConfig::WAYLAND_SERVER
   PkgConfig::XKBCOMMON)
 
-if(DRM_FOUND)
+if(AWS_WITH_DRM)
   target_compile_definitions(window-server PRIVATE AWS_HAVE_DRM)
   target_link_libraries(window-server PRIVATE PkgConfig::DRM)
-  message(STATUS "window-server: the drm (KMS) backend is built in")
+  message(STATUS "window-server: drm (KMS) output backend: on")
 else()
-  message(STATUS "window-server: no libdrm — no drm backend")
+  message(STATUS "window-server: drm (KMS) output backend: off (AWS_WITH_DRM=OFF)")
 endif()
 
-if(LIBINPUT_FOUND AND LIBUDEV_FOUND)
+if(AWS_WITH_LIBINPUT)
   target_compile_definitions(window-server PRIVATE AWS_HAVE_LIBINPUT)
   target_link_libraries(window-server PRIVATE PkgConfig::LIBINPUT PkgConfig::LIBUDEV)
-  message(STATUS "window-server: libinput input is built in")
+  message(STATUS "window-server: libinput device input: on")
 else()
-  message(STATUS "window-server: no libinput — the seat is fed by the nested backend only")
+  message(STATUS "window-server: libinput device input: off (AWS_WITH_LIBINPUT=OFF) — no device input")
 endif()
 
-if(X11_FOUND)
+if(AWS_WITH_X11)
   target_compile_definitions(window-server PRIVATE AWS_HAVE_X11)
   target_link_libraries(window-server PRIVATE PkgConfig::X11)
-  message(STATUS "window-server: the x11 (nested) backend is built in")
+  message(STATUS "window-server: x11 (nested) backend: on")
 else()
-  message(STATUS "window-server: no libX11, so no x11 backend — headless only")
+  message(STATUS "window-server: x11 (nested) backend: off (AWS_WITH_X11=OFF)")
 endif()
 
 enable_testing()
