@@ -185,6 +185,27 @@ an `NSText`, and the text system is stage F", written when the tree had no `NSTe
 the text slice, so the refusal's ground had expired and the door is a door again. THE TITLE'S MARGIN IS UNCHANGED and
 still four points.
 
+## The switch, which is the tier's own control rather than an era door
+
+**Apple has no door for this shape in the era the tree pins.** `NSSwitch` arrived in 10.15; in 10.5 and 10.6 the only
+thing shaped like one is `NSSwitchButton`, which is a checkbox with a label. So the sample's pill is drawn by `AGSwitch`
+— a track and a knob — and its numbers are the sample's, MEASURED rather than chosen:
+
+| | the sample | as fractions of the height |
+|---|---|---|
+| the track | **32 x 20**, with both ends round (x=756..787, y=603..622) | width is 1.6 x the height; the radius is half of it |
+| the knob | a white circle, **12** across, **flush** with the end it sits at | 0.6 of the track's height |
+| OFF | `#E7E7E7` — the same kind of grey as this tier's `+controlColor` | |
+| ON | `#A49AFF` — the accent | |
+| Prelight | `#E5E3FF` — the accent LIGHTENED | |
+| Pressed | the OFF track's own grey — a press is acknowledged by the knob moving | |
+| Disabled | `#E4E4E4` | |
+
+**AND THE KNOB'S FLUSHNESS IS A MEASUREMENT RATHER THAN A TIDINESS.** The sample's ON pill runs its accent x=801..819
+and its white knob x=822..833, so the track ENDS where the knob does: the only air around the knob is the vertical kind
+that comes from its being smaller than the track. Putting air at the ends as well would have been a guess with an answer
+already sitting in the file.
+
 ## The prelight, which is a departure rather than a reading
 
 **The sample states its four control states outright**, in a legend at the bottom right of the widgets panel — four
@@ -201,6 +222,14 @@ chips with their names written on them — so this is the one part of the mockup
 PAINT THAT. A control the pointer rests on takes a GREY one step DARKER than its resting face, and the accent is left
 to the press. It is a DECISION BY THE DESIGN OWNER rather than something read off the mockup, which is exactly why it
 is written here: the sample disagrees with it, and a departure nobody wrote down is one that gets "corrected" back.
+
+**AND THE RULE HAS ONE EXCEPTION, WHICH THE SAMPLE ITSELF IS THE AUTHORITY FOR: A SWITCH.** The sample's own four-state
+legend gives a switch's prelight as `#E5E3FF` — the accent LIGHTENED, which is the very thing this section departs from
+— and the departure does not reach it: a switch's track IS the accent when it is ON, so "a step down the grey scale" has
+nowhere to go, there being no grey to step down FROM. So `+cg_accentPrelightColor` is back, the switch is its one user,
+and the rule above is left exactly as it was for the controls it was about. AN OFF SWITCH IS THE OTHER HALF OF THE SAME
+FACT: its track IS a grey, so where the sample draws no prelight at all this tier's rule applies and it steps down like
+every other grey face — and the two are tellable apart in the ink itself, one being a grey and the other a tint.
 
 Three things follow, and they are the whole argument for it:
 
