@@ -1,0 +1,17 @@
+@PACKAGE_INIT@
+
+# Consume the window server (window-server).
+#
+# THE PROGRAM IS INSTALLED, IN BINDIR. But the piece another component consumes is
+# the PROTOCOL: `agora-shell.xml` is the contract a client generates its bindings
+# from, and this package exposes where it was installed so a consumer does not
+# reach into this component's source tree.
+#
+#     find_package(AgoraWindowServer CONFIG REQUIRED)
+#     wayland-scanner client-header \
+#         ${AgoraWindowServer_PROTOCOL_DIR}/agora-shell.xml agora-shell-client-protocol.h
+
+set_and_check(AgoraWindowServer_PROTOCOL_DIR
+    "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_DATADIR@/agora/protocol")
+
+check_required_components(AgoraWindowServer)

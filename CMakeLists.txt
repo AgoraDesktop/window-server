@@ -132,3 +132,33 @@ endif()
 
 enable_testing()
 add_subdirectory(tests)
+
+# ---------------------------------------------------------------------------
+# Install rules: the program, and the protocol it owns
+#
+# THE PROTOCOL IS THE PIECE A CLIENT CONSUMES. `protocol/agora-shell.xml` is the
+# contract libagora-app generates its client bindings from; libagora-app reads it
+# out of this source tree today only because window-server installed nothing.
+# Installing it beside the data, and exposing its directory through a CMake
+# package, is what lets a consumer stop reaching into a sibling checkout.
+# ---------------------------------------------------------------------------
+
+install(TARGETS window-server
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+install(FILES protocol/agora-shell.xml
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/agora/protocol)
+
+include(CMakePackageConfigHelpers)
+
+configure_package_config_file(cmake/AgoraWindowServerConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/AgoraWindowServerConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/AgoraWindowServer)
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/AgoraWindowServerConfigVersion.cmake
+    VERSION 1.0.0
+    COMPATIBILITY SameMajorVersion)
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/AgoraWindowServerConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/AgoraWindowServerConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/AgoraWindowServer)
