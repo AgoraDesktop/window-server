@@ -200,7 +200,6 @@ thing shaped like one is `NSSwitchButton`, which is a checkbox with a label. So 
 | the knob at rest | the TRACK's own colour — `#E7E7E7` on `#E7E7E7` | so the ring is the only thing that shows it |
 | OFF | `#E7E7E7` — the same kind of grey as this tier's `+controlColor` | |
 | ON | `#A49AFF` — the accent | |
-| Prelight | `#E5E3FF` — the accent LIGHTENED | |
 | Pressed | the track's grey with a WHITE knob — a press is acknowledged by the knob | |
 | Disabled | `#E4E4E4` | |
 
@@ -226,13 +225,12 @@ PAINT THAT. A control the pointer rests on takes a GREY one step DARKER than its
 to the press. It is a DECISION BY THE DESIGN OWNER rather than something read off the mockup, which is exactly why it
 is written here: the sample disagrees with it, and a departure nobody wrote down is one that gets "corrected" back.
 
-**AND THE RULE HAS ONE EXCEPTION, WHICH THE SAMPLE ITSELF IS THE AUTHORITY FOR: A SWITCH.** The sample's own four-state
-legend gives a switch's prelight as `#E5E3FF` — the accent LIGHTENED, which is the very thing this section departs from
-— and the departure does not reach it: a switch's track IS the accent when it is ON, so "a step down the grey scale" has
-nowhere to go, there being no grey to step down FROM. So `+cg_accentPrelightColor` is back, the switch is its one user,
-and the rule above is left exactly as it was for the controls it was about. AN OFF SWITCH IS THE OTHER HALF OF THE SAME
-FACT: its track IS a grey, so where the sample draws no prelight at all this tier's rule applies and it steps down like
-every other grey face — and the two are tellable apart in the ink itself, one being a grey and the other a tint.
+**AND NO CONTROL IN THIS TIER PRELIGHTS, INCLUDING THIS ONE.** The sample draws a paler accent for a switch the
+pointer rests on, and the design owner's rule departs from it: a control does not change colour under a person. So the
+switch's track holds its value and nothing else — the accent when it is ON, the control's grey when it is OFF, the
+out-of-action grey when it is disabled — and a press is answered by the KNOB turning white rather than by the track
+changing, which is where the sample puts it too. `+cg_accentPrelightColor`, which existed for exactly the state this
+departs from, is deleted with it; its history is in `NSColor.h` beside the accent.
 
 Three things follow, and they are the whole argument for it:
 
