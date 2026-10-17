@@ -25,12 +25,30 @@
 #include "server.h"
 
 #include <errno.h>
+#include <time.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 /* A SIGNAL DOES NOT KILL THIS PROCESS; IT ASKS THE LOOP TO STOP. See where it is registered. */
+/* **A COMPOSITE COSTS A FULL-SCREEN COPY, SO THE RATE IS THE OUTPUT'S, NOT THE CLIENTS'.** A client that asks for a
+ * frame the moment it is given one — the frame callback contract — will happily run as fast as the compositor can
+ * answer, and MEASURED, one such client (a test wallpaper stub) drove 233 composites a second and 86% of a core
+ * with nobody touching the machine. So a render that is due but EARLY is deferred to the next frame's boundary by
+ * the event loop's own timeout: the work still happens, at the pace a display can show it. */
+#define AWS_FRAME_NS 16666666LL		/* 1/60 s */
+
+static int64_t aws_monotonic_ns(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+}
+
+static int64_t s_last_render_ns;
+
 static int on_signal(int signal_number, void *data)
 {
 	struct aws_server *server = data;
@@ -145,8 +163,16 @@ int main(int argc, char **argv)
 		 * signal that arrives while the loop is blocked is ordinary on a desktop, so it now retries; anything else
 		 * shouts. */
 		{
-			int rc = wl_event_loop_dispatch(server->loop,
-							(server->render_pending && !aws_backend_busy(server)) ? 0 : -1);
+			int timeout = -1;
+			int rc;
+
+			if (server->render_pending && !aws_backend_busy(server)) {
+				int64_t now = aws_monotonic_ns();
+				int64_t due = s_last_render_ns + AWS_FRAME_NS;
+
+				timeout = (now >= due) ? 0 : (int)((due - now) / 1000000LL) + 1;
+			}
+			rc = wl_event_loop_dispatch(server->loop, timeout);
 
 			if (rc < 0) {
 				if (errno == EINTR) {
@@ -184,7 +210,12 @@ int main(int argc, char **argv)
 				}
 			}
 		}
-		if (server->render_pending && !aws_backend_busy(server)) {
+		/* **AND THE RENDER ITSELF WAITS FOR THE FRAME'S BOUNDARY, WHICH IS THE HALF THAT ACTUALLY PACES.** Waiting
+		 * only in the event loop's timeout does nothing while clients keep committing — every commit wakes the
+		 * loop, and the render ran on each wake. MEASURED: 270 composites a second after the timeout alone. The
+		 * deadline belongs on the PAINT. */
+		if (server->render_pending && !aws_backend_busy(server) &&
+		    aws_monotonic_ns() >= s_last_render_ns + AWS_FRAME_NS) {
 			server->render_pending = 0;
 			aws_output_render(server);
 			/* AND THEN IT GOES ON THE SCREEN, if the backend has one. */
@@ -196,6 +227,7 @@ int main(int argc, char **argv)
 			 * composited one frame and then stopped with a connected client. */
 			wl_display_flush_clients(server->display);
 			server->frames++;
+			s_last_render_ns = aws_monotonic_ns();
 			if (server->max_frames > 0 && server->frames >= server->max_frames) {
 				break;
 			}

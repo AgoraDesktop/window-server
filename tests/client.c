@@ -14,7 +14,7 @@
  * commit is what asks for a role to be configured, and a client that attaches first is committing before the
  * compositor has said the surface may be shown.
  *
- *   client [--width W] [--height H] [--frames N] [--colour RRGGBB] [--x X] [--y Y] [--level L]
+ *   client [--width W] [--height H] [--frames N] [--hold] [--colour RRGGBB] [--x X] [--y Y] [--level L]
  *          [--status-length N]
  */
 
@@ -52,6 +52,11 @@ struct client {
 	int configured;
 	int frames;
 	int max_frames;
+	/* **STAY CONNECTED AFTER THE LAST FRAME, WITHOUT DRAWING ANOTHER.** A wallpaper is a STILL
+	 * picture: the client that redraws on every frame callback makes the compositor composite full
+	 * screen as fast as it can answer — MEASURED, 233 a second and 86% of a core — for pixels that
+	 * never change. `--hold` is how a test says "this one is scenery". */
+	int hold;
 	uint32_t colour;
 };
 
@@ -183,6 +188,8 @@ int main(int argc, char **argv)
 			client.width = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--height") == 0 && i + 1 < argc) {
 			client.height = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "--hold") == 0) {
+			client.hold = 1;
 		} else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
 			client.max_frames = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--colour") == 0 && i + 1 < argc) {
@@ -235,6 +242,13 @@ int main(int argc, char **argv)
 	 * compositor's callback is the permission to draw again. */
 	submit_frame(&client);
 	while (client.frames < client.max_frames) {
+		if (wl_display_dispatch(client.display) == -1) {
+			break;
+		}
+	}
+	/* AND THEN JUST LISTEN. Nothing is drawn again, so nothing is asked for again, and the surface keeps the
+	 * buffer it already has — which is what a still picture is. */
+	while (client.hold) {
 		if (wl_display_dispatch(client.display) == -1) {
 			break;
 		}
