@@ -63,13 +63,12 @@ if(AWS_WITH_X11)
   pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
 endif()
 if(AWS_WITH_LIBINPUT)
-  # LIINPUT'S UDEV PATH IS NOT SEPARABLE HERE, AND THAT IS A RECORDED CONFLICT. input-libinput.c calls
-  # udev_new(), libinput_udev_create_context() and libinput_udev_assign_seat(), so this path needs libinput
-  # AND libudev, and the seat assignment goes through logind. The top-level README excludes libudev and
-  # logind from Agora. Both cannot hold at once: a build that must honor the rule configures
-  # -DAWS_WITH_LIBINPUT=OFF, and then the shipping (DRM) output has NO device input, because this is the
-  # only device-input path written. Which side gives — accept udev/logind, or write an input path that does
-  # not need them — is the project's call; the option makes the choice explicit instead of silent.
+  # LIINPUT'S UDEV PATH IS NOT SEPARABLE HERE, AND THE DEVIATION IS RECORDED RATHER THAN HIDDEN.
+  # input-libinput.c calls udev_new(), libinput_udev_create_context() and libinput_udev_assign_seat(), so
+  # this path needs libinput AND libudev, and the seat assignment goes through logind — both of which the
+  # top-level README's "No systemd" rule excludes. THE PROJECT HAS DECIDED TO KEEP IT: real device input
+  # outranks the rule here, and the alternative written path does not exist (with this off, the shipping
+  # DRM output has NO device input). The shipped compositor therefore links libudev and logind, deliberately.
   pkg_check_modules(LIBINPUT REQUIRED IMPORTED_TARGET libinput)
   pkg_check_modules(LIBUDEV REQUIRED IMPORTED_TARGET libudev)
 endif()
