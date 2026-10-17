@@ -98,6 +98,11 @@ static int x11_dispatch(int fd, uint32_t mask, void *data)
 			break;
 		case ClientMessage:
 			if ((Atom)event.xclient.data.l[0] == x11->wm_delete) {
+				/* **AND SAID OUT LOUD, because it is the OTHER way this process ends and it is otherwise
+				 * indistinguishable from a signal.** A window manager sends this when the close button is
+				 * pressed — and, for a window it has decided is not responding, when a person is offered to
+				 * close it. */
+				fprintf(stderr, "window-server: the window manager asked to close (WM_DELETE_WINDOW)\n");
 				server->running = 0;
 			}
 			break;

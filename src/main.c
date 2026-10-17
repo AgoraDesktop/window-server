@@ -35,6 +35,10 @@ static int on_signal(int signal_number, void *data)
 	struct aws_server *server = data;
 
 	(void)signal_number;
+	/* **SAYING WHICH SIGNAL, BECAUSE "IT JUST STOPPED" IS NOT A DIAGNOSIS.** A compositor that ends silently
+	 * leaves a frozen frame and a client that can only say "the window server has gone" — MEASURED, exactly that:
+	 * a person's click made a menu appear and then the whole session died with nothing in either log to say why. */
+	fprintf(stderr, "window-server: signal %d — stopping\n", signal_number);
 	server->running = 0;
 	return 0;
 }
