@@ -65,8 +65,11 @@ SECOND=$!
 # **AND A THIRD CLIENT THAT IS NOT A WINDOW AT ALL.** It asks for a frame AND to be a status item, so what is
 # measured is the SERVER's placement winning rather than a client that never asked to be anywhere. Nothing
 # overlaps the bar, so this tests the packing without depending on the other two.
+# **AND A LEVEL ABOVE THE BAR**, which is where a status item belongs (`NSStatusWindowLevel`, what the AppKit's
+# `NSStatusItem` sets on its own window): the bar has a level now, so at the default the item is drawn first and
+# the bar covers it.
 WAYLAND_DISPLAY="${SOCK}" "${CLIENT}" --width "${CLIENT_W}" --height "${CLIENT_H}" \
-	--colour "${STATUS_COLOUR}" --x 0 --y 0 --status-length "${STATUS_LENGTH}" --frames 100000 >/dev/null 2>&1 &
+	--colour "${STATUS_COLOUR}" --x 0 --y 0 --status-length "${STATUS_LENGTH}" --level 25 --frames 100000 >/dev/null 2>&1 &
 THIRD=$!
 # **AND THE RUN LASTS LONG ENOUGH FOR BOTH TO BE ON THE SCREEN** before the server is asked to stop. Then the
 # signal stops the LOOP (see `on_signal` in main.c), the ordinary exit path runs, and the screenshot is written
