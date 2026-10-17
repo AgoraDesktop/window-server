@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef AWS_HAVE_X11
 
@@ -50,6 +51,17 @@ struct x11_state {
 	Atom wm_delete;
 	struct wl_event_source *source;
 };
+
+/* **A WALL-CLOCK MILLISECOND, SO A DIAGNOSTIC CAN BE LINED UP WITH ANOTHER PROCESS'S.** Two logs that each say
+ * "the click happened" cannot be compared without a clock in both, and the question this answers — how long the
+ * click waited before the view saw it — needs exactly that. */
+static long long aws_diag_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_REALTIME, &ts);
+	return (long long)ts.tv_sec * 1000LL + (long long)(ts.tv_nsec / 1000000L);
+}
 
 static void x11_present(struct aws_server *server)
 {
@@ -88,8 +100,9 @@ static int x11_dispatch(int fd, uint32_t mask, void *data)
 				: (event.type == ButtonRelease) ? "ButtonRelease"
 				: (event.type == EnterNotify) ? "EnterNotify" : "LeaveNotify";
 
-			fprintf(stderr, "  DIAG x11 event: %s at (%d,%d) button %u\n", what, event.xbutton.x,
-				event.xbutton.y, (unsigned)event.xbutton.button);
+			fprintf(stderr, "  DIAG x11 event %lld: %s at (%d,%d) button %u\n",
+				(long long)aws_diag_ms(), what, event.xbutton.x, event.xbutton.y,
+				(unsigned)event.xbutton.button);
 		}
 		switch (event.type) {
 		case Expose:
