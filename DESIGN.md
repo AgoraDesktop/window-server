@@ -180,3 +180,12 @@ extends to a wire format that Apple never published would be inventing one and c
 **THE LEVEL NUMBERS ARE UNCHANGED AND STILL UNUSED.** Apple's *names* are quoted above; the `kCG…` values were
 not fetched, and nothing here depends on them — an Agora client will name a level the way an AppKit client does,
 and the numbers are the server's business.
+
+## The menu bar has a LEVEL now
+
+The strip used to be painted **before** every window, and the source said why that was a placeholder: *"until the
+strip has a LEVEL of its own such a window covers it."* The desktop is a full-screen window at a very negative
+level, so the strip now has one — **`AWS_MENU_BAR_LEVEL`** (24, Apple's `kCGMainMenuWindowLevel`) — and is drawn in
+the level walk just before the first surface at or above it. The **desktop** and ordinary windows are painted
+first and the bar covers them; the application's own **menu window** and the **status items**, being at or above
+that level, are painted after and sit **in** the bar. A screen with no window at or above the bar still gets one.

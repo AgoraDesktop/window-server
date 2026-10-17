@@ -256,6 +256,26 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 	wl_shm_buffer_end_access(shm);
 }
 
+/* **THE BAR, DRAWN AT ITS OWN LEVEL** — the strip's fill, the SYSTEM menu at its left, and its shadow below.
+ * Called from the level walk in `aws_output_render` at `AWS_MENU_BAR_LEVEL`, so the desktop and ordinary windows
+ * are painted first and the application's own menu window (at the same level, later in the list) is over it. */
+static void aws_output_draw_menu_bar(struct aws_backend *backend)
+{
+	int row, column;
+
+	for (row = 0; row < AWS_MENU_BAR_HEIGHT && row < backend->height; row++) {
+		for (column = 0; column < backend->width; column++) {
+			backend->pixels[row * backend->width + column] = AWS_MENU_BAR_COLOUR;
+		}
+	}
+	aws_output_draw_system_menu(backend);
+	/* **AND THE BAR'S OWN SHADOW, WHICH FALLS BELOW IT ON WHATEVER IS UNDER IT.** The strip's rectangle is expanded
+	 * and the falloff computed the same way, and the sides that run off the top, the left and the right are dropped
+	 * by the bounds check — and `aws_output_draw_shadow` stops at the bar's bottom edge, so a pop-down menu's shadow
+	 * is never painted up across the bar. */
+	aws_output_draw_shadow(backend, 0, 0, backend->width, AWS_MENU_BAR_HEIGHT, 0);
+}
+
 void aws_output_render(struct aws_server *server)
 {
 	struct aws_backend *backend = &server->backend;
@@ -269,34 +289,8 @@ void aws_output_render(struct aws_server *server)
 	}
 	/* **THE SERVER'S OWN FURNITURE, AND THE FIRST PIXELS DRAWN HERE THAT ARE NOT A CLIENT'S.** The menu bar
 	 * strip is the WindowServer's on the Mac — it owns the bar and the SYSTEM menu at its left —, while everything
-	 * to the right of that is drawn by CLIENTS and merely PLACED by the server (see DESIGN.md). The height is
-	 * the same constant `aws_shell_reserved` subtracts to answer the work area, so the strip and the reserve
-	 * cannot come apart.
-	 *
-	 * AND IT IS DRAWN FIRST, WHICH IS A DECISION RATHER THAN AN ORDER: a window may be given a frame that
-	 * overlaps the bar, because the application's frame is honoured, and until the strip has a LEVEL of its own
-	 * such a window covers it. The level is the next step and the honest place to leave it. **AND A SHADOW IS THE
-	 * ONE THING THAT MAY NOT COVER IT**: a pop-down menu opens at the strip's bottom edge and its shadow would
-	 * otherwise be painted up across the bar before the bar's own window covers its own small part of it, so
-	 * `aws_output_draw_shadow` stops at the bar's bottom edge. The bar is above everything here; nothing behind it
-	 * may paint on it, and a shadow is something behind it. */
-	{
-		int row, column;
-
-		for (row = 0; row < AWS_MENU_BAR_HEIGHT && row < backend->height; row++) {
-			for (column = 0; column < backend->width; column++) {
-				backend->pixels[row * backend->width + column] = AWS_MENU_BAR_COLOUR;
-			}
-		}
-	}
-	aws_output_draw_system_menu(backend);
-	/* **AND THE BAR'S OWN SHADOW, WHICH FALLS BELOW IT ON THE WALLPAPER.** The bar and the work area are the
-	 * server's, and this is the one shadow here with nothing behind it but the desktop — it is what makes the strip
-	 * read as a SURFACE rather than as the top of the screen. The same helper draws it: the strip's rectangle is
-	 * expanded and the falloff computed the same way, and the three sides that run off the top, the left and the
-	 * right are dropped by the bounds check, so the edge below is the only one that survives. It goes before the
-	 * windows, for the same reason every other shadow does. */
-	aws_output_draw_shadow(backend, 0, 0, backend->width, AWS_MENU_BAR_HEIGHT, 0);
+	 * to the right of that is drawn by CLIENTS and merely PLACED by the server (see DESIGN.md). It is drawn at its
+	 * own LEVEL, in the walk below, by `aws_output_draw_menu_bar`. */
 	/* MAPPING ORDER IS THE STACKING: the list is walked front-to-back, so the last mapped is on top. A
 	 * compositor that has raised a window has reordered this list; this version never reorders it. */
 	/* **BY LEVEL FIRST, THEN BY MAPPING ORDER WITHIN ONE.** A level is an `NSWindow` level — an integer the
@@ -310,7 +304,7 @@ void aws_output_render(struct aws_server *server)
 		 * window and a normal one the server stopped compositing entirely, and the frame the harness waited for
 		 * never came. Each pass now finds the NEXT level above the last one drawn, so the cost is the number of
 		 * levels PRESENT and nothing else. */
-		int have = 0, lastLevel = 0;
+		int have = 0, lastLevel = 0, barDrawn = 0;
 
 		for (;;) {
 			int level = 0, found = 0;
@@ -328,6 +322,13 @@ void aws_output_render(struct aws_server *server)
 			}
 			if (!found) {
 				break;
+			}
+			/* **THE BAR, BEFORE THE FIRST LEVEL AT OR ABOVE IT.** Everything already painted is BELOW the bar — the
+			 * desktop, ordinary windows — and is covered by it; everything painted after (the application's own menu
+			 * window and the status items, at or above this level) sits IN it. */
+			if (!barDrawn && level >= AWS_MENU_BAR_LEVEL) {
+				aws_output_draw_menu_bar(backend);
+				barDrawn = 1;
 			}
 			wl_list_for_each(surface, &server->surfaces, link) {
 				/* **AND A WINDOW THE APPLICATION HAS TAKEN OFF THE SCREEN IS NOT COMPOSITED — AND IS NOT
@@ -393,6 +394,11 @@ void aws_output_render(struct aws_server *server)
 			}
 			lastLevel = level;
 			have = 1;
+		}
+		/* **A SCREEN WITH NO WINDOW AT OR ABOVE THE BAR STILL HAS A BAR.** A desktop-only session has nothing at
+		 * `AWS_MENU_BAR_LEVEL`, so the walk above never reaches the draw. */
+		if (!barDrawn) {
+			aws_output_draw_menu_bar(backend);
 		}
 
 		/* **ONE RELEASE PER SURFACE PER PASS, WHICHEVER LEVEL IT IS AT.** A Wayland buffer belongs to the

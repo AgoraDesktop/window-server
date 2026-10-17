@@ -221,6 +221,12 @@ int aws_backend_drm_start(struct aws_server *server);
  * placed under the bar or a bar over a window. It is the server's own furniture, so it is the server's constant;
  * a client asking `[[NSStatusBar systemStatusBar] thickness]` gets the same number through AppKit. */
 #define AWS_MENU_BAR_HEIGHT 24
+/* **THE LEVEL THE BAR IS COMPOSITED AT, AND IT IS A LEVEL BECAUSE THE DESKTOP IS A WINDOW NOW.** The bar is
+ * furniture the server owns, so it is drawn in the level walk before the surfaces at or above this level: the
+ * DESKTOP (a very negative level) and ordinary windows (0) are painted first and the bar covers them, while the
+ * application's own MENU window and the STATUS items — both at or above the main-menu level — are painted after
+ * and sit IN the bar. Apple's `kCGMainMenuWindowLevel` is 24, the same number `NSWindow.h` states. */
+#define AWS_MENU_BAR_LEVEL 24
 /* **ARGENTUM'S PALETTE, AND THESE ARE ITS NUMBERS RATHER THAN ANYBODY'S TASTE IN THIS FILE.** Argentum is the
  * design language this desktop is drawn in, and every value below was MEASURED from its sample rather than chosen
  * here — the provenance is `ARGENTUM.md`, which records the mockup each one came from. A server that picked its own
