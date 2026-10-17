@@ -77,6 +77,20 @@ static int x11_dispatch(int fd, uint32_t mask, void *data)
 		XEvent event;
 
 		XNextEvent(x11->display, &event);
+		/* **WHAT THE HOST ACTUALLY HANDED THIS PROCESS.** "A click does nothing" is answered here and nowhere
+		 * else: a button the compositor never received was lost between X and this loop, and a button it received
+		 * but routed nowhere is a different bug (see `aws_seat_pointer_button`'s own log, which says which surface).
+		 */
+		if (getenv("AWS_INPUT_DIAG") != NULL &&
+		    (event.type == ButtonPress || event.type == ButtonRelease || event.type == EnterNotify ||
+		     event.type == LeaveNotify)) {
+			const char *what = (event.type == ButtonPress) ? "ButtonPress"
+				: (event.type == ButtonRelease) ? "ButtonRelease"
+				: (event.type == EnterNotify) ? "EnterNotify" : "LeaveNotify";
+
+			fprintf(stderr, "  DIAG x11 event: %s at (%d,%d) button %u\n", what, event.xbutton.x,
+				event.xbutton.y, (unsigned)event.xbutton.button);
+		}
 		switch (event.type) {
 		case Expose:
 			/* The server owns the pixels, so an Expose is "put them here again" and nothing else. */

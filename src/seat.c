@@ -586,6 +586,24 @@ void aws_seat_pointer_button(struct aws_server *server, uint32_t evdev_button, i
 	 * idempotent when the focus is already right, and when it is not it sends the `enter` the client is owed
 	 * BEFORE the button. */
 	surface = aws_surface_at(server, server->pointer_x, server->pointer_y);
+	/* **WHICH SURFACE A PRESS ACTUALLY WENT TO, ON THE COMPOSITOR'S SIDE.** A client that reports "I got no
+	 * click" is reporting the end of a chain whose first link is this lookup, and the two facts that decide it —
+	 * the level and the frame of what was found — are only visible here. */
+	if (getenv("AWS_INPUT_DIAG") != NULL) {
+		if (surface != NULL) {
+			struct wl_shm_buffer *shm = (surface->current_buffer != NULL)
+				? wl_shm_buffer_get(surface->current_buffer) : NULL;
+
+			fprintf(stderr,
+				"  DIAG press (%d,%d) -> surface level %d at (%d,%d) %dx%d visible %d\n",
+				server->pointer_x, server->pointer_y, surface->level, surface->x, surface->y,
+				shm != NULL ? wl_shm_buffer_get_width(shm) : -1,
+				shm != NULL ? wl_shm_buffer_get_height(shm) : -1, surface->visible);
+		} else {
+			fprintf(stderr, "  DIAG press (%d,%d) -> NO SURFACE\n", server->pointer_x,
+				server->pointer_y);
+		}
+	}
 	/* AND THE SAME FALLBACK A CLICK USES — see `aws_seat_pointer_motion`. A press on the desktop belongs to the
 	 * popup that is tracking, which is how a click outside a menu dismisses it. */
 	if (surface == NULL) {
