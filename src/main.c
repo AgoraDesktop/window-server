@@ -24,6 +24,7 @@
 
 #include "server.h"
 
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -136,9 +137,25 @@ int main(int argc, char **argv)
 		 * away. When a render is pending and the backend can take it, the loop polls instead: the work is DUE, and
 		 * waiting for the next input to do work that is already waiting is how a screen comes to lag behind a hand
 		 * by one gesture. */
-		if (wl_event_loop_dispatch(server->loop,
-					   (server->render_pending && !aws_backend_busy(server)) ? 0 : -1) < 0) {
-			break;
+		/* **AND A WAIT INTERRUPTED BY A SIGNAL IS NOT A FAILURE.** `wl_event_loop_dispatch` answers -1 with
+		 * `errno` when its `poll`/`epoll_wait` is interrupted, and this loop used to treat that identically to a
+		 * dead connection: `break` — with NOTHING printed, so the compositor simply vanished and left a frozen
+		 * frame. MEASURED, from a live session: `window-server: 4763 frame(s) composited` and no other word, while
+		 * the client reported "the window server has gone", twice, at moments nothing else was happening. A
+		 * signal that arrives while the loop is blocked is ordinary on a desktop, so it now retries; anything else
+		 * shouts. */
+		{
+			int rc = wl_event_loop_dispatch(server->loop,
+							(server->render_pending && !aws_backend_busy(server)) ? 0 : -1);
+
+			if (rc < 0) {
+				if (errno == EINTR) {
+					continue;
+				}
+				fprintf(stderr, "window-server: the event loop failed: %s — stopping\n",
+					strerror(errno));
+				break;
+			}
 		}
 		wl_display_flush_clients(server->display);
 		/* **AND NOT WHILE THE BACKEND IS HOLDING A PAGE.** `render_pending` is left SET when the backend is
