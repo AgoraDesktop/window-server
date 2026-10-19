@@ -14,8 +14,12 @@
  * commit is what asks for a role to be configured, and a client that attaches first is committing before the
  * compositor has said the surface may be shown.
  *
- *   client [--width W] [--height H] [--frames N] [--hold] [--colour RRGGBB] [--x X] [--y Y] [--level L]
- *          [--status-length N]
+ *   client [--width W] [--height H] [--frames N] [--hold] [--colour RRGGBB] [--image PATH]
+ *          [--x X] [--y Y] [--level L] [--status-length N]
+ *
+ * **`--image` IS THE WALLPAPER'S DOOR.** A JPEG is decoded with libjpeg — the same decoder Core Graphics uses in
+ * this tree — scaled to COVER the window and cropped at its centre. The flat colour remains the default, because
+ * the server tests assert WHERE a colour landed and must not depend on an image decoder.
  */
 
 #define _GNU_SOURCE
@@ -24,12 +28,15 @@
 #include "agora-shell-client-protocol.h"
 
 #include <errno.h>
+#include <stdbool.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <jpeglib.h>
+#include <setjmp.h>
 #include <unistd.h>
 
 struct client {
@@ -58,7 +65,127 @@ struct client {
 	 * never change. `--hold` is how a test says "this one is scenery". */
 	int hold;
 	uint32_t colour;
+
+	/* THE WALLPAPER IMAGE, when --image named one: RGB, three bytes per sample. */
+	const char *image_path;
+	unsigned char *image_rgb;
+	int image_width;
+	int image_height;
 };
+
+struct image_error {
+	struct jpeg_error_mgr pub;
+	jmp_buf escape;
+};
+
+static void image_error_exit(j_common_ptr cinfo)
+{
+	struct image_error *error = (struct image_error *)cinfo->err;
+
+	longjmp(error->escape, 1);
+}
+
+/* A JPEG, decoded to RGB. NO, not RGBA: a JPEG has no alpha, and the destination's XRGB pixel is opaque anyway. */
+static int load_jpeg(struct client *client, const char *path)
+{
+	struct jpeg_decompress_struct cinfo;
+	struct image_error error;
+	FILE *file;
+	unsigned char *row;
+	int created = 0;
+
+	file = fopen(path, "rb");
+	if (file == NULL) {
+		fprintf(stderr, "client: cannot open image %s: %s\n", path, strerror(errno));
+		return -1;
+	}
+	memset(&cinfo, 0, sizeof cinfo);
+	cinfo.err = jpeg_std_error(&error.pub);
+	error.pub.error_exit = image_error_exit;
+	if (setjmp(error.escape) != 0) {
+		if (created) {
+			jpeg_destroy_decompress(&cinfo);
+		}
+		fclose(file);
+		fprintf(stderr, "client: %s is not a readable JPEG\n", path);
+		return -1;
+	}
+	jpeg_create_decompress(&cinfo);
+	created = 1;
+	jpeg_stdio_src(&cinfo, file);
+	(void)jpeg_read_header(&cinfo, TRUE);
+	cinfo.out_color_space = JCS_RGB;
+	(void)jpeg_start_decompress(&cinfo);
+	client->image_width = (int)cinfo.output_width;
+	client->image_height = (int)cinfo.output_height;
+	if (client->image_width <= 0 || client->image_height <= 0) {
+		fprintf(stderr, "client: %s has no pixels\n", path);
+		jpeg_destroy_decompress(&cinfo);
+		fclose(file);
+		return -1;
+	}
+	client->image_rgb = malloc((size_t)client->image_width * (size_t)client->image_height * 3u);
+	row = malloc((size_t)client->image_width * 3u);
+	if (client->image_rgb == NULL || row == NULL) {
+		free(client->image_rgb);
+		client->image_rgb = NULL;
+		free(row);
+		jpeg_destroy_decompress(&cinfo);
+		fclose(file);
+		return -1;
+	}
+	while (cinfo.output_scanline < cinfo.output_height) {
+		unsigned char *rows[1] = { row };
+
+		(void)jpeg_read_scanlines(&cinfo, rows, 1);
+		memcpy(client->image_rgb + (size_t)(cinfo.output_scanline - 1) * (size_t)client->image_width * 3u,
+		       row, (size_t)client->image_width * 3u);
+	}
+	free(row);
+	(void)jpeg_finish_decompress(&cinfo);
+	jpeg_destroy_decompress(&cinfo);
+	fclose(file);
+	return 0;
+}
+
+/* COVER, THEN CROP AT THE CENTRE, with bilinear sampling. The desktop's image and the window are usually both
+ * 16:9, but a caller that resizes the host window must not get a stretched or letterboxed wallpaper. */
+static uint32_t sample_image(struct client *client, int x, int y, double scale, double origin_x, double origin_y)
+{
+	double sx = ((double)x + 0.5) / scale + origin_x - 0.5;
+	double sy = ((double)y + 0.5) / scale + origin_y - 0.5;
+	int x0 = (int)sx;
+	int y0 = (int)sy;
+	int x1, y1;
+	double fx, fy;
+	unsigned char *p00;
+	unsigned char *p10;
+	unsigned char *p01;
+	unsigned char *p11;
+	double r, g, b;
+
+	if (x0 < 0) x0 = 0;
+	if (y0 < 0) y0 = 0;
+	if (x0 >= client->image_width) x0 = client->image_width - 1;
+	if (y0 >= client->image_height) y0 = client->image_height - 1;
+	x1 = (x0 + 1 < client->image_width) ? x0 + 1 : x0;
+	y1 = (y0 + 1 < client->image_height) ? y0 + 1 : y0;
+	fx = sx - (double)x0;
+	fy = sy - (double)y0;
+	if (fx < 0.0) fx = 0.0;
+	if (fy < 0.0) fy = 0.0;
+	p00 = client->image_rgb + ((size_t)y0 * (size_t)client->image_width + (size_t)x0) * 3u;
+	p10 = client->image_rgb + ((size_t)y0 * (size_t)client->image_width + (size_t)x1) * 3u;
+	p01 = client->image_rgb + ((size_t)y1 * (size_t)client->image_width + (size_t)x0) * 3u;
+	p11 = client->image_rgb + ((size_t)y1 * (size_t)client->image_width + (size_t)x1) * 3u;
+	r = (1.0 - fx) * (1.0 - fy) * p00[0] + fx * (1.0 - fy) * p10[0]
+	    + (1.0 - fx) * fy * p01[0] + fx * fy * p11[0];
+	g = (1.0 - fx) * (1.0 - fy) * p00[1] + fx * (1.0 - fy) * p10[1]
+	    + (1.0 - fx) * fy * p01[1] + fx * fy * p11[1];
+	b = (1.0 - fx) * (1.0 - fy) * p00[2] + fx * (1.0 - fy) * p10[2]
+	    + (1.0 - fx) * fy * p01[2] + fx * fy * p11[2];
+	return ((uint32_t)(r + 0.5) << 16) | ((uint32_t)(g + 0.5) << 8) | (uint32_t)(b + 0.5);
+}
 
 static void submit_frame(struct client *client);
 
@@ -126,11 +253,26 @@ static int create_buffer(struct client *client)
 		return -1;
 	}
 	client->pixels = data;
-	/* A FLAT COLOUR, and one that nothing else in the test uses: the assertion is that THIS colour is at the
-	 * cascade's first position and the compositor's own background is everywhere else. */
-	for (y = 0; y < client->height; y++) {
-		for (x = 0; x < client->width; x++) {
-			client->pixels[y * client->width + x] = client->colour;
+	if (client->image_rgb != NULL) {
+		double scale_x = (double)client->width / (double)client->image_width;
+		double scale_y = (double)client->height / (double)client->image_height;
+		double scale = (scale_x > scale_y) ? scale_x : scale_y;
+		double origin_x = ((double)client->image_width - (double)client->width / scale) / 2.0;
+		double origin_y = ((double)client->image_height - (double)client->height / scale) / 2.0;
+
+		for (y = 0; y < client->height; y++) {
+			for (x = 0; x < client->width; x++) {
+				client->pixels[y * client->width + x] = sample_image(client, x, y, scale,
+										     origin_x, origin_y);
+			}
+		}
+	} else {
+		/* A FLAT COLOUR, and one that nothing else in the test uses: the assertion is that THIS colour is at the
+		 * cascade's first position and the compositor's own background is everywhere else. */
+		for (y = 0; y < client->height; y++) {
+			for (x = 0; x < client->width; x++) {
+				client->pixels[y * client->width + x] = client->colour;
+			}
 		}
 	}
 	pool = wl_shm_create_pool(client->shm, fd, (int32_t)size);
@@ -194,6 +336,8 @@ int main(int argc, char **argv)
 			client.max_frames = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--colour") == 0 && i + 1 < argc) {
 			client.colour = (uint32_t)strtoul(argv[++i], NULL, 16);
+		} else if (strcmp(argv[i], "--image") == 0 && i + 1 < argc) {
+			client.image_path = argv[++i];
 		} else if (strcmp(argv[i], "--x") == 0 && i + 1 < argc) {
 			client.frame_x = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--y") == 0 && i + 1 < argc) {
@@ -234,10 +378,16 @@ int main(int argc, char **argv)
 	agora_window_set_title(client.window, "window server test client");
 	agora_window_set_app_id(client.window, "org.agora.test-client");
 
+	if (client.image_path != NULL && load_jpeg(&client, client.image_path) != 0) {
+		fprintf(stderr, "client: falling back to the flat colour\n");
+	}
 	if (create_buffer(&client) != 0) {
 		fprintf(stderr, "client: could not make a buffer\n");
+		free(client.image_rgb);
 		return 1;
 	}
+	free(client.image_rgb);
+	client.image_rgb = NULL;
 	/* AND THEN ASK FOR A FRAME EACH TIME ONE LANDS, which is how a client that animates stays honest: the
 	 * compositor's callback is the permission to draw again. */
 	submit_frame(&client);
@@ -253,8 +403,8 @@ int main(int argc, char **argv)
 			break;
 		}
 	}
-	printf("client: %d frame(s), colour %06X, %dx%d\n", client.frames, client.colour, client.width,
-	       client.height);
+	printf("client: %d frame(s), %s %dx%d\n", client.frames,
+	       client.image_path != NULL ? client.image_path : "flat colour", client.width, client.height);
 	wl_display_disconnect(client.display);
 	return client.frames > 0 ? 0 : 1;
 }

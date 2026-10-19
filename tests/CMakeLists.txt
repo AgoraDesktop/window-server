@@ -6,6 +6,7 @@
 # its pixels landed in the server's own screenshot.
 
 find_program(PYTHON3 python3 REQUIRED)
+find_package(JPEG REQUIRED)
 
 # xdg-shell, the CLIENT side, which the test client needs and the server does not.
 add_custom_command(
@@ -21,7 +22,7 @@ add_custom_target(xdg-shell-client-bindings
 add_executable(window-server-test-client client.c "${_generated}/agora-shell-protocol.c")
 add_dependencies(window-server-test-client agora-shell-bindings)
 target_include_directories(window-server-test-client PRIVATE "${_generated}")
-target_link_libraries(window-server-test-client PRIVATE PkgConfig::WAYLAND_CLIENT)
+target_link_libraries(window-server-test-client PRIVATE PkgConfig::WAYLAND_CLIENT JPEG::JPEG)
 
 # **AND THE POINTER'S ROUTING, AS A UNIT TEST RATHER THAN A SCREENSHOT.** The headless backend has no pointer, so a
 # drag leaving its window cannot be photographed here — but the RULE that decides where a pointer event goes can be
