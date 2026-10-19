@@ -104,7 +104,14 @@ window at the menu level and its panel above ordinary windows without the server
 `+ (NSButton *)standardWindowButton:(NSWindowButton)b forStyleMask:` and `- (NSButton *)standardWindowButton:`
 (`NSWindow.h` 574–575): the close, miniaturize and zoom buttons are **`NSButton`s, in the application's own
 process**. They are the application's to draw, which is what "client-side chrome" means, and it is what this
-tree's `NSWindow.m` already assumes when it paints its own chrome strip. The server's share is the shadow.
+tree's `NSWindow.m` already assumes when it paints its own chrome strip. The server's share is the shadow **and
+the window's SHAPE**: a window travels the wire opaque (`XRGB8888`, no alpha — which is what keeps text
+sub-pixel-smoothed in the client), so a client that rounded its own corners could only PAINT a corner and the square
+shoulder would still show around the arc. The compositor therefore clips every window to a rounded rectangle of the
+same radius its shadow is drawn with, and leaves the surfaces that are flush with the output — a maximised window,
+the menu bar, anything inside the bar's rows — square, because a notch out of the desktop's own edge is not a
+corner. Both numbers are `AWS_SHADOW_RADIUS`, six — and the client's `fn_BAR_RADIUS` is the same six, because the
+protocol does not carry a radius and the two components each state it.
 
 **THE STATUS AREA IS MANY CLIENTS, NOT ONE — AND THE SERVER IS NONE OF THEM.** `NSStatusItem` holds
 `NSView *_fView` (`NSStatusItem.h` 26), and `NSStatusBar` declares `+systemStatusBar`,

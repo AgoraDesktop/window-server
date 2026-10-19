@@ -316,6 +316,30 @@ static void window_set_app_id(struct wl_client *client, struct wl_resource *reso
 	surface->app_id = strdup(app_id != NULL ? app_id : "");
 }
 
+/* **AND THE ONE A DRAG TAKES, WHICH IS A REAL GRAB.** See the protocol's `set_pointer_capture`: while this is
+ * set the pointer goes to THIS surface wherever it is, because the window a hand is resizing moves out from under
+ * it. One at a time, like the fallback above; destroying the surface, releasing the last button, or asking with
+ * zero gives it back. */
+static void window_set_pointer_capture(struct wl_client *client, struct wl_resource *resource, int32_t capture)
+{
+	struct aws_surface *surface = wl_resource_get_user_data(resource);
+
+	(void)client;
+	if (surface == NULL) {
+		return;
+	}
+	surface->pointer_capture = capture ? 1 : 0;
+	if (capture) {
+		surface->server->pointer_capture = surface;
+	} else if (surface->server->pointer_capture == surface) {
+		surface->server->pointer_capture = NULL;
+	}
+	/* THE FOCUS IS RE-DECIDED NOW, for the same reason the fallback does it: whether an event is delivered here
+	 * does not depend on where the pointer is any more, so a hold taken over one surface has to take the pointer
+	 * from whatever had it before the next motion arrives. */
+	aws_seat_pointer_recheck(surface->server);
+}
+
 static const struct agora_window_interface agora_window_implementation = {
 	window_set_frame,
 	window_set_status_item,
@@ -326,6 +350,7 @@ static const struct agora_window_interface agora_window_implementation = {
 	window_set_app_id,
 	window_set_visible,	/* the protocol's order: this door is declared just before `set_pointer_grab` */
 	window_set_pointer_grab,
+	window_set_pointer_capture,
 	window_destroy,
 };
 

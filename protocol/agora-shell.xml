@@ -220,6 +220,27 @@
       <arg name="grab" type="int" summary="nonzero takes it; zero gives it back"/>
     </request>
 
+    <request name="set_pointer_capture">
+      <description summary="receive the pointer WHEREVER it is, until the button comes up">
+        **THE DOOR A DRAG NEEDS, AND THE OTHER HALF OF `set_pointer_grab`.** A window being resized or moved
+        goes out from under the hand: the edge follows the pointer, the compositor's copy of the surface is a
+        frame behind, and the pointer ends up over the DESKTOP or over ANOTHER WINDOW — where the events would
+        go to somebody who is not dragging anything. MEASURED: a window resized out over a neighbour stopped
+        following the pointer the moment the hand crossed onto it, and every motion after that went to the
+        neighbour.
+
+        While this is set, pointer motion and pointer buttons are delivered to THIS surface and to nobody
+        else, whatever is under the pointer, with coordinates relative to it (which may fall outside its
+        frame). It is a REAL grab, which is exactly why it is a separate request from `set_pointer_grab`: that
+        one must stay a fallback or a menu bar could not be crossed back to.
+
+        THE SERVER GIVES IT BACK ON ITS OWN when the last pointer button comes up — a capture is only ever
+        meaningful mid-press — so a client that loses the release does not keep the desktop's pointer. `zero`
+        releases it early, and destroying the surface releases it too.
+      </description>
+      <arg name="capture" type="int" summary="nonzero takes it; zero gives it back"/>
+    </request>
+
     <request name="destroy" type="destructor">
       <description summary="the window is gone">
         Destroys the object. The surface outlives it and may be given another role, as it may under

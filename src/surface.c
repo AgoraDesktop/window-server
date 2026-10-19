@@ -708,3 +708,82 @@ void aws_surface_frame_done(struct aws_surface *surface, uint32_t time)
 {
 	surface_send_frame_callbacks(surface, time);
 }
+
+/* ============================================================================================ *
+ * THE HIT TEST, WHICH IS THE SURFACE MODEL'S OWN.                                                  *
+ *                                                                                                *
+ * It walks the surface list, the level rule and the buffer size — all of which are the surface    *
+ * model's and none of which is the seat's — and it sat in `seat.c` only because the seat was its   *
+ * first caller. Moving it here is also what lets the seat's routing test compile that file and     *
+ * answer "what is under this point" for itself.                                                  *
+ * ============================================================================================ */
+
+/* THE SURFACE AT A POINT: the TOPMOST one containing it. A surface with no buffer is not there, and a surface is
+ * as big as the buffer it committed.
+ *
+ * **"TOPMOST" HAS TO MEAN THE SAME THING HERE AS IT DOES TO THE COMPOSITOR, AND THAT IS THE WHOLE OF A BUG A PERSON
+ * MET.** The compositor draws by LEVEL first and then by list order, and it SKIPS a surface the application has
+ * HIDDEN (`!visible`) — but this walk did neither. So a menu that had been CLOSED still had its surface mapped
+ * with `visible = 0`, the pointer moved over the GHOST, and focus went to a window nobody could see. MEASURED, from
+ * the bar's own log: an event arrived from a window the CURRENT menu did not own (`win=12` while the open menu was
+ * another), the bar read that window's coordinates as its own, its hit test landed on the first title, and it
+ * "switched" there — which is exactly "the menubar loses track of which menu is supposed to be open". A surface
+ * the compositor will not draw is a surface the pointer cannot be over. */
+struct aws_surface *aws_surface_at(struct aws_server *server, int x, int y)
+{
+	struct aws_surface *surface;
+	int have = 0, lastLevel = 0;
+
+	/* **AND THE WALK IS OVER THE LEVELS THAT ARE PRESENT, NOT OVER EVERY NUMBER BETWEEN THEM — the same fix
+	 * the compositor's loop carries, and for the same reason: a desktop level is `INT32_MIN + 20` while a
+	 * window's is 0, so a walk from `highest` down to `lowest` is two billion passes per hit test. MEASURED,
+	 * as a pointer that never found its window under a desktop-level surface. Each pass finds the NEXT level
+	 * BELOW the last one searched. */
+	for (;;) {
+		int level = 0, found = 0;
+		wl_list_for_each(surface, &server->surfaces, link) {
+			if (!surface->mapped || !surface->visible || surface->current_buffer == NULL) {
+				continue;
+			}
+			if (have && surface->level >= lastLevel) {
+				continue;
+			}
+			if (!found || surface->level > level) {
+				level = surface->level;
+				found = 1;
+			}
+		}
+		if (!found) {
+			return NULL;
+		}
+		/* **FROM THE HIGHEST LEVEL DOWN, AND ONLY THEN THE LAST-MAPPED SURFACE WITHIN ONE.** The highest level is
+		 * where the search STARTS, not where it stops: a point over a level-0 window is not over the level-24 menu
+		 * bar just because the bar is the highest thing on the screen. MEASURED, the first version of this returned
+		 * the highest level's surfaces and nothing else, so the dropdown a click had just opened was never found —
+		 * the pointer's focus belonged to the bar and the menu never heard the mouse. Within a level the walk is
+		 * reverse, which is the same "last mapped is on top" the compositor's inner loop uses. */
+		wl_list_for_each_reverse(surface, &server->surfaces, link) {
+			struct wl_shm_buffer *shm;
+			int width, height;
+
+			if (!surface->mapped || !surface->visible || surface->current_buffer == NULL) {
+				continue;
+			}
+			if (surface->level != level) {
+				continue;
+			}
+			shm = wl_shm_buffer_get(surface->current_buffer);
+			if (shm == NULL) {
+				continue;
+			}
+			width = wl_shm_buffer_get_width(shm);
+			height = wl_shm_buffer_get_height(shm);
+			if (x >= surface->x && x < surface->x + width && y >= surface->y && y < surface->y + height) {
+				return surface;
+			}
+		}
+		lastLevel = level;
+		have = 1;
+	}
+	return NULL;
+}

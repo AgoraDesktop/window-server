@@ -44,10 +44,16 @@ def main():
 
     checks = [
         (f"the output is {im.size[0]}x{im.size[1]}", im.size == (1280, 720)),
+        # **INSIDE THE CORNER AND NOT AT IT, BECAUSE A WINDOW'S CORNER IS ROUNDED AND NOT BY THE CLIENT.** A window
+        # travels opaque (`XRGB8888`), so the client cannot remove the square of its own pixels around its corner;
+        # the compositor clips the shape. Eight points in is clear of that curve and two points in is what the
+        # curve cuts, which is why the probe moved and why the two checks below exist.
         (f"the high-level client is at its frame ({TOP_AT[0]},{TOP_AT[1]})",
-         px[TOP_AT[0] + 2, TOP_AT[1] + 2] == ctop),
+         px[TOP_AT[0] + 8, TOP_AT[1] + 8] == ctop),
         (f"the low-level client is at ITS frame ({BOTTOM_AT[0]},{BOTTOM_AT[1]})",
-         px[BOTTOM_AT[0] + w - 2, BOTTOM_AT[1] + h - 2] == cbot),
+         px[BOTTOM_AT[0] + w - 8, BOTTOM_AT[1] + h - 8] == cbot),
+        ("and its CORNER is cut, so the shape is the compositor's and not the client's",
+         px[TOP_AT[0], TOP_AT[1]] != ctop and px[BOTTOM_AT[0] + w - 1, BOTTOM_AT[1] + h - 1] != cbot),
         (f"THE NORMAL WINDOW IS ON TOP OF THE DESKTOP WINDOW at {over}, and the desktop window was created LAST",
          px[over[0], over[1]] == ctop),
         ("and it is not the later window showing through", px[over[0], over[1]] != cbot),

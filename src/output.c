@@ -100,11 +100,15 @@ static void aws_output_draw_system_menu(struct aws_backend *backend)
 
 /* The shadow's three numbers. The DEPTH is how far it reaches from the frame's edge and is the one a person
  * notices; the ALPHA is what it starts at AT that edge, before the falloff takes it to nothing; the RADIUS is the
- * frame's own corner, and it MIRRORS THE CLIENT'S `NS_CELL_BEZEL_RADIUS` — the protocol does not carry the radius
- * yet, so this is the one number in this file that is a copy rather than a fact, and it is named as one. */
+ * frame's own corner — the same corner the window is CLIPPED to below, because a shadow and the shape that casts it
+ * are one shape.
+ *
+ * AND IT IS A COPY RATHER THAN A FACT: the protocol does not carry a radius, so this is the client's
+ * `fn_BAR_RADIUS` (`NSWindow.m`) written down a second time, and the two have to be changed together. It is NOT
+ * `NS_CELL_BEZEL_RADIUS` — that is four, and a window's corner is a window's. */
 #define AWS_SHADOW_DEPTH  10
 #define AWS_SHADOW_ALPHA  120
-#define AWS_SHADOW_RADIUS 4
+#define AWS_SHADOW_RADIUS 6
 /* **AND THE RADIUS IS AN ARGUMENT, BECAUSE THE SHADOW FOLLOWS THE SHAPE THAT CASTS IT.** A window's corners are
  * rounded and its shadow's are too; the MENU BAR's are square and its shadow's must be as well. MEASURED, passing
  * the window's radius for the bar's shadow painted a dark smudge INSIDE the bar's own corners — the distance
@@ -185,6 +189,108 @@ static void aws_output_draw_shadow(struct aws_backend *output, int x, int y, int
 	}
 }
 
+/* **THE WINDOW'S SHAPE, WHICH IS A ROUNDED RECTANGLE — AND THE COMPOSITOR IS THE ONLY ONE WHO CAN DRAW IT.** A
+ * window is opaque on the wire (`XRGB8888`, no alpha, which is what keeps text sub-pixel-smoothed in the client), so
+ * a client that rounded its own top corners could only PAINT a corner: the pixels outside the curve are still its
+ * own, still opaque, and a square shoulder shows around the arc. MEASURED, that is exactly what a decorated window
+ * looked like — "the rounding is sort of overlaid on a rectangle" — and the fix is here rather than in the client.
+ *
+ * IT IS THE SAME RADIUS THE SHADOW IS DRAWN WITH (`AWS_SHADOW_RADIUS`), which is what makes the two agree: a shadow
+ * cut to six points around a window whose corners are six points is one shape; two radii would be two.
+ *
+ * AND A CORNER IS ROUNDED ONLY WHERE THE WINDOW IS NOT FLUSH WITH THE OUTPUT. A maximised window, and the menu bar
+ * itself, span the screen's edges — rounding their corners would cut notches out of the desktop's own edge. Each of
+ * the four is decided by the two edges that meet at it, so a window flush on one side keeps its two corners there
+ * and its two free ones elsewhere.
+ *
+ * A SURFACE THAT LIVES IN THE MENU BAR IS NOT A WINDOW'S SHAPE AT ALL (`AWS_MENU_BAR_HEIGHT`, the test the shadow
+ * uses): the bar is flush and square, and a status item is a piece of the bar, not a pane on the desktop.
+ *
+ * THE ANSWER IS A COVERAGE FROM 0 TO 255, not a yes or a no: a curve drawn on whole pixels is a staircase, so the
+ * pixel the curve passes through is blended with what is behind it — the same source-over arithmetic a client's own
+ * alpha goes through below. */
+static unsigned shape_coverage(const struct aws_backend *output, const struct aws_surface *surface,
+			       int width, int height, int column, int row)
+{
+	int radius = AWS_SHADOW_RADIUS;
+	int in_bar;
+	int hangs_from_bar;
+	double cx, cy;
+	double outside;
+	unsigned cover;
+
+	if (radius <= 0) {
+		return 255;
+	}
+	/* A surface entirely inside the bar's rows is part of the bar — square, and no shadow either. */
+	in_bar = surface->y >= 0 && surface->y + surface->frame_height <= AWS_MENU_BAR_HEIGHT;
+	if (in_bar) {
+		return 255;
+	}
+	/* **AND A MENU HANGS FROM THE BAR, SO ITS TOP CORNERS ARE NOT ITS OWN.** A dropdown's top edge IS the bar's
+	 * bottom edge: rounding it would cut two notches out of the seam and, MEASURED, made a menu look pasted under the
+	 * bar rather than hanging from it. Its BOTTOM corners are free and stay round, which is the shape a menu has. */
+	hangs_from_bar = surface->y == AWS_MENU_BAR_HEIGHT;
+	if (radius > width / 2) {
+		radius = width / 2;
+	}
+	if (radius > height / 2) {
+		radius = height / 2;
+	}
+	if (radius <= 0) {
+		return 255;
+	}
+	if (column >= radius && column < width - radius) {
+		return 255;			/* between the corners, whatever the row */
+	}
+	if (row >= radius && row < height - radius) {
+		return 255;
+	}
+	/* WHICH CORNER, AND MAY IT BE ROUNDED AT ALL. */
+	if (column < radius && row < radius) {
+		if (!(surface->x > 0 && surface->y > 0) || hangs_from_bar) {
+			return 255;
+		}
+		cx = radius;
+		cy = radius;
+	} else if (column >= width - radius && row < radius) {
+		if (!(surface->x + width < output->width && surface->y > 0) || hangs_from_bar) {
+			return 255;
+		}
+		cx = width - radius;
+		cy = radius;
+	} else if (column < radius && row >= height - radius) {
+		if (!(surface->x > 0 && surface->y + height < output->height)) {
+			return 255;
+		}
+		cx = radius;
+		cy = height - radius;
+	} else {
+		if (!(surface->x + width < output->width && surface->y + height < output->height)) {
+			return 255;
+		}
+		cx = width - radius;
+		cy = height - radius;
+	}
+	/* **FROM THE PIXEL'S CENTRE, BECAUSE THAT IS WHAT A PIXEL IS.** A pixel at column `c` covers the square
+	 * `[c, c+1]`, so its centre is `c + 0.5`; measuring from the corner instead biases the whole shape half a point
+	 * toward the corner and clips a row that the curve does not reach — MEASURED, a client's frame at its own corner
+	 * read three-quarters of its colour where the shape said "inside". */
+	outside = (double)(column + 0.5 - cx) * (double)(column + 0.5 - cx)
+		+ (double)(row + 0.5 - cy) * (double)(row + 0.5 - cy);
+	outside = sqrt(outside) - (double)radius;
+	/* FULLY INSIDE at half a point in, fully outside at half a point out, linear between — the whole of the
+	 * antialiasing, and it is the same expression at every corner. */
+	cover = (unsigned)((0.5 - outside) * 255.0);
+	if (outside <= -0.5) {
+		return 255;
+	}
+	if (outside >= 0.5) {
+		return 0;
+	}
+	return cover;
+}
+
 static void composite_surface(struct aws_backend *output, struct aws_surface *surface)
 {
 	struct wl_shm_buffer *shm = wl_shm_buffer_get(surface->current_buffer);
@@ -228,27 +334,36 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 		for (column = 0; column < width; column++) {
 			int ox = surface->x + column;
 			uint32_t pixel = source[column];
+			unsigned shape;
+			uint32_t alpha;
 
 			if (ox < 0 || ox >= output->width) {
 				continue;
 			}
-			if (transparent) {
-				uint32_t alpha = pixel >> 24;
+			/* **THE WINDOW'S OWN SHAPE FIRST, WHICH IS A ROUNDED CORNER OR NOTHING AT ALL.** `shape` is the
+			 * corner's coverage: 255 everywhere but the four arcs, where it is the pixel the curve passes
+			 * through, blended below like any other partial alpha. */
+			shape = shape_coverage(output, surface, width, height, column, row);
+			if (shape == 0) {
+				continue;
+			}
+			alpha = transparent ? (pixel >> 24) : 0xFFu;
+			if (shape != 255) {
+				alpha = (alpha * shape + 127u) / 255u;
+			}
+			if (alpha == 0) {
+				continue;
+			}
+			if (alpha != 0xFFu) {
+				/* SOURCE OVER, on the destination's own bits: the frame buffer is opaque, so there is no
+				 * alpha to carry and the blend happens here or nowhere. */
+				uint32_t destination = output->pixels[(size_t)oy * (size_t)output->width + (size_t)ox];
+				uint32_t inverse = 255u - alpha;
+				uint32_t r = (((pixel >> 16) & 0xFFu) * alpha + ((destination >> 16) & 0xFFu) * inverse) / 255u;
+				uint32_t g = (((pixel >> 8) & 0xFFu) * alpha + ((destination >> 8) & 0xFFu) * inverse) / 255u;
+				uint32_t b = ((pixel & 0xFFu) * alpha + (destination & 0xFFu) * inverse) / 255u;
 
-				if (alpha == 0) {
-					continue;
-				}
-				if (alpha != 0xFFu) {
-					/* SOURCE OVER, on the destination's own bits: the frame buffer is opaque, so there is
-					 * no alpha to carry and the blend happens here or nowhere. */
-					uint32_t destination = output->pixels[(size_t)oy * (size_t)output->width + (size_t)ox];
-					uint32_t inverse = 255u - alpha;
-					uint32_t r = (((pixel >> 16) & 0xFFu) * alpha + ((destination >> 16) & 0xFFu) * inverse) / 255u;
-					uint32_t g = (((pixel >> 8) & 0xFFu) * alpha + ((destination >> 8) & 0xFFu) * inverse) / 255u;
-					uint32_t b = ((pixel & 0xFFu) * alpha + (destination & 0xFFu) * inverse) / 255u;
-
-					pixel = 0xFF000000u | (r << 16) | (g << 8) | b;
-				}
+				pixel = 0xFF000000u | (r << 16) | (g << 8) | b;
 			}
 			output->pixels[(size_t)oy * (size_t)output->width + (size_t)ox] = pixel | 0xFF000000u;
 		}

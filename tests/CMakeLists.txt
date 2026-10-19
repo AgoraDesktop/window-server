@@ -23,6 +23,17 @@ add_dependencies(window-server-test-client agora-shell-bindings)
 target_include_directories(window-server-test-client PRIVATE "${_generated}")
 target_link_libraries(window-server-test-client PRIVATE PkgConfig::WAYLAND_CLIENT)
 
+# **AND THE POINTER'S ROUTING, AS A UNIT TEST RATHER THAN A SCREENSHOT.** The headless backend has no pointer, so a
+# drag leaving its window cannot be photographed here — but the RULE that decides where a pointer event goes can be
+# asked directly, and `../src/seat.c` is compiled in as it ships. The two questions it asks of the rest of the server
+# are stubbed in the test: what is under a point, and how to tell a window where the pointer is.
+add_executable(window-server-seat-routing seat_routing.c "${CMAKE_CURRENT_SOURCE_DIR}/../src/seat.c")
+target_include_directories(window-server-seat-routing PRIVATE "${_generated}" "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(window-server-seat-routing PRIVATE
+  PkgConfig::WAYLAND_SERVER
+  PkgConfig::XKBCOMMON)
+add_test(NAME window-server-seat-routing COMMAND window-server-seat-routing)
+
 add_test(NAME window-server-headless
   COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-headless.sh"
 	  "$<TARGET_FILE:window-server>" "$<TARGET_FILE:window-server-test-client>"

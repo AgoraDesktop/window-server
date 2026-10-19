@@ -103,6 +103,11 @@ struct aws_surface {
 	 * tell — still reaches the client, which is how "click anywhere to dismiss" is said. See the protocol's
 	 * `set_pointer_grab`. */
 	int pointer_grab;
+	/* **WHETHER THIS WINDOW IS HOLDING THE POINTER OUTRIGHT.** A window being dragged or resized sets this, and
+	 * while it is set every pointer event is delivered HERE whatever is under the pointer — the hand moves out
+	 * from under the window it is resizing, so "what is under the pointer" is the one question nobody is asking.
+	 * See the protocol's `set_pointer_capture`; it is an INTERACTIVE grab and not the fallback above. */
+	int pointer_capture;
 	struct wl_resource *agora_window;	/* the role, when this surface's client is an Agora one */
 
 	int x;					/* where the compositor has put it, in output coordinates */
@@ -174,6 +179,8 @@ struct aws_server {
 	struct wl_list keyboards;		/* struct aws_keyboard */
 	struct aws_surface *pointer_focus;	/* the surface the pointer is over, or NULL */
 	struct aws_surface *pointer_grab;	/* the surface that takes the pointer over NO surface, or NULL */
+	struct aws_surface *pointer_capture;	/* the surface that takes the pointer WHEREVER it is, or NULL */
+	uint32_t pointer_buttons;		/* the pointer's buttons that are down, as a bit per evdev code */
 	struct aws_surface *keyboard_focus;	/* the surface the keyboard goes to, or NULL */
 	int pointer_x;				/* the pointer, in OUTPUT coordinates */
 	int pointer_y;
@@ -284,6 +291,10 @@ void aws_seat_pointer_button(struct aws_server *server, uint32_t evdev_button, i
  * `wl_pointer.enter` the protocol owes it, and the first click aimed at it goes to nobody: a click that does
  * nothing until the mouse is moved. */
 void aws_seat_pointer_recheck(struct aws_server *server);
+/* **WHERE A POINTER EVENT GOES, GIVEN WHAT IS UNDER THE POINTER — one answer for motion, buttons and the
+ * recheck, because three copies of this precedence is three ways for a drag to starve. Exposed so a test can ask
+ * it without a Wayland connection: `tests/seat_routing.c` is that test. */
+struct aws_surface *aws_seat_pointer_target(struct aws_server *server, struct aws_surface *under);
 /* **A SURFACE IS GOING AWAY, SO FORGET IT BEFORE IT IS FREED.** It is called from the surface's own destroy
  * handler, where sending a `leave` is not an option: the `wl_resource` it would name is the one being
  * destroyed. Clearing the focus here is what keeps `pointer_focus`/`keyboard_focus` from pointing at freed
