@@ -577,7 +577,7 @@ void aws_seat_pointer_button(struct aws_server *server, uint32_t evdev_button, i
 	 * **AND A CLICK OVER NO WINDOW AT ALL DOES NOT CLEAR IT.** A press on the DESKTOP has no surface to give the
 	 * keyboard to, and taking it away would leave the desktop with NO key application — no menu bar, no key
 	 * equivalents, nowhere for a keystroke to go. The Mac's answer is that the click activates whoever IS in front
-	 * (its Finder, which this tier has not got); the honest version of it here is to leave the focus exactly where
+	 * (its file manager, which this tier has not got); the honest version of it here is to leave the focus exactly where
 	 * it was. */
 	if (pressed && surface != NULL) {
 		aws_seat_set_keyboard_focus(server, surface);
