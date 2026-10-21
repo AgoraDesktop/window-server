@@ -49,8 +49,16 @@ static int aws_buffer_is_supported(struct wl_resource *resource)
 	struct wl_shm_buffer *shm = wl_shm_buffer_get(resource);
 
 	if (shm == NULL) {
+		/* **A dma-buf IS A BUFFER TOO, AND THE GLOBAL THAT MADE IT ALREADY CHECKED IT.** `zwp_linux_dmabuf_v1`
+		 * refuses a format or modifier the renderer cannot import at `create` time, so a buffer that reaches an
+		 * attach is one this compositor asked for. Anything else is still refused rather than guessed at — a buffer
+		 * whose layout this does not understand would be a picture that is subtly wrong, which is worse than a
+		 * client told no. */
+		if (aws_dmabuf_buffer_from_resource(resource) != NULL) {
+			return 1;
+		}
 		wl_resource_post_error(resource, WL_SHM_ERROR_INVALID_FORMAT,
-				       "this compositor composites shared memory only");
+				       "this compositor composites shared memory and imported DMA-BUF only");
 		return 0;
 	}
 	switch (wl_shm_buffer_get_format(shm)) {
@@ -139,6 +147,15 @@ static void surface_destroy_resource(struct wl_resource *resource)
 	if (surface->xdg_surface != NULL) {
 		wl_resource_set_user_data(surface->xdg_surface, NULL);
 	}
+	/* **AND THE AGORA ROLE STOPS NAMING THIS SURFACE, WHICH IS BOTH A RESERVATION AND A USE-AFTER-FREE.** The
+	 * role's own destroy handler reads this surface, so a client that destroys the surface and leaves the role
+	 * alive would leave that handler with a freed pointer. Clearing it here means the role outlives the surface
+	 * harmlessly, and the reservation — which was the surface's — is released and announced. */
+	if (surface->agora_window != NULL) {
+		wl_resource_set_user_data(surface->agora_window, NULL);
+		surface->agora_window = NULL;
+	}
+	aws_shell_release_reserve(surface);
 	free(surface->title);
 	free(surface->app_id);
 	/* **FORGET IT FIRST, THEN TAKE IT OUT, THEN RE-DECIDE.** The focus has to stop naming this surface BEFORE
@@ -146,6 +163,9 @@ static void surface_destroy_resource(struct wl_resource *resource)
 	 * out of the list and rechecking afterwards is what hands the focus to whatever is left under the pointer. */
 	aws_seat_surface_gone(surface->server, surface);
 	wl_list_remove(&surface->link);
+	/* **AND A DOCK IS TOLD THE WINDOW IS GONE**, after it has left the list and before the memory goes — the
+	 * snapshot walks the list, so the order is the whole of it. */
+	aws_shell_window_list_changed(surface->server);
 	aws_seat_pointer_recheck(surface->server);
 	free(surface);
 }
@@ -269,6 +289,8 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
 	 * `-cg_ensureWindow` already has. That redundancy is worth removing and is NOT the bug: any client may
 	 * commit without attaching, and a compositor that unmaps it is wrong about the protocol.) */
 	if (surface->pending_attached) {
+		struct wl_resource *previous = surface->current_buffer;
+
 		if (surface->has_buffer_listener) {
 			wl_list_remove(&surface->buffer_listener.link);
 			surface->has_buffer_listener = 0;
@@ -281,29 +303,51 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
 			wl_resource_add_destroy_listener(surface->current_buffer, &surface->buffer_listener);
 			surface->has_buffer_listener = 1;
 		}
+		/* **AND THE BUFFER THIS ONE REPLACES IS GIVEN BACK HERE, WHICH IS THE MOMENT THE COMPOSITOR STOPS
+		 * SHOWING IT.** `wl_buffer.release` is a promise that the compositor will not read the buffer again, and
+		 * the client is entitled to paint into it the instant it arrives. This server used to send the release
+		 * from its frame sweep while KEEPING the buffer as the surface's content, so every subsequent composite
+		 * read pixels the client had already begun to overwrite — MEASURED, as a frame that showed both windows
+		 * half-painted when the keyboard moved between them (`APPKIT_DRAW_DIAG` put a whole-frame repaint at
+		 * every key change, and the reply to a click landed in the middle of it). The old buffer is not needed
+		 * once this line has run: `current_buffer` is the surface's content from here on, and the release is
+		 * sent — not the pointer forgotten — so a client with one buffer of its own can use it again. */
+		if (previous != NULL && previous != surface->current_buffer) {
+			wl_buffer_send_release(previous);
+		}
 	}
 	/* AND A SURFACE THAT HAS A BUFFER IS SHOWN, WHETHER THAT BUFFER ARRIVED NOW OR EARLIER. */
-	if (surface->current_buffer != NULL) {
-		if (!surface->mapped) {
-			/* **THERE IS NO CASCADE HERE, AND THAT IS THE POINT.** A cascade is a PLACEMENT POLICY, and on
-			 * the Mac the application's frame is honoured — the only thing that adjusts it is the
-			 * application's own `constrainFrameRect:toScreen:`. So there is no offset computed, no counting
-			 * of windows and no "put it somewhere plausible": a client that says nothing gets the origin,
-			 * which is what an application that never set a frame would get anyway. */
-			surface->mapped = 1;
-			/* **A NEW WINDOW TAKES THE KEYBOARD IF NOTHING HAS IT.** A window that is mapped but never
-			 * clicked would otherwise receive no key at all — a person could see it and not type into it.
-			 * This is the initial-focus half of the policy; `aws_seat_set_keyboard_focus` carries the rest. */
-			if (server->keyboard_focus == NULL) {
-				aws_seat_set_keyboard_focus(server, surface);
+	{
+		int was_mapped = surface->mapped;
+
+		if (surface->current_buffer != NULL) {
+			if (!surface->mapped) {
+				/* **THERE IS NO CASCADE HERE, AND THAT IS THE POINT.** A cascade is a PLACEMENT POLICY, and on
+				 * the Mac the application's frame is honoured — the only thing that adjusts it is the
+				 * application's own `constrainFrameRect:toScreen:`. So there is no offset computed, no counting
+				 * of windows and no "put it somewhere plausible": a client that says nothing gets the origin,
+				 * which is what an application that never set a frame would get anyway. */
+				surface->mapped = 1;
+				/* **A NEW WINDOW TAKES THE KEYBOARD IF NOTHING HAS IT.** A window that is mapped but never
+				 * clicked would otherwise receive no key at all — a person could see it and not type into it.
+				 * This is the initial-focus half of the policy; `aws_seat_set_keyboard_focus` carries the rest. */
+				if (server->keyboard_focus == NULL) {
+					aws_seat_set_keyboard_focus(server, surface);
+				}
+				/* MAPPED SURFACES ARE COMPOSITED IN MAPPING ORDER — the list is the stacking, and this version
+				 * has no other: raising and lowering arrive with the window-management policy. */
+				wl_list_remove(&surface->link);
+				wl_list_insert(server->surfaces.prev, &surface->link);
 			}
-			/* MAPPED SURFACES ARE COMPOSITED IN MAPPING ORDER — the list is the stacking, and this version
-			 * has no other: raising and lowering arrive with the window-management policy. */
-			wl_list_remove(&surface->link);
-			wl_list_insert(server->surfaces.prev, &surface->link);
+		} else {
+			surface->mapped = 0;
 		}
-	} else {
-		surface->mapped = 0;
+		/* **AND A DOCK HEARS THAT THE SET CHANGED, ONCE PER ACTUAL CHANGE.** Mapping is not a list edit on its
+		 * own — the list is about windows that EXIST — but a dock reads `visible` and `active` to decide what to
+		 * draw, and a window that has just been given its first buffer is the moment it becomes drawable. */
+		if (was_mapped != surface->mapped) {
+			aws_shell_window_list_changed(server);
+		}
 	}
 	aws_server_schedule_render(server);
 	/* **AND THE POINTER IS RE-DECIDED HERE, WHICH IS WHERE THIS BUG LIVED.** A surface that maps under a
@@ -347,6 +391,9 @@ static void compositor_create_surface(struct wl_client *client, struct wl_resour
 	}
 	surface->server = server;
 	surface->visible = 1;	/* a new surface is ON the screen until the application says otherwise */
+	/* **AND IT MAY ACTIVATE UNTIL IT SAYS OTHERWISE**, which is what every ordinary window wants and what a Dock
+	 * switches off with `set_activatable`. */
+	surface->activatable = 1;
 	surface->resource = wl_resource_create(client, &wl_surface_interface,
 					       wl_resource_get_version(resource), id);
 	if (surface->resource == NULL) {
@@ -764,6 +811,7 @@ struct aws_surface *aws_surface_at(struct aws_server *server, int x, int y)
 		 * reverse, which is the same "last mapped is on top" the compositor's inner loop uses. */
 		wl_list_for_each_reverse(surface, &server->surfaces, link) {
 			struct wl_shm_buffer *shm;
+			struct aws_dmabuf_buffer *dmabuf;
 			int width, height;
 
 			if (!surface->mapped || !surface->visible || surface->current_buffer == NULL) {
@@ -772,12 +820,20 @@ struct aws_surface *aws_surface_at(struct aws_server *server, int x, int y)
 			if (surface->level != level) {
 				continue;
 			}
+			/* **A WINDOW'S HIT RECTANGLE IS ITS BUFFER, WHICHEVER KIND IT IS.** A dma-buf window that the pointer
+			 * could not enter would be a window that never took the keyboard either, and the cause would be the
+			 * storage rather than anything about the window. */
 			shm = wl_shm_buffer_get(surface->current_buffer);
-			if (shm == NULL) {
+			dmabuf = aws_dmabuf_buffer_from_resource(surface->current_buffer);
+			if (shm != NULL) {
+				width = wl_shm_buffer_get_width(shm);
+				height = wl_shm_buffer_get_height(shm);
+			} else if (dmabuf != NULL) {
+				width = dmabuf->width;
+				height = dmabuf->height;
+			} else {
 				continue;
 			}
-			width = wl_shm_buffer_get_width(shm);
-			height = wl_shm_buffer_get_height(shm);
 			if (x >= surface->x && x < surface->x + width && y >= surface->y && y < surface->y + height) {
 				return surface;
 			}

@@ -1,0 +1,126 @@
+# id <TAB> family <TAB> icon
+#
+# THE ID IS THE `os-release` ID, lower-cased. THE ICON COLUMN IS `-` WHEN THE FAMILY SUPPLIES THE MARK. The exact
+# twelve marks are the only non-`-` entries; everything else is here to give the resolver a family to fall back to,
+# so a derivative that never ships its own icon still gets the right family mark instead of the hamburger.
+#
+# Debian family
+debian			debian		debian
+devuan			debian		-
+pureos			debian		-
+trisquel		debian		-
+mx			debian		-
+raspbian		debian		-
+raspberrypi		debian		-
+kali			debian		-
+parrot			debian		-
+deepin			debian		-
+tails			debian		-
+qubes			debian		-
+armbian			debian		-
+dietpi			debian		-
+antix			debian		-
+bunsenlabs		debian		-
+solydxk			debian		-
+endless			debian		-
+
+# Ubuntu family
+ubuntu			ubuntu		ubuntu
+linuxmint		ubuntu		linuxmint
+pop			ubuntu		-
+elementary		ubuntu		-
+zorin			ubuntu		-
+neon			ubuntu		-
+kubuntu			ubuntu		-
+xubuntu			ubuntu		-
+lubuntu			ubuntu		-
+ubuntu-mate		ubuntu		-
+ubuntu-budgie		ubuntu		-
+edubuntu		ubuntu		-
+ubuntustudio		ubuntu		-
+ubuntu-studio		ubuntu		-
+
+# Fedora family
+fedora			fedora		fedora
+nobara			fedora		-
+bazzite			fedora		-
+ultramarine		fedora		-
+risios			fedora		-
+
+# Red Hat family
+rhel			redhat		redhat
+redhat			redhat		-
+centos			redhat		-
+centos-stream		redhat		-
+rocky			redhat		-
+almalinux		redhat		-
+oracle			redhat		-
+ol			redhat		-
+scientific		redhat		-
+amzn			redhat		-
+amazon			redhat		-
+cloudlinux		redhat		-
+eurolinux		redhat		-
+springdale		redhat		-
+
+# Arch family
+arch			arch		-
+archlinux		arch		-
+manjaro			arch		-
+manjaro-arm		arch		-
+endeavouros		arch		-
+garuda			arch		-
+arcolinux		arch		-
+artix			arch		-
+cachyos			arch		-
+rebornos		arch		-
+blackarch		arch		-
+archcraft		arch		-
+steamos			arch		-
+
+# SUSE family
+opensuse		suse		-
+opensuse-leap		suse		-
+opensuse-tumbleweed	suse		-
+opensuse-microos	suse		-
+sles			suse		-
+sled			suse		-
+geckolinux		suse		-
+
+# Alpine family
+alpine			alpine		-
+postmarketos		alpine		-
+
+# Linux families without an exact mark yet. They are listed so the fallback is a decision, not an accident.
+gentoo			gentoo		-
+funtoo			gentoo		-
+calculate		gentoo		-
+void			void		-
+nixos			nixos		-
+slackware		slackware	-
+salix			slackware	-
+solus			solus		-
+mageia			mageia		-
+openmandriva		openmandriva	-
+chimera			chimera		-
+wolfi			wolfi		-
+clear-linux-os		clear-linux	-
+photon			photon		-
+linux			linux		-
+
+# BSD family
+freebsd			freebsd		freebsd
+ghostbsd		freebsd		-
+hardenedbsd		freebsd		-
+nomadbsd		freebsd		-
+hellosystem		freebsd		-
+truenas			freebsd		-
+pfsense			freebsd		-
+opnsense		freebsd		-
+openbsd			openbsd		openbsd
+netbsd			netbsd		netbsd
+dragonfly		freebsd	-
+dragonflybsd		freebsd	-
+midnightbsd		bsd		-
+darwin			bsd		-
+bsd			bsd		-

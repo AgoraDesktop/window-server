@@ -15,7 +15,7 @@
  * compositor has said the surface may be shown.
  *
  *   client [--width W] [--height H] [--frames N] [--hold] [--colour RRGGBB] [--image PATH]
- *          [--x X] [--y Y] [--level L] [--status-length N]
+ *          [--x X] [--y Y] [--level L] [--status-length N] [--dmabuf]
  *
  * **`--image` IS THE WALLPAPER'S DOOR.** A JPEG is decoded with libjpeg — the same decoder Core Graphics uses in
  * this tree — scaled to COVER the window and cropped at its centre. The flat colour remains the default, because
@@ -26,6 +26,7 @@
 
 #include <wayland-client.h>
 #include "agora-shell-client-protocol.h"
+#include "linux-dmabuf-v1-client-protocol.h"
 
 #include <errno.h>
 #include <stdbool.h>
@@ -39,12 +40,24 @@
 #include <setjmp.h>
 #include <unistd.h>
 
+#ifdef AWS_HAVE_GBM
+/* **THE CLIENT'S HALF OF A GPU BUFFER.** GBM allocates one on the render node and exports the file descriptor the
+ * compositor imports; without it, `--dmabuf` is a request this build cannot answer and the client says so. */
+#include <gbm.h>
+#include <drm_fourcc.h>
+#endif
+
 struct client {
 	struct wl_display *display;
 	struct wl_registry *registry;
 	struct wl_compositor *compositor;
 	struct wl_shm *shm;
 	struct agora_shell *shell;
+	struct zwp_linux_dmabuf_v1 *dmabuf;
+	/* **WHETHER THE PIXELS LIVE IN GPU MEMORY.** `--dmabuf` asks for it, and the fallback to shared memory is SAID
+	 * OUT LOUD rather than silent: a test that quietly stopped testing the thing it named would be worse than one
+	 * that failed. */
+	int use_dmabuf;
 
 	struct wl_surface *surface;
 	struct agora_window *window;
@@ -52,6 +65,18 @@ struct client {
 	int level;			/* the NSWindow level to ask for, so two clients can be ordered */
 	struct wl_buffer *buffer;
 	uint32_t *pixels;
+
+	/* **AND A SECOND BUFFER, FOR THE ONE TEST THAT IS ABOUT BUFFER LIFETIME RATHER THAN PIXELS.** A release is a
+	 * promise that the compositor has finished with those pixels, so it may only ever name a buffer that has been
+	 * REPLACED — never the one on the glass. One buffer cannot show that (its release and its content are the same
+	 * buffer), so `--double` keeps two and alternates them, which is what every real client does and what
+	 * `libagora-app/platform/AGWindowServer-Wayland.c` does for the reason in `README.md` §2c. */
+	int double_buffer;
+	struct wl_buffer *buffers[2];
+	uint32_t *buffer_pixels[2];
+	int slot;
+	int releases;
+	int releases_while_current;
 
 	int width;
 	int height;
@@ -210,16 +235,32 @@ static const struct wl_callback_listener frame_listener = { frame_done };
 static void submit_frame(struct client *client)
 {
 	struct wl_callback *callback = wl_surface_frame(client->surface);
+	struct wl_buffer *buffer = client->buffer;
 
+	/* **ALTERNATING IS THE WHOLE OF `--double`, AND IT IS DONE BEFORE THE COMMIT** so `slot` always names the
+	 * buffer this client last handed over — the one the compositor is showing, and therefore the one a release
+	 * must never name. */
+	if (client->double_buffer) {
+		client->slot ^= 1;
+		buffer = client->buffers[client->slot];
+	}
 	wl_callback_add_listener(callback, &frame_listener, client);
-	wl_surface_attach(client->surface, client->buffer, 0, 0);
+	wl_surface_attach(client->surface, buffer, 0, 0);
 	wl_surface_damage_buffer(client->surface, 0, 0, client->width, client->height);
 	wl_surface_commit(client->surface);
 }
 
 static void buffer_release(void *data, struct wl_buffer *buffer)
 {
-	(void)data; (void)buffer;
+	struct client *client = data;
+
+	client->releases++;
+	/* **A RELEASE THAT NAMES THE BUFFER ON THE GLASS IS THE COMPOSITOR TAKING PIXELS IT IS STILL DRAWING.** That is
+	 * the bug this counter exists for: `README.md` §2c, and the blink it cost, which no other test in this tree can
+	 * see because every other client draws one still picture. */
+	if (client->double_buffer && client->buffers[client->slot] == buffer) {
+		client->releases_while_current++;
+	}
 }
 
 static const struct wl_buffer_listener buffer_listener = { buffer_release };
@@ -227,17 +268,53 @@ static const struct wl_buffer_listener buffer_listener = { buffer_release };
 
 
 
-static int create_buffer(struct client *client)
+/* **ONE PAINT, INTO WHATEVER MEMORY IS BEING FILLED.** Shared memory is a mapping and a GPU buffer is a mapping
+ * too, and the pixels a test asserts on are the same either way — which is what makes `--dmabuf` a comparison of
+ * two storage paths rather than two different pictures. */
+static void fill_pixels(struct client *client, void *data, int stride)
+{
+	uint32_t *pixels = data;
+	int words = stride / 4;
+	int x, y;
+
+	if (client->image_rgb != NULL) {
+		double scale_x = (double)client->width / (double)client->image_width;
+		double scale_y = (double)client->height / (double)client->image_height;
+		double scale = (scale_x > scale_y) ? scale_x : scale_y;
+		double origin_x = ((double)client->image_width - (double)client->width / scale) / 2.0;
+		double origin_y = ((double)client->image_height - (double)client->height / scale) / 2.0;
+
+		for (y = 0; y < client->height; y++) {
+			for (x = 0; x < client->width; x++) {
+				pixels[y * words + x] = sample_image(client, x, y, scale, origin_x, origin_y);
+			}
+		}
+	} else {
+		/* A FLAT COLOUR, and one that nothing else in the test uses: the assertion is that THIS colour is at the
+		 * cascade's first position and the compositor's own background is everywhere else. */
+		for (y = 0; y < client->height; y++) {
+			for (x = 0; x < client->width; x++) {
+				pixels[y * words + x] = client->colour;
+			}
+		}
+	}
+}
+
+/* ONE SHARED-MEMORY BUFFER, MADE INTO THE SLOT IT IS ASKED FOR. `slot` is -1 for the plain single-buffer client,
+ * which is what every other test here uses. */
+static int create_buffer_slot(struct client *client, int slot)
 {
 	int stride = client->width * 4;
 	size_t size = (size_t)stride * (size_t)client->height;
 	struct wl_shm_pool *pool;
+	struct wl_buffer **out = slot >= 0 ? &client->buffers[slot] : &client->buffer;
+	uint32_t **pixels_out = slot >= 0 ? &client->buffer_pixels[slot] : &client->pixels;
 	char name[64];
 	int fd;
 	void *data;
-	int x, y;
 
-	snprintf(name, sizeof name, "/agora-window-server-client-%d", (int)getpid());
+	snprintf(name, sizeof name, "/agora-window-server-client-%d-%d", (int)getpid(),
+		 slot >= 0 ? slot : 0);
 	fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
 	if (fd < 0) {
 		return -1;
@@ -252,37 +329,122 @@ static int create_buffer(struct client *client)
 		close(fd);
 		return -1;
 	}
-	client->pixels = data;
-	if (client->image_rgb != NULL) {
-		double scale_x = (double)client->width / (double)client->image_width;
-		double scale_y = (double)client->height / (double)client->image_height;
-		double scale = (scale_x > scale_y) ? scale_x : scale_y;
-		double origin_x = ((double)client->image_width - (double)client->width / scale) / 2.0;
-		double origin_y = ((double)client->image_height - (double)client->height / scale) / 2.0;
-
-		for (y = 0; y < client->height; y++) {
-			for (x = 0; x < client->width; x++) {
-				client->pixels[y * client->width + x] = sample_image(client, x, y, scale,
-										     origin_x, origin_y);
-			}
-		}
-	} else {
-		/* A FLAT COLOUR, and one that nothing else in the test uses: the assertion is that THIS colour is at the
-		 * cascade's first position and the compositor's own background is everywhere else. */
-		for (y = 0; y < client->height; y++) {
-			for (x = 0; x < client->width; x++) {
-				client->pixels[y * client->width + x] = client->colour;
-			}
-		}
-	}
+	*pixels_out = data;
+	fill_pixels(client, data, stride);
 	pool = wl_shm_create_pool(client->shm, fd, (int32_t)size);
-	client->buffer = wl_shm_pool_create_buffer(pool, 0, client->width, client->height, stride,
-						   WL_SHM_FORMAT_XRGB8888);
+	*out = wl_shm_pool_create_buffer(pool, 0, client->width, client->height, stride,
+					 WL_SHM_FORMAT_XRGB8888);
 	wl_shm_pool_destroy(pool);
 	close(fd);
-	wl_buffer_add_listener(client->buffer, &buffer_listener, client);
+	wl_buffer_add_listener(*out, &buffer_listener, client);
 	return 0;
 }
+
+static int create_buffer(struct client *client)
+{
+	return create_buffer_slot(client, -1);
+}
+
+#ifdef AWS_HAVE_GBM
+/* **THE OTHER STORAGE PATH: A BUFFER THE GPU CAN SAMPLE WHERE IT WAS WRITTEN.** GBM allocates on the render node and
+ * hands out a file descriptor; the compositor imports it once and samples it every frame, so the per-frame upload
+ * shared memory needs does not happen. The buffer is LINEAR on purpose: it is the one modifier every driver
+ * advertises, so the test exercises the protocol rather than a vendor's tiling. */
+static int create_dmabuf_buffer(struct client *client)
+{
+	static const char *const nodes[] = { "/dev/dri/renderD128", "/dev/dri/renderD129", "/dev/dri/card0" };
+	struct gbm_device *device = NULL;
+	struct gbm_bo *bo = NULL;
+	struct zwp_linux_buffer_params_v1 *params;
+	uint64_t modifier;
+	uint32_t stride = 0, offset;
+	void *map, *map_data = NULL;
+	int drm_fd = -1;
+	int fd;
+	size_t i;
+
+	if (client->dmabuf == NULL) {
+		fprintf(stderr, "client: --dmabuf asked for but the server does not offer zwp_linux_dmabuf_v1\n");
+		return -1;
+	}
+	for (i = 0; i < sizeof nodes / sizeof nodes[0] && device == NULL; i++) {
+		drm_fd = open(nodes[i], O_RDWR | O_CLOEXEC);
+		if (drm_fd < 0) {
+			continue;
+		}
+		device = gbm_create_device(drm_fd);
+		if (device == NULL) {
+			close(drm_fd);
+			drm_fd = -1;
+		}
+	}
+	if (device == NULL) {
+		fprintf(stderr, "client: no render node could be opened for --dmabuf\n");
+		return -1;
+	}
+	{
+		uint64_t modifiers[1] = { DRM_FORMAT_MOD_LINEAR };
+
+		bo = gbm_bo_create_with_modifiers(device, (uint32_t)client->width, (uint32_t)client->height,
+						  DRM_FORMAT_XRGB8888, modifiers, 1);
+	}
+	if (bo == NULL) {
+		fprintf(stderr, "client: gbm could not allocate a %dx%d buffer\n", client->width, client->height);
+		goto fail;
+	}
+	map = gbm_bo_map(bo, 0, 0, (uint32_t)client->width, (uint32_t)client->height,
+			 GBM_BO_TRANSFER_WRITE, &stride, &map_data);
+	if (map == MAP_FAILED) {
+		fprintf(stderr, "client: the GPU buffer could not be mapped\n");
+		goto fail;
+	}
+	fill_pixels(client, map, (int)stride);
+	gbm_bo_unmap(bo, map_data);
+	map_data = NULL;
+
+	fd = gbm_bo_get_fd(bo);
+	if (fd < 0) {
+		goto fail;
+	}
+	offset = gbm_bo_get_offset(bo, 0);
+	modifier = gbm_bo_get_modifier(bo);
+	params = zwp_linux_dmabuf_v1_create_params(client->dmabuf);
+	zwp_linux_buffer_params_v1_add(params, fd, 0, offset, stride,
+				       (uint32_t)(modifier >> 32), (uint32_t)modifier);
+	client->buffer = zwp_linux_buffer_params_v1_create_immed(params, client->width, client->height,
+								 DRM_FORMAT_XRGB8888, 0);
+	zwp_linux_buffer_params_v1_destroy(params);
+	close(fd);
+	/* **THE IMPORT HAS ITS OWN REFERENCE, SO THE CLIENT'S OBJECTS GO NOW.** The compositor made the EGLImage inside
+	 * the `create_immed` request, synchronously, before this function returned. */
+	gbm_bo_destroy(bo);
+	gbm_device_destroy(device);
+	close(drm_fd);
+	if (client->buffer == NULL) {
+		return -1;
+	}
+	wl_buffer_add_listener(client->buffer, &buffer_listener, client);
+	return 0;
+
+fail:
+	if (map_data != NULL) {
+		gbm_bo_unmap(bo, map_data);
+	}
+	if (bo != NULL) {
+		gbm_bo_destroy(bo);
+	}
+	gbm_device_destroy(device);
+	close(drm_fd);
+	return -1;
+}
+#else /* !AWS_HAVE_GBM */
+static int create_dmabuf_buffer(struct client *client)
+{
+	(void)client;
+	fprintf(stderr, "client: --dmabuf needs a build with gbm (AWS_HAVE_GBM)\n");
+	return -1;
+}
+#endif /* AWS_HAVE_GBM */
 
 static void registry_global(void *data, struct wl_registry *registry, uint32_t name, const char *interface,
 			    uint32_t version)
@@ -296,6 +458,12 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
 						      version < 4 ? version : 4);
 	} else if (strcmp(interface, wl_shm_interface.name) == 0) {
 		client->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
+	} else if (strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0) {
+		/* **v3 IS WHAT THIS SERVER OFFERS: THE FLAT (format, modifier) LIST.** Binding a higher version would be
+		 * asking for feedback events the server will never send, which is a client that waits for something that
+		 * cannot arrive. */
+		client->dmabuf = wl_registry_bind(registry, name, &zwp_linux_dmabuf_v1_interface,
+						  version < 3 ? version : 3);
 	} else if (strcmp(interface, agora_shell_interface.name) == 0) {
 		client->shell = wl_registry_bind(registry, name, &agora_shell_interface, 1);
 	}
@@ -332,6 +500,10 @@ int main(int argc, char **argv)
 			client.height = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--hold") == 0) {
 			client.hold = 1;
+		} else if (strcmp(argv[i], "--dmabuf") == 0) {
+			client.use_dmabuf = 1;
+		} else if (strcmp(argv[i], "--double") == 0) {
+			client.double_buffer = 1;
 		} else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
 			client.max_frames = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--colour") == 0 && i + 1 < argc) {
@@ -376,15 +548,32 @@ int main(int argc, char **argv)
 	}
 	agora_window_set_level(client.window, client.level);
 	agora_window_set_title(client.window, "window server test client");
-	agora_window_set_app_id(client.window, "org.agora.test-client");
+	agora_window_set_app_id(client.window, "io.github.agoradesktop.test-client");
 
 	if (client.image_path != NULL && load_jpeg(&client, client.image_path) != 0) {
 		fprintf(stderr, "client: falling back to the flat colour\n");
 	}
-	if (create_buffer(&client) != 0) {
-		fprintf(stderr, "client: could not make a buffer\n");
-		free(client.image_rgb);
-		return 1;
+	if (client.double_buffer) {
+		/* **A SWAPCHAIN IS SHARED MEMORY EVEN HERE**, because what this mode is about is LIFETIME and not storage:
+		 * a dmabuf would add a second reason for a release to be interesting, and `--dmabuf` already tests the
+		 * storage path. */
+		if (create_buffer_slot(&client, 0) != 0 || create_buffer_slot(&client, 1) != 0) {
+			fprintf(stderr, "client: could not make the two buffers\n");
+			free(client.image_rgb);
+			return 1;
+		}
+		client.slot = 0;
+		client.pixels = client.buffer_pixels[0];
+	} else {
+		if (client.use_dmabuf && create_dmabuf_buffer(&client) != 0) {
+			fprintf(stderr, "client: falling back to shared memory\n");
+			client.use_dmabuf = 0;
+		}
+		if (!client.use_dmabuf && create_buffer(&client) != 0) {
+			fprintf(stderr, "client: could not make a buffer\n");
+			free(client.image_rgb);
+			return 1;
+		}
 	}
 	free(client.image_rgb);
 	client.image_rgb = NULL;
@@ -405,6 +594,12 @@ int main(int argc, char **argv)
 	}
 	printf("client: %d frame(s), %s %dx%d\n", client.frames,
 	       client.image_path != NULL ? client.image_path : "flat colour", client.width, client.height);
+	/* **THE LEDGER THE `--double` TEST IS ABOUT: one release per REPLACED buffer, and none for the one on the
+	 * glass.** `tests/run-release.sh` reads these two numbers. */
+	if (client.double_buffer) {
+		printf("client: releases=%d while_current=%d\n", client.releases,
+		       client.releases_while_current);
+	}
 	wl_display_disconnect(client.display);
 	return client.frames > 0 ? 0 : 1;
 }

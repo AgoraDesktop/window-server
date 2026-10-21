@@ -52,6 +52,15 @@ void aws_window_send_pointer_global(struct aws_surface *surface, int x, int y)
 	s_global_sends++;
 }
 
+/* **AND THE THIRD, WHICH ARRIVED WITH THE WINDOW LIST.** A focus change tells a Dock what is in front, and a test
+ * with no client to tell has nothing to do with it — but the call exists in `seat.c` as it ships, so the symbol has
+ * to be here or the suite would not link. If the list ever grows a claim worth testing, this is where a counter
+ * would go. */
+void aws_shell_window_list_changed(struct aws_server *server)
+{
+	(void)server;
+}
+
 static int s_failed;
 
 static void check(int ok, const char *what)

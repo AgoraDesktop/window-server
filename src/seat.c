@@ -426,6 +426,14 @@ void aws_seat_set_keyboard_focus(struct aws_server *server, struct aws_surface *
 	uint32_t serial = wl_display_next_serial(server->display);
 	struct wl_array keys;
 
+	/* **A WINDOW THAT MAY NOT ACTIVATE NEVER TAKES THE KEYBOARD, WHICHEVER DOOR ASKED.** The click path, the
+	 * initial-focus rule on map and the reassignment after a window goes away all come through here, so the check is
+	 * here once rather than in three callers that could disagree — the same reason the pointer's routing is one
+	 * function. The focus is left EXACTLY where it was: a click on the Dock must not deactivate the application a
+	 * person is working in. */
+	if (surface != NULL && !surface->activatable) {
+		return;
+	}
 	if (server->keyboard_focus == surface) {
 		return;
 	}
@@ -455,6 +463,10 @@ void aws_seat_set_keyboard_focus(struct aws_server *server, struct aws_surface *
 		}
 	}
 	wl_array_release(&keys);
+	/* **AND A DOCK IS TOLD WHO IS IN FRONT**, because `active` is one of the fields it reads and this is the only
+	 * notion of "frontmost" the tree has. It comes after the array is released, so nothing that walks the list can
+	 * see half a keyboard. */
+	aws_shell_window_list_changed(server);
 }
 
 /* **THE TOPMOST WINDOW, BY THE SAME RULE THE COMPOSITOR STACKS BY: the highest LEVEL, and within a level the
@@ -468,6 +480,11 @@ static struct aws_surface *topmost_surface(struct aws_server *server)
 
 	wl_list_for_each(surface, &server->surfaces, link) {
 		if (!surface->mapped || !surface->visible || surface->current_buffer == NULL) {
+			continue;
+		}
+		/* **AND A WINDOW THAT MAY NOT ACTIVATE IS NOT A CANDIDATE**, because the answer here is used when the
+		 * keyboard has to be GIVEN somewhere and a Dock is not a place to give it. */
+		if (!surface->activatable) {
 			continue;
 		}
 		/* `>=` AND NOT `>`: the list runs back-to-front, so the LATER surface at the same level is the one on top
@@ -485,8 +502,8 @@ void aws_seat_reassign_keyboard_focus(struct aws_server *server)
 	struct aws_surface *focus = server->keyboard_focus;
 
 	/* STILL VALID, SO NOTHING TO DO. This is what makes it safe to call after any change: it only acts when the
-	 * window that had the keyboard is gone or hidden. */
-	if (focus != NULL && focus->mapped && focus->visible && focus->current_buffer != NULL) {
+	 * window that had the keyboard is gone or hidden — or was just made non-activatable under it. */
+	if (focus != NULL && focus->mapped && focus->visible && focus->current_buffer != NULL && focus->activatable) {
 		return;
 	}
 	aws_seat_set_keyboard_focus(server, topmost_surface(server));

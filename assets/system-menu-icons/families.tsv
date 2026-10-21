@@ -1,0 +1,31 @@
+# family <TAB> icon
+#
+# THE FAMILY TABLE IS THE LONG TAIL'S ANSWER. A distro whose ID has no exact mark inherits its family's mark; a
+# family with no mark of its own inherits the hamburger. Keep this table in step with `distros.tsv`: every family
+# named there must have a row here.
+debian		debian
+ubuntu		ubuntu
+fedora		fedora
+redhat		redhat
+arch		archlinux
+suse		opensuse
+alpine		alpinelinux
+freebsd		freebsd
+openbsd		openbsd
+netbsd		netbsd
+dragonfly	freebsd
+gentoo		hamburger
+void		hamburger
+nixos		hamburger
+slackware	hamburger
+solus		hamburger
+mageia		hamburger
+openmandriva	hamburger
+chimera		hamburger
+wolfi		hamburger
+clear-linux	hamburger
+photon		hamburger
+bsd		hamburger
+darwin		hamburger
+linux		hamburger
+unknown		hamburger

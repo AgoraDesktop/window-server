@@ -1,0 +1,101 @@
+# alias <TAB> icon
+#
+# ALIASES ARE THE NAMES A PERSON OR A DISTRO MAY USE THAT ARE NOT THE EXACT ICON ID. They make
+# `--system-menu-icon rocky` mean Red Hat, and they keep the resolver's `ID_LIKE` pass useful for derivative IDs
+# that are not in `distros.tsv`. A duplicate alias pointing at a different icon is a generator error.
+#
+# Debian family spellings
+kali			debian
+raspbian		debian
+raspberrypi		debian
+devuan			debian
+pureos			debian
+trisquel		debian
+mx			debian
+parrot			debian
+deepin			debian
+tails			debian
+qubes			debian
+armbian			debian
+dietpi			debian
+antix			debian
+bunsenlabs		debian
+solydxk			debian
+endless			debian
+
+# Ubuntu family spellings
+mint			linuxmint
+pop			ubuntu
+elementary		ubuntu
+zorin			ubuntu
+neon			ubuntu
+kubuntu			ubuntu
+xubuntu			ubuntu
+lubuntu			ubuntu
+ubuntu-mate		ubuntu
+ubuntu-budgie		ubuntu
+edubuntu		ubuntu
+ubuntustudio		ubuntu
+ubuntu-studio		ubuntu
+
+# Fedora family spellings
+nobara			fedora
+bazzite			fedora
+ultramarine		fedora
+risios			fedora
+
+# Red Hat family spellings
+rhel			redhat
+redhat			redhat
+centos			redhat
+centos-stream		redhat
+rocky			redhat
+almalinux		redhat
+oracle			redhat
+ol			redhat
+scientific		redhat
+amzn			redhat
+amazon			redhat
+cloudlinux		redhat
+eurolinux		redhat
+springdale		redhat
+
+# Arch family spellings
+arch			archlinux
+manjaro			archlinux
+manjaro-arm		archlinux
+endeavouros		archlinux
+garuda			archlinux
+arcolinux		archlinux
+artix			archlinux
+cachyos			archlinux
+rebornos		archlinux
+blackarch		archlinux
+archcraft		archlinux
+steamos			archlinux
+
+# SUSE family spellings
+opensuse-leap		opensuse
+opensuse-tumbleweed	opensuse
+opensuse-microos	opensuse
+sles			opensuse
+sled			opensuse
+geckolinux		opensuse
+
+# Alpine family spellings
+alpine			alpinelinux
+postmarketos		alpinelinux
+
+# BSD family spellings
+dragonfly		freebsd
+ghostbsd		freebsd
+hardenedbsd		freebsd
+nomadbsd		freebsd
+hellosystem		freebsd
+freebsd			freebsd
+openbsd			openbsd
+netbsd			netbsd
+
+# THE FALLBACK IS ITSELF A NAME, so `--system-menu-icon hamburger` is always valid.
+dragonflybsd		freebsd
+hamburger		hamburger

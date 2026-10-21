@@ -38,7 +38,11 @@ rm -f "${RUNTIME}/${SOCK}" "${RUNTIME}/${SOCK}.lock" "${SHOT}"
 # the second client needs to start. MEASURED: the second client never drew, the overlap held the first client's
 # colour, and "the higher level is on top" passed because only ONE WINDOW EXISTED. A test that passes for the
 # wrong reason is worse than one that fails.
-"${SERVER}" --socket "${SOCK}" --frames 1000000 --screenshot "${SHOT}" >/dev/null 2>/tmp/agora-window-server.log &
+# **THE SYSTEM MENU IS PINNED TO THE HAMBURGER.** The server detects the host OS now, and this test is about
+# windows and levels, not about which mark the bar happens to resolve on the machine running it. Forcing the
+# fallback keeps the screenshot the same on Debian, Fedora and FreeBSD.
+"${SERVER}" --socket "${SOCK}" --frames 1000000 --screenshot "${SHOT}" \
+	--system-menu-icon hamburger >/dev/null 2>/tmp/agora-window-server.log &
 SPID=$!
 for _ in $(seq 1 50); do
 	[ -S "${RUNTIME}/${SOCK}" ] && break

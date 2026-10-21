@@ -49,6 +49,7 @@ static int64_t aws_monotonic_ns(void)
 
 static int64_t s_last_render_ns;
 
+
 static int on_signal(int signal_number, void *data)
 {
 	struct aws_server *server = data;
@@ -66,25 +67,38 @@ static void usage(const char *program)
 {
 	fprintf(stderr,
 		"usage: %s [--backend NAME] [--input NAME] [--width W] [--height H] [--socket NAME]\n"
-		"          [--frames N] [--screenshot PATH.ppm]\n"
+		"          [--frames N] [--screenshot PATH.ppm] [--system-menu-icon auto|NAME]\n"
+		"          [--list-system-menu-icons] [--dump-os-identity]\n"
 		"  --backend NAME    where the pixels go: %s (default headless)\n"
+		"  --renderer NAME   who draws them: %s (default auto: gl when a backend has a GPU present)\n"
 		"  --input NAME      where input comes from: %s (default libinput)\n"
 		"  --width/--height  the output's size, in pixels (default 1280x720)\n"
 		"  --socket NAME     the Wayland socket's name; the default is chosen and printed\n"
 		"  --frames N        composite N frames, then stop (0, the default, runs until killed)\n"
-		"  --screenshot P    write the final output to a PPM file\n",
-		program, aws_backend_names(), aws_input_names());
+		"  --screenshot P    write the final output to a PPM file\n"
+		"  --system-menu-icon NAME\n"
+		"                    force the System menu mark: an icon id, alias, distro id or\n"
+		"                    family (default auto: detect the OS)\n"
+		"  --list-system-menu-icons\n"
+		"                    print the available marks and exit\n"
+		"  --dump-os-identity\n"
+		"                    print the detected OS identity and chosen mark, then exit\n",
+		program, aws_backend_names(), aws_renderer_names(), aws_input_names());
 }
 
 int main(int argc, char **argv)
 {
 	const char *backend = "headless";
 	const char *input = NULL;
+	const char *renderer = NULL;
 	int width = 1280;
 	int height = 720;
 	int frames = 0;
 	const char *socket_name = NULL;
 	const char *screenshot = NULL;
+	const char *system_menu_icon = NULL;
+	int list_system_menu_icons = 0;
+	int dump_os_identity = 0;
 	struct aws_server *server;
 	int i;
 
@@ -93,6 +107,8 @@ int main(int argc, char **argv)
 			backend = argv[++i];
 		} else if (strcmp(argv[i], "--input") == 0 && i + 1 < argc) {
 			input = argv[++i];
+		} else if (strcmp(argv[i], "--renderer") == 0 && i + 1 < argc) {
+			renderer = argv[++i];
 		} else if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
 			width = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--height") == 0 && i + 1 < argc) {
@@ -103,6 +119,12 @@ int main(int argc, char **argv)
 			frames = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc) {
 			screenshot = argv[++i];
+		} else if (strcmp(argv[i], "--system-menu-icon") == 0 && i + 1 < argc) {
+			system_menu_icon = argv[++i];
+		} else if (strcmp(argv[i], "--list-system-menu-icons") == 0) {
+			list_system_menu_icons = 1;
+		} else if (strcmp(argv[i], "--dump-os-identity") == 0) {
+			dump_os_identity = 1;
 		} else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
 			usage(argv[0]);
 			return 0;
@@ -112,10 +134,56 @@ int main(int argc, char **argv)
 		}
 	}
 
-	server = aws_server_create(backend, input, width, height);
+	/* **THE DIAGNOSTIC DOORS OPEN BEFORE THE DISPLAY DOES.** `--list-system-menu-icons` and `--dump-os-identity`
+	 * answer without a Wayland socket, a backend or an X server, which is what makes them useful on a machine whose
+	 * compositor will not start — and in a bug report that says "distro X was not detected". */
+	if (list_system_menu_icons) {
+		size_t index;
+
+		for (index = 0; index < aws_system_icon_count(); index++) {
+			const struct aws_system_icon *icon = aws_system_icon_at(index);
+
+			if (icon != NULL) {
+				printf("%s\n", icon->id);
+			}
+		}
+		return 0;
+	}
+	if (dump_os_identity) {
+		struct aws_os_identity identity;
+		const struct aws_system_icon *chosen;
+
+		aws_os_identity_read(&identity);
+		chosen = aws_system_menu_icon_resolve(&identity);
+		if (system_menu_icon != NULL && strcmp(system_menu_icon, "auto") != 0) {
+			chosen = aws_system_icon_by_name(system_menu_icon);
+			if (chosen == NULL) {
+				fprintf(stderr, "window-server: unknown system menu icon '%s'\n", system_menu_icon);
+				return 2;
+			}
+		}
+		printf("sysname: %s\n", identity.sysname[0] != '\0' ? identity.sysname : "(none)");
+		printf("source: %s\n", identity.source != NULL ? identity.source : "(none)");
+		printf("ID: %s\n", identity.id[0] != '\0' ? identity.id : "(none)");
+		printf("ID_LIKE: %s\n", identity.id_like[0] != '\0' ? identity.id_like : "(none)");
+		printf("NAME: %s\n", identity.name[0] != '\0' ? identity.name : "(none)");
+		printf("family: %s\n", aws_system_menu_icon_family(&identity));
+		printf("system menu icon: %s\n",
+		       chosen != NULL ? chosen->id : AWS_SYSTEM_MENU_ICON_FALLBACK);
+		return 0;
+	}
+
+	server = aws_server_create(backend, input, renderer, width, height);
 	if (server == NULL) {
 		fprintf(stderr, "window-server: could not start (backend '%s')\n", backend);
 		return 1;
+	}
+	if (system_menu_icon != NULL && strcmp(system_menu_icon, "auto") != 0) {
+		if (aws_server_set_system_menu_icon(server, system_menu_icon) != 0) {
+			fprintf(stderr, "window-server: unknown system menu icon '%s'\n", system_menu_icon);
+			aws_server_destroy(server);
+			return 2;
+		}
 	}
 	if (socket_name != NULL) {
 		if (wl_display_add_socket(server->display, socket_name) < 0) {
@@ -136,6 +204,10 @@ int main(int argc, char **argv)
 	fflush(stdout);
 	fprintf(stderr, "window-server: listening on %s, %s output %dx%d\n", socket_name, server->backend.name,
 		server->backend.width, server->backend.height);
+	fprintf(stderr, "window-server: system menu: %s (source %s, ID=%s)\n",
+		server->system_menu_icon != NULL ? server->system_menu_icon->id : AWS_SYSTEM_MENU_ICON_FALLBACK,
+		server->os_identity.source != NULL ? server->os_identity.source : "(none)",
+		server->os_identity.id[0] != '\0' ? server->os_identity.id : "(none)");
 
 	server->running = 1;
 	/* **A SIGNAL MUST GO THROUGH THE LOOP, NOT AROUND IT.** `SIGINT` and `SIGTERM` end this process, and the

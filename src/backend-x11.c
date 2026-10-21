@@ -126,8 +126,10 @@ static int x11_dispatch(int fd, uint32_t mask, void *data)
 		}
 		switch (event.type) {
 		case Expose:
-			/* The server owns the pixels, so an Expose is "put them here again" and nothing else. */
-			x11_present(server);
+			/* **AN EXPOSE ASKS FOR A FRAME, AND NOT FOR A COPY.** The CPU renderer's pixels are still there to put
+			 * again, but a GL renderer's frame lives in a swapchain whose back buffer is undefined after a swap — so
+			 * one answer that is right for both is "draw it again", which the render loop already knows how to do. */
+			aws_server_schedule_render(server);
 			break;
 		case ClientMessage:
 			if ((Atom)event.xclient.data.l[0] == x11->wm_delete) {
@@ -185,6 +187,37 @@ static int x11_dispatch(int fd, uint32_t mask, void *data)
 		}
 	}
 	return 0;
+}
+
+/* **AND THE COPY PATH'S MEMORY, GIVEN BACK WHEN A GPU TAKES THE PRESENT.** The MIT-SHM segment and the XImage
+ * exist to put a CPU frame on the screen; a renderer that swaps its own buffers has no use for either, and
+ * leaving them attached would be a present pointer that paints the OLD pixels over the new ones. The frame buffer
+ * is freed here and set to NULL: whoever allocates the next one (the GL renderer, for a screenshot's readback) is
+ * its owner, which is the same rule `backend.c` states for `stop`. */
+static void x11_release_present(struct aws_server *server)
+{
+	struct x11_state *x11 = server->backend.data;
+
+	if (x11 == NULL) {
+		return;
+	}
+	if (x11->image != NULL) {
+		/* THE PIXELS ARE NOT THE IMAGE'S TO FREE — clearing `data` keeps X from freeing a segment or a buffer
+		 * that this process owns. */
+		x11->image->data = NULL;
+		XDestroyImage(x11->image);
+		x11->image = NULL;
+	}
+	if (x11->shared) {
+		XShmDetach(x11->display, &x11->shm);
+		shmdt(x11->shm.shmaddr);
+		shmctl(x11->shm.shmid, IPC_RMID, NULL);
+		x11->shared = 0;
+	} else {
+		free(server->backend.pixels);
+	}
+	server->backend.pixels = NULL;
+	server->backend.present = NULL;
 }
 
 static void x11_stop(struct aws_server *server)
@@ -261,6 +294,13 @@ int aws_backend_x11_start(struct aws_server *server)
 					  BlackPixel(x11->display, x11->screen),
 					  WhitePixel(x11->display, x11->screen));
 	XStoreName(x11->display, x11->window, "Agora Window Server");
+	/* **AND WHAT AN EGL CONTEXT NEEDS FROM THIS BACKEND, WHICH IS THE WHOLE OF IT.** A display, a window and the
+	 * visual that window was made with — the last because an EGL config has to match it, and `eglCreateWindowSurface`
+	 * fails with `EGL_BAD_MATCH` on a config whose visual is somebody else's. The GL renderer asks for nothing else. */
+	server->backend.native_display = x11->display;
+	server->backend.native_window = (unsigned long)x11->window;
+	server->backend.native_visual =
+		(unsigned long)XVisualIDFromVisual(DefaultVisual(x11->display, x11->screen));
 	/* THE INPUT MASKS ARE THE HOST'S PERMISSION SLIP: these are the events this window is given, and there is
 	 * no grab among them. PointerMotionMask delivers a motion only while the pointer is inside the window,
 	 * which is exactly the reach of a nested output. */
@@ -338,6 +378,7 @@ int aws_backend_x11_start(struct aws_server *server)
 	server->backend.name = "x11";
 	server->backend.data = x11;
 	server->backend.present = x11_present;
+	server->backend.release_present = x11_release_present;
 	server->backend.stop = x11_stop;
 	fprintf(stderr, "window-server: nested in an X window on %s\n", DisplayString(x11->display));
 	return 0;

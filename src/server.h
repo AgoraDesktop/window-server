@@ -52,6 +52,9 @@
 
 #include <wayland-server.h>
 
+#include "osdetect.h"
+#include "systemicon.h"
+
 struct aws_server;
 
 /* A SURFACE, and the role it has been given. A surface is what a client draws into; the ROLE is what makes it
@@ -108,6 +111,16 @@ struct aws_surface {
 	 * from under the window it is resizing, so "what is under the pointer" is the one question nobody is asking.
 	 * See the protocol's `set_pointer_capture`; it is an INTERACTIVE grab and not the fallback above. */
 	int pointer_capture;
+	/* **AND HOW MUCH OF THE SCREEN THIS WINDOW HAS TAKEN FOR ITSELF.** The client says an edge and a length
+	 * (`set_reserved`), the work area is the output minus what every reserver asked for, and the Dock is the
+	 * client that made this a request rather than a constant. `reserved_amount` 0 means nothing is reserved. */
+	int reserved_edge;			/* an `agora_window.edge`; meaningless while reserved_amount is 0 */
+	int reserved_amount;			/* pixels along that edge, summed with every other surface reserving it */
+	/* **AND WHETHER A CLICK ON IT MAY GIVE ITS APPLICATION THE KEYBOARD.** A Dock is the window this exists for:
+	 * clicking a tile must activate the APPLICATION THE TILE NAMES, and a Dock that took the keyboard would take
+	 * the menu bar with it. Default 1; `set_activatable` writes it. */
+	int activatable;
+	unsigned int id;			/* the server's number for this window; 0 until it is given an agora role */
 	struct wl_resource *agora_window;	/* the role, when this surface's client is an Agora one */
 
 	int x;					/* where the compositor has put it, in output coordinates */
@@ -132,12 +145,25 @@ struct aws_backend {
 	int height;
 	uint32_t *pixels;			/* XRGB8888, the format every client here sends */
 
+	/* **AND WHERE A GPU COULD PUT THEM, WHEN THIS BACKEND HAS ONE.** A windowed backend that can hand an EGL
+	 * context a native window says so here — the X11 backend fills these in, and the others leave them zero — and
+	 * that is the whole of what the GL renderer needs from a backend. A backend that cannot leaves them zero and
+	 * gets the CPU renderer, which is the answer rather than a failure: a place to put pixels is still a place. */
+	void *native_display;			/* X11: Display * */
+	unsigned long native_window;		/* X11: Window */
+	unsigned long native_visual;		/* X11: the window's visual id, for choosing an EGL config */
+
 	/* CALLED ONCE, AFTER THE WAYLAND DISPLAY EXISTS — an X11 backend needs the event loop to add its own
 	 * descriptor to. Returns 0 on success. */
 	int (*start)(struct aws_server *server);
 	/* PUT THE FRAMEBUFFER ON THE DISPLAY. Called after every composite, so it must be cheap enough to call
 	 * sixty times a second; a backend with nothing to do (headless) leaves it NULL. */
 	void (*present)(struct aws_server *server);
+	/* **AND THE OTHER PRESENT, WHICH A GPU OWNS.** A renderer that draws through EGL swaps the buffers itself, so
+	 * it replaces `present` above — but the backend may still be holding the copy path's memory (the X11
+	 * backend's MIT-SHM segment and XImage), and that is what this asks it to give back. NULL for a backend that
+	 * never had a copy path to release. */
+	void (*release_present)(struct aws_server *server);
 	/* GIVE BACK WHATEVER `start` TOOK. */
 	void (*stop)(struct aws_server *server);
 
@@ -149,10 +175,103 @@ struct aws_backend {
 	void *data;				/* the backend's own state */
 };
 
+/* **THE DRM VOCABULARY A GPU BUFFER IS DESCRIBED IN, WRITTEN DOWN HERE RATHER THAN PULLED IN FROM libdrm.** A
+ * format is a fourcc and a modifier is a 64-bit vendor code; `<drm_fourcc.h>` would give these names, but it would
+ * also make a header-only dependency on libdrm's include path for a file that only spells them. */
+#define AWS_FOURCC(a, b, c, d) \
+	((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
+#define AWS_DRM_FORMAT_XRGB8888 AWS_FOURCC('X', 'R', '2', '4')
+#define AWS_DRM_FORMAT_ARGB8888 AWS_FOURCC('A', 'R', '2', '4')
+#define AWS_DRM_FORMAT_XBGR8888 AWS_FOURCC('X', 'B', '2', '4')
+#define AWS_DRM_FORMAT_ABGR8888 AWS_FOURCC('A', 'B', '2', '4')
+#define AWS_DRM_FORMAT_RGBX8888 AWS_FOURCC('R', 'X', '2', '4')
+#define AWS_DRM_FORMAT_RGBA8888 AWS_FOURCC('R', 'A', '2', '4')
+#define AWS_DRM_FORMAT_BGRX8888 AWS_FOURCC('B', 'X', '2', '4')
+#define AWS_DRM_FORMAT_BGRA8888 AWS_FOURCC('B', 'A', '2', '4')
+#define AWS_DRM_FORMAT_RGB888   AWS_FOURCC('R', 'G', '2', '4')
+#define AWS_DRM_FORMAT_BGR888   AWS_FOURCC('B', 'G', '2', '4')
+#define AWS_DRM_FORMAT_MOD_LINEAR  0ULL
+#define AWS_DRM_FORMAT_MOD_INVALID 0x00ffffffffffffffULL
+
+/* ONE PLANE OF A CLIENT'S GPU BUFFER. Almost every RGB buffer has exactly one; the array exists because the
+ * protocol carries a list and a format this compositor accepts is required to fit in it. */
+struct aws_dmabuf_plane {
+	int fd;
+	uint32_t offset;
+	uint32_t stride;
+	uint64_t modifier;
+};
+
+/* **A (FORMAT, MODIFIER) PAIR THE SERVER CAN ACTUALLY IMPORT.** This is what gets advertised, and it comes from the
+ * renderer's EGL context rather than from a list written here: advertising a modifier the GPU cannot sample is a
+ * client that allocates a buffer the compositor would then silently not draw. */
+struct aws_dmabuf_format {
+	uint32_t format;		/* an AWS_DRM_FORMAT_* fourcc */
+	uint64_t modifier;
+};
+
+/* **A `wl_buffer` WHOSE PIXELS ARE THE CLIENT'S GPU MEMORY.** The protocol half (dmabuf.c) owns the fields the wire
+ * carries; `render` is the renderer's own import handle — a texture, in the GL renderer — and the protocol code
+ * never looks inside it. The fds are closed once the import has taken its own reference.
+ *
+ * `server` is here because the buffer's destroy handler has to tell the renderer to let go, and a `wl_buffer`
+ * resource carries no server pointer of its own. */
+struct aws_dmabuf_buffer {
+	struct aws_server *server;
+	struct wl_resource *resource;
+	int32_t width;
+	int32_t height;
+	uint32_t format;
+	int plane_count;
+	struct aws_dmabuf_plane planes[4];
+	void *render;
+};
+
+/* **A RENDERER TURNS THE SERVER'S STATE INTO PIXELS, AND THERE ARE TWO OF THEM.**
+ *
+ * The CPU one composites into `backend->pixels` — the code this server shipped with. The GL one draws the same
+ * scene with EGL and GLES2 and never makes CPU pixels at all, which is why `draw` is the whole of the contract:
+ * a renderer that owns the present (the GL one, through `backend.present`) has nothing left to hand up.
+ *
+ * THE COMPOSITE ORDER IS NOT A RENDERER'S. What is drawn, in what order, and which surfaces get a shadow is the
+ * server's POLICY — levels, the menu bar, the release that keeps a client able to draw — so it lives once in
+ * `aws_output_walk` and both renderers are walked by it. Two copies of a level walk is two places for a menu to
+ * stop sitting above a window. */
+struct aws_renderer {
+	const char *name;
+	/* EVERY FRAME, ONCE. Called from `aws_output_render`; the buffer release that follows is the server's. */
+	void (*draw)(struct aws_server *server);
+	void (*stop)(struct aws_server *server);
+	/* **THE GPU BUFFERS THIS RENDERER CAN TAKE, AND HOW IT TAKES THEM.** A renderer that fills `formats` and answers a
+	 * positive count is one that can sample a client's dma-buf, and only then is `zwp_linux_dmabuf_v1` advertised at
+	 * all. The CPU renderer leaves all three NULL: it reads pixels, and there is no pixels to read in a GPU buffer —
+	 * so a compositor running it promises nothing rather than promising a window it would never draw. */
+	int (*dmabuf_formats)(struct aws_server *server, struct aws_dmabuf_format *formats, int max);
+	int (*dmabuf_import)(struct aws_server *server, struct aws_dmabuf_buffer *buffer);
+	void (*dmabuf_release)(struct aws_server *server, struct aws_dmabuf_buffer *buffer);
+	void *data;				/* the renderer's own state */
+};
+
 /* THE OUTPUT GLOBAL'S OWN STATE, which is a wl_output resource and nothing else: the size belongs to the
  * backend, because the backend is what knows it. */
 struct aws_output {
 	struct wl_resource *resource;
+};
+
+/* **AN `agora_output` THE SERVER CAN SPEAK TO LATER.** The interface is event-only, so the resource has no
+ * implementation struct to carry state — but the work area CHANGES now that clients reserve strips, and every
+ * bound output has to hear it. This is the list's node. */
+struct aws_agora_output {
+	struct wl_resource *resource;
+	struct wl_list link;
+};
+
+/* **AND A CLIENT THAT ASKED TO BE TOLD WHAT WINDOWS EXIST.** A Dock is the caller; the snapshot is re-sent on every
+ * change, so this list is walked whenever anything about a window moves. Empty for every ordinary application,
+ * which is what makes the broadcast free for them. */
+struct aws_window_list {
+	struct wl_resource *resource;
+	struct wl_list link;
 };
 
 struct aws_server {
@@ -171,7 +290,29 @@ struct aws_server {
 	void *input;				/* the chosen input source's own state */
 
 	struct aws_backend backend;
+	/* **WHO TURNS THE SCENE INTO PIXELS.** Always set after a successful `aws_server_create`; the CPU renderer is
+	 * what a server that has no GPU present gets, and a GL one is only ever chosen when a backend handed it a
+	 * native window. */
+	struct aws_renderer *renderer;
+	/* **AND THE GPU BUFFERS IT SAID IT COULD TAKE.** The pair list is the renderer's answer, kept here because the
+	 * protocol's bind handler has to send it to every client that asks. Empty on a server whose renderer cannot
+	 * import, which is also the case in which no `zwp_linux_dmabuf_v1` global exists. */
+	struct aws_dmabuf_format *dmabuf_formats;
+	int dmabuf_format_count;
 	struct aws_output output;
+	/* Every bound `agora_output`, so a work-area change reaches all of them. */
+	struct wl_list agora_outputs;
+	/* Every bound `agora_window_list`, so a window change reaches the dock that asked. */
+	struct wl_list window_lists;
+	/* **THE NUMBER A WINDOW IS KNOWN BY OUTSIDE ITS OWN CLIENT.** A Dock holds no proxy for somebody else's
+	 * window, so `activate_window` and `close_window` name one by this id — the server's, stable for the life of
+	 * the window. Zero is never handed out, so zero can mean "no window". */
+	unsigned int next_window_id;
+
+	/* ---- THE SYSTEM MENU'S MARK. What the OS says it is, and the resolved icon object the bar draws. Detection
+	 * is done once, in `server.c`; the override can replace the resolved pointer. ---- */
+	struct aws_os_identity os_identity;
+	struct aws_system_icon *system_menu_icon;
 
 	/* ---- THE SEAT. Which surfaces have the pointer and the keyboard, where the pointer is, and the xkb state
 	 * that turns a key into the MODIFIER STATE a client needs to translate it. ---- */
@@ -197,18 +338,50 @@ struct aws_server {
 };
 
 /* server.c */
-struct aws_server *aws_server_create(const char *backend_name, const char *input_name, int width, int height);
+struct aws_server *aws_server_create(const char *backend_name, const char *input_name, const char *renderer_name,
+				     int width, int height);
 void aws_server_destroy(struct aws_server *server);
 void aws_server_schedule_render(struct aws_server *server);
+/* `name` is an icon id, an alias, a distro id, a family, or "auto" to re-resolve from the identity. Returns 0 on
+ * success and -1 for an unknown name. */
+int aws_server_set_system_menu_icon(struct aws_server *server, const char *name);
 
 /* surface.c — the globals a client draws through */
 void aws_compositor_init(struct aws_server *server);
 void aws_xdg_shell_init(struct aws_server *server);
 
-/* output.c — the wl_output global, the compositing, and the screenshot */
+/* output.c — the wl_output global, the composite ORDER, and the screenshot */
 void aws_output_init(struct aws_server *server);
 void aws_output_render(struct aws_server *server);
+/* **THE COMPOSITE ORDER, IN ONE PLACE.** `emit` is called with a NULL surface when the menu bar is due, and once
+ * for each surface that is actually on the screen, in the order they are painted — background clears are the
+ * renderer's, and the buffer release after the walk is `aws_output_render`'s. A menu window's `frame_done` belongs
+ * here because it is owed at composite time; the caller passes the frame's clock down through `time`. */
+typedef void (*aws_output_emit_fn)(struct aws_server *server, struct aws_surface *surface, uint32_t time);
+void aws_output_walk(struct aws_server *server, aws_output_emit_fn emit);
 int aws_output_write_ppm(struct aws_server *server, const char *path);
+
+/* renderer.c — choosing who draws, and the two calls the lifecycle makes */const char *aws_renderer_names(void);
+int aws_renderer_init(struct aws_server *server, const char *name);
+void aws_renderer_shutdown(struct aws_server *server);
+
+/* EACH RENDERER ANSWERS 0 AND SETS `server->renderer`, or answers non-zero and says why on stderr. */
+int aws_renderer_cpu_create(struct aws_server *server);
+int aws_renderer_gl_create(struct aws_server *server);
+
+/* dmabuf.c — `zwp_linux_dmabuf_v1`: the GPU buffers a client may hand over instead of pixels.
+ *
+ * **THE GLOBAL IS CREATED AFTER THE RENDERER, AND THAT ORDER IS THE CONTRACT.** What can be advertised is what the
+ * active renderer can import, so a server with no GL context advertises nothing — and a client that binds the
+ * global is therefore never told about a buffer that would be dropped on the floor. */
+void aws_dmabuf_init(struct aws_server *server);
+/* **THE BUFFER, IF IT IS ONE OF OURS.** NULL for a `wl_shm` buffer (whose user data belongs to libwayland) and for
+ * anything else — which is what lets the two compositors ask "is this a dma-buf?" without knowing how the protocol
+ * stores it. */
+struct aws_dmabuf_buffer *aws_dmabuf_buffer_from_resource(struct wl_resource *buffer);
+/* Whether a fourcc carries alpha, and how many planes this compositor accepts for it (0 = not accepted). */
+int aws_dmabuf_format_has_alpha(uint32_t format);
+int aws_dmabuf_format_planes(uint32_t format);
 
 /* backend.c — choosing one, and the two calls the event loop makes */
 int aws_backend_init(struct aws_server *server, const char *name, int width, int height);
@@ -239,15 +412,28 @@ int aws_backend_drm_start(struct aws_server *server);
  * here — the provenance is `ARGENTUM.md`, which records the mockup each one came from. A server that picked its own
  * greys is how a menu bar comes to differ from the controls drawn under it by four counts. */
 #define AWS_MENU_BAR_COLOUR 0xFFEBEBEBu		/* Argentum: the bar's face, sampled 235,235,235 */
+/* **AND THE DESKTOP'S FILL, WHICH BOTH RENDERERS CLEAR TO.** A distinct colour rather than black, because a black
+ * background is indistinguishable from a client that painted black, and this has to be checkable from a
+ * screenshot. It is aqua BY REQUEST: (168,222,217), `#A8DED9` — light and green-leaning, so it reads as water. */
+#define AWS_BACKGROUND 0xFFA8DED9u
 
-/* **THE SYSTEM MENU, WHICH IS THE SERVER'S OWN.** A square at the left of the bar, and inside it the hamburger —
- * `☰`, U+2630 — which IS three horizontal bars, so it is drawn rather than typeset and needs no font. The numbers
- * below are the whole of the character: its bars, the gaps between them, how wide the mark is, AND HOW FAR IT SITS
- * FROM THE BAR'S LEFT EDGE. */
+/* **THE SHADOW'S THREE NUMBERS, WHICH TWO RENDERERS NOW HAVE TO AGREE ON.** The DEPTH is how far it reaches from
+ * the frame's edge; the ALPHA is what it starts at there; the RADIUS is the frame's own corner — the same corner
+ * the window is clipped to, because a shadow and the shape that casts it are one shape. These are a COPY of the
+ * client's `fn_BAR_RADIUS` in `libagora-app/NSWindow.m`, and the two have to be changed together; they are here
+ * rather than in one renderer because the CPU compositor and the GL shader must fall off over the same pixels. */
+#define AWS_SHADOW_DEPTH  10
+#define AWS_SHADOW_ALPHA  120
+#define AWS_SHADOW_RADIUS 6
+
+/* **THE SYSTEM MENU, WHICH IS THE SERVER'S OWN.** A square at the left of the bar, and inside it the OS mark —
+ * the hamburger on an unrecognised system, or one of the exact OS marks. The mark is vector data in a 16×16 box
+ * (`systemicon.h`), rasterized once into coverage and blended here; its bars, curves and holes are no longer
+ * arithmetic in this header. These numbers are the BOX and WHERE IT SITS, not the shape inside it. */
 #define AWS_SYSTEM_MENU_WIDTH 28
 #define AWS_SYSTEM_MENU_GLYPH_WIDTH 16
-#define AWS_SYSTEM_MENU_BAR_THICKNESS 3
-#define AWS_SYSTEM_MENU_BAR_GAP 3
+#define AWS_SYSTEM_MENU_GLYPH_HEIGHT 16
+#define AWS_SYSTEM_MENU_GLYPH_TOP ((AWS_MENU_BAR_HEIGHT - AWS_SYSTEM_MENU_GLYPH_HEIGHT) / 2)
 /* **THE MARK IS PLACED, NOT CENTRED.** The square is 28 wide and the mark 16, so CENTRING it leaves six pixels on
  * each side — and a person looking at the bar asked for more room ON THE LEFT, which is the side the bar begins at
  * and the side a hand comes from. Ten pixels puts the mark at 10..25, which leaves the SAME ten pixels between it
@@ -267,7 +453,20 @@ int aws_backend_drm_start(struct aws_server *server);
 
 /* shell.c — agora_shell: the frames, the levels and the work area the Mac's model needs. */
 void aws_shell_init(struct aws_server *server);
+/* **THE WORK AREA, AS OF NOW.** The output minus the menu bar the server owns and minus every strip a client
+ * reserved — which is `NSScreen.visibleFrame`, and the answer `constrainFrameRect:toScreen:` is checked against. */
 void aws_shell_reserved(struct aws_server *server, int *x, int *y, int *width, int *height);
+/* **AND TELLING EVERY CLIENT IT MOVED.** `set_reserved` is the only thing that changes it at runtime, so this is
+ * called from there and from the two places a reservation dies (the role destroyed, the surface gone). It sends
+ * `agora_output.work_area` to every bound output and `agora_window.work_area_changed` to every window. */
+void aws_shell_reserved_changed(struct aws_server *server);
+/* **AND THE RELEASE, WHICH IS THE SAME NO MATTER HOW IT HAPPENED.** A surface that never reserved anything is left
+ * alone, so nothing is announced for a window that never asked. */
+void aws_shell_release_reserve(struct aws_surface *surface);
+/* **AND TELLING THE DOCK WHAT IS ON THE SCREEN.** A snapshot — `begin`, one `window` per window, `done` — sent to
+ * every client that asked for one. Called from every door that changes what the list would say: a window mapped or
+ * gone, a title or an application id, a level, a visibility, and the keyboard moving. */
+void aws_shell_window_list_changed(struct aws_server *server);
 /* **WHERE AN APPLICATION'S OWN MENUS MAY BEGIN** — the strip minus the System menu's square. The one number about
  * the bar that a client cannot derive, because the System menu's width is the server's. See `agora-shell.xml`. */
 void aws_shell_menu_bar_area(struct aws_server *server, int *x, int *y, int *width, int *height);

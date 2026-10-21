@@ -16,21 +16,24 @@ application** owns its own menus (its name, File, Edit, …) and draws them in *
 WindowServer places inside the bar at the right level. Nothing is copied between them and there is no shared
 surface: they are separate windows at ordered levels, which is what makes the result look like one object.
 
-### The System menu, and the hamburger
+### The System menu, and the OS mark
 
-**IT IS THE SYSTEM MENU, AND ITS GLYPH IS THE HAMBURGER — `☰`, U+2630 TRIGRAM FOR HEAVEN.** Not the Apple menu and
-not the Apple logo: that mark is Apple's, and this project reuses none of it — the same reason the SDK's headers
-are fetched from a recipe here instead of being committed. The three-line character says in that position what the
-logo says there, and belongs to nobody.
+**IT IS THE SYSTEM MENU, AND ITS MARK IS THE RUNNING OS'S — WITH THE HAMBURGER AS THE FALLBACK.** Not the Apple menu
+and not the Apple logo: that mark is Apple's, and this project reuses none of it — the same reason the SDK's headers
+are fetched from a recipe here instead of being committed. The server detects the OS once at startup, resolves it to
+its exact mark (with the FreeBSD mark standing in for DragonFlyBSD for now), and gives anything unrecognised the
+hamburger (`☰`, U+2630 TRIGRAM FOR HEAVEN). The three-line character says in that position what a logo says there,
+and belongs to nobody: it is original to this project and dedicated to CC0 1.0.
 
 **AND IT IS THE ONE THING IN THE BAR THAT IS THE SERVER'S.** The status area is clients'; each application's own
 menu titles are that application's; the System menu is about the SYSTEM rather than about any program — so the
 server draws it, the server decides how wide it is, and everything else in the bar is placed to the right of it.
 
-That is also why it is the first thing this compositor DRAWS rather than fills. `☰` IS three horizontal bars, so
-three bars of a known size inside a square of a known size is the whole of the character and no font is needed to
-put it on the screen. `libagora-text` is what the server will reach for when it has to draw something whose SHAPE
-it does not already know.
+That is also why it is the first thing this compositor DRAWS rather than fills. The mark is vector data — subpaths
+in a 16×16 box, filled even-odd — rasterized once into a coverage grid and blended with one ink colour. The
+hamburger is still three horizontal bars, but it is now the same kind of path the OS marks will be, which is what
+keeps the rasterizer from becoming a special case for every logo. `libagora-text` is what the server will reach for
+when it has to draw something whose SHAPE it does not already know.
 
 
 **Apple's own headers say so, in the window server's vocabulary rather than AppKit's.** From `NSWindow.h` in the
@@ -57,9 +60,16 @@ Three things follow from six lines:
 
 The protocol those rules require is [`protocol/agora-shell.xml`](protocol/agora-shell.xml) — three interfaces:
 `agora_shell` (the global, handing out `agora_window` and `agora_output`), `agora_window` (`set_frame`,
-`set_level`, `raise`, `lower`, `set_title`, `set_app_id`, `destroy`; events `close` and `work_area_changed`) and
-`agora_output` (the `work_area` event, which is `NSScreen.visibleFrame`). The bindings are generated from it on
-every build, so a contract that does not parse stops the build rather than being discovered by a client.
+`set_status_item`, `set_level`, `raise`, `lower`, `set_title`, `set_app_id`, `set_visible`, `set_reserved`,
+`set_activatable`, `destroy`; events `close`, `work_area_changed` and `pointer_global`) and `agora_output` (the `work_area` event,
+which is `NSScreen.visibleFrame`, and `menu_bar_area`). The bindings are generated from it on every build, so a
+contract that does not parse stops the build rather than being discovered by a client.
+
+**`set_reserved` IS THE DOCK'S ONE REAL REQUEST, AND IT IS NOT A SPECIAL CASE FOR THE DOCK.** The rule below — the
+server must not grow a special case for "the dock" when a level and a reserved region will do — is what it is
+shaped by: a client says how many pixels along which edge are its own, the work area is the output minus the menu
+bar minus every such strip, and the Dock is simply the client that asks. A panel on the left asking the same
+question gets the same answer, and `agora_output.work_area` is re-sent to everyone when the sum changes.
 
 **IT IS NOT `xdg-shell` WITH EXTRA REQUESTS.** A surface given a role here is not an `xdg_toplevel`, because the
 configure cycle the two would share is exactly the inversion above: this server does not tell an application how

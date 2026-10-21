@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: CC0-1.0
+# The fallback mark. Original to the Agora project and dedicated to the public domain under CC0 1.0.
+# Hand-written in the same format as the generated OS marks.
+# Three bars, 3 units thick with 3-unit gaps, centred in the 16-unit box: the geometry the
+# compositor drew before the marks became vector data.
+id hamburger
+grid 16
+fill evenodd
+M 0 0.5
+L 16 0.5
+L 16 3.5
+L 0 3.5
+Z
+M 0 6.5
+L 16 6.5
+L 16 9.5
+L 0 9.5
+Z
+M 0 12.5
+L 16 12.5
+L 16 15.5
+L 0 15.5
+Z

@@ -48,6 +48,11 @@ endif()
 option(AWS_WITH_DRM      "build the DRM/KMS output backend (the shipping output)" ON)
 option(AWS_WITH_X11      "build the nested X11 backend (development only)"        OFF)
 option(AWS_WITH_LIBINPUT "build the libinput device-input path"                   ON)
+# **AND WHO DRAWS THE SCENE.** The CPU renderer is always built, because every backend can run it. The GL one is
+# optional and, TODAY, only the nested X11 backend can carry it (it needs a native window for an EGL surface; a DRM
+# backend would add GBM under it). So the option is ON but the feature follows AWS_WITH_X11 — asking for a GL
+# renderer in a build that cannot host one would be a configure that lies about what it made.
+option(AWS_WITH_GL       "build the GPU renderer (EGL/GLES2; needs the X11 backend today)" ON)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WAYLAND_SERVER REQUIRED IMPORTED_TARGET wayland-server)
@@ -63,6 +68,13 @@ if(AWS_WITH_X11)
   pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
   # XShm, which is what makes a present a pointer instead of 5.8 MB on the wire.
   pkg_check_modules(XEXT REQUIRED IMPORTED_TARGET xext)
+endif()
+# **AND THE GPU RENDERER'S TWO LIBRARIES.** EGL is the context and the window surface; GLES2 is the drawing. Both
+# are REQUIRED when the option is on AND the build can host the renderer at all — which today means the X11 backend,
+# because an EGL surface needs a native window. A GL build without a way to show the result is not built.
+if(AWS_WITH_GL AND AWS_WITH_X11)
+  pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl)
+  pkg_check_modules(GLESV2 REQUIRED IMPORTED_TARGET glesv2)
 endif()
 if(AWS_WITH_LIBINPUT)
   # LIINPUT'S UDEV PATH IS NOT SEPARABLE HERE, AND THE DEVIATION IS RECORDED RATHER THAN HIDDEN.
@@ -125,12 +137,38 @@ add_custom_target(agora-shell-bindings
 
 file(GLOB WINDOW_SERVER_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c")
 
+# **AND THE GPU-BUFFER PROTOCOL, WHICH IS A PROTOCOL LIKE ANY OTHER.** `zwp_linux_dmabuf_v1` is stable in
+# wayland-protocols, so it is generated from the system's copy rather than vendored — the same rule the two
+# protocols above follow, and the reason a client's `wl_buffer` and the server's can never disagree about a format.
+find_file(LINUX_DMABUF_XML
+  NAMES linux-dmabuf-v1.xml
+  PATHS /usr/share/wayland-protocols/stable/linux-dmabuf
+  NO_DEFAULT_PATH REQUIRED)
+add_custom_command(
+  OUTPUT "${_generated}/linux-dmabuf-v1-server-protocol.h"
+  COMMAND ${WAYLAND_SCANNER} server-header "${LINUX_DMABUF_XML}" "${_generated}/linux-dmabuf-v1-server-protocol.h"
+  DEPENDS "${LINUX_DMABUF_XML}" VERBATIM)
+add_custom_command(
+  OUTPUT "${_generated}/linux-dmabuf-v1-client-protocol.h"
+  COMMAND ${WAYLAND_SCANNER} client-header "${LINUX_DMABUF_XML}" "${_generated}/linux-dmabuf-v1-client-protocol.h"
+  DEPENDS "${LINUX_DMABUF_XML}" VERBATIM)
+add_custom_command(
+  OUTPUT "${_generated}/linux-dmabuf-v1-protocol.c"
+  COMMAND ${WAYLAND_SCANNER} private-code "${LINUX_DMABUF_XML}" "${_generated}/linux-dmabuf-v1-protocol.c"
+  DEPENDS "${LINUX_DMABUF_XML}" VERBATIM)
+add_custom_target(linux-dmabuf-bindings
+  DEPENDS
+    "${_generated}/linux-dmabuf-v1-server-protocol.h"
+    "${_generated}/linux-dmabuf-v1-client-protocol.h"
+    "${_generated}/linux-dmabuf-v1-protocol.c")
+
 add_executable(window-server
   ${WINDOW_SERVER_SOURCES}
   "${_generated}/xdg-shell-protocol.c"
-  "${_generated}/agora-shell-protocol.c")
+  "${_generated}/agora-shell-protocol.c"
+  "${_generated}/linux-dmabuf-v1-protocol.c")
 
-add_dependencies(window-server xdg-shell-bindings agora-shell-bindings)
+add_dependencies(window-server xdg-shell-bindings agora-shell-bindings linux-dmabuf-bindings)
 
 target_include_directories(window-server PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -162,6 +200,17 @@ if(AWS_WITH_X11)
   message(STATUS "window-server: x11 (nested) backend: on")
 else()
   message(STATUS "window-server: x11 (nested) backend: off (AWS_WITH_X11=OFF)")
+endif()
+
+if(AWS_WITH_GL AND AWS_WITH_X11)
+  # `EGL_NO_X11` keeps <EGL/eglplatform.h> from dragging libX11's headers into the renderer: the native handles
+  # travel as an opaque pointer and an integer (see `struct aws_backend`), which is the only thing the renderer
+  # needs to know about a windowing system.
+  target_compile_definitions(window-server PRIVATE AWS_HAVE_GL EGL_NO_X11)
+  target_link_libraries(window-server PRIVATE PkgConfig::EGL PkgConfig::GLESV2)
+  message(STATUS "window-server: gl (EGL/GLES2) renderer: on")
+else()
+  message(STATUS "window-server: gl renderer: off (AWS_WITH_GL=OFF or no AWS_WITH_X11)")
 endif()
 
 enable_testing()

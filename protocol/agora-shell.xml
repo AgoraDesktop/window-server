@@ -36,10 +36,17 @@
     Copyright © 2026 Kyle J. Cardoza. MIT licensed.
   </copyright>
 
-  <interface name="agora_shell" version="1">
+  <interface name="agora_shell" version="4">
     <description summary="the window server's own window management">
-      One global. It hands out the two objects above it: a window, which is what a surface becomes, and an
-      output, which is where the work area comes from.
+      One global. It hands out the three objects above it: a window, which is what a surface becomes, an output,
+      which is where the work area comes from, and a window list, which is what a shell component asks for.
+
+      **THE VERSION IS THE CAP ITS CHILDREN INHERIT, WHICH IS WHY IT MOVED AND ITS OWN REQUESTS DID NOT.**
+      Wayland hands a new object the version of the object that made it, so an `agora_window` can only reach
+      version 3 through a shell bound at 4. Version 2 added no request HERE; it is `agora_window.set_reserved`
+      that arrived, and a shell bound at 1 keeps handing out version 1 windows. **VERSION 3 ADDED** `get_window_list`,
+      `activate_window` and `close_window`, and **VERSION 4 ADDS NOTHING HERE**: it carries
+      `agora_window.set_activatable`, the door a Dock needs and no application does.
     </description>
 
     <enum name="error">
@@ -69,6 +76,96 @@
       <arg name="id" type="new_id" interface="agora_output"/>
       <arg name="output" type="object" interface="wl_output"/>
     </request>
+
+    <request name="get_window_list" since="3">
+      <description summary="ask to be told what windows this server has">
+        **THE DOCK'S DATA SOURCE, AND THE ONE QUESTION AN APPLICATION NEVER ASKS.** An ordinary client knows its
+        own windows and has no business knowing anyone else's. A shell component is the opposite: its job is to
+        show what is running, and it cannot learn that from its own process. So a client that asks gets an
+        `agora_window_list`, which the server fills with a snapshot now and again whenever the set changes.
+
+        **IT IS ASKED FOR RATHER THAN GIVEN**, because the snapshot is re-sent on every change — every title, every
+        map and unmap, every focus change — and an application that never asks must not pay for a Dock's
+        bookkeeping. The list is created on the first request and lives until the client goes away.
+      </description>
+      <arg name="id" type="new_id" interface="agora_window_list"/>
+    </request>
+
+    <request name="activate_window" since="3">
+      <description summary="bring a window forward and give it the keyboard">
+        **THE ONE THING A CLICK ON A DOCK TILE IS.** `raise` moves a window within its level and does not touch
+        the focus, because on the Mac the focus is the user's click together with `-makeKeyAndOrderFront:`. A
+        click on a Dock tile is a click — just not on the window — so this is that pair, said by the component
+        the click landed on: the window is raised in its level AND takes the keyboard, which is what its
+        application's menu bar follows.
+
+        **ID IS FROM THE WINDOW LIST**, and it is the list's number because the asking client holds no proxy for
+        somebody else's window and cannot get one: a window object belongs to the client that made it. An id
+        nothing answers is ignored rather than an error — a Dock racing a window that just closed is ordinary,
+        and a protocol error there would kill the Dock.
+
+        **NO PERMISSION MODEL, SAID OUT LOUD.** Any client may activate any window, as any client may read the
+        list. Agora's split is the Mac's — shell components are trusted with the desktop — and a real check
+        belongs with the session that launches them, not with every request here.
+      </description>
+      <arg name="id" type="uint" summary="a window id from the window list"/>
+    </request>
+
+    <request name="close_window" since="3">
+      <description summary="ask a window's application to close it">
+        **THE OTHER HALF OF A DOCK TILE'S MENU, AND THE EVENT `agora_window.close` FINALLY HAS A SENDER.** The
+        event was declared from the first version and nothing ever sent it — which is what "the event is the
+        server's to send when the session ends" looks like when there is no session. A Dock's Quit is the same
+        request by a different route: the application is ASKED, exactly as it is asked by its own close button,
+        because the decision to close is the application's (`-windowShouldClose:` and everything behind it). A
+        client that ignores the event stays open, which is the Mac's behaviour and the reason Force Quit is a
+        session concern rather than a protocol one.
+      </description>
+      <arg name="id" type="uint" summary="a window id from the window list"/>
+    </request>
+  </interface>
+
+  <interface name="agora_window_list" version="1">
+    <description summary="what windows the server has, as a snapshot">
+      **A SNAPSHOT RATHER THAN A DELTA.** A delta is worth its sequence numbers and its retries when a stream is
+      long-lived and narrow; a desktop has thirty windows and the set changes when a person does something. So
+      every change sends the WHOLE LIST — `begin`, one `window` per window, `done` — and a client that misses
+      one snapshot is corrected by the next, with no state machine to get wrong.
+
+      **AND IT IS A LIST OF WINDOWS, NOT OF APPLICATIONS.** The window server only knows what is on the glass; an
+      application with no windows is invisible to it, and that is the honest answer this interface gives. What a
+      shell derives from it — "these are the running applications" — is a reading of the windows it can see, and
+      the day a session component knows better the answer moves there rather than being faked here.
+    </description>
+
+    <event name="begin">
+      <description summary="a snapshot starts">
+        Sent before every snapshot, INCLUDING the empty one — a client that cleared its model on `begin` and
+        rebuilt it from the `window` events would otherwise keep a closed window's tile for ever.
+      </description>
+    </event>
+
+    <event name="window">
+      <description summary="one window, in stacking order from back to front">
+        **`id` IS THE NUMBER `activate_window` AND `close_window` TAKE.** It is the server's, not a client's, and
+        it is stable for as long as the window object is.
+
+        `app_id` is the bundle identifier the application declared (`set_app_id`), which is what a dock groups
+        its tiles by. `level` is the integer the window sits at, so a dock can ignore menus and the bar without
+        the server deciding for it what a "real" window is. `active` says this window has the keyboard, which is
+        the only notion of "frontmost" this tree has.
+      </description>
+      <arg name="id" type="uint"/>
+      <arg name="app_id" type="string"/>
+      <arg name="title" type="string"/>
+      <arg name="level" type="int"/>
+      <arg name="visible" type="int"/>
+      <arg name="active" type="int"/>
+    </event>
+
+    <event name="done">
+      <description summary="the snapshot is complete"/>
+    </event>
   </interface>
 
   <interface name="agora_output" version="1">
@@ -118,12 +215,25 @@
     </event>
   </interface>
 
-  <interface name="agora_window" version="1">
+  <interface name="agora_window" version="3">
     <description summary="a window, placed and sized by its application">
       **THE APPLICATION IS HONOURED.** Every set_ here is a DEMAND the server writes down and acts on, not a
       request it may refuse or adjust — which is the inversion of `xdg_toplevel` and the whole point of this
       protocol. The server's share of the Mac's model is the shadow, the work area, and knowing who is in front.
     </description>
+
+    <enum name="edge">
+      <description summary="which side of the output a reservation is made against">
+        THE SIDES ARE THE OUTPUT'S, not the window's, and that is the whole of what a reservation says: "`amount`
+        pixels along this side are mine, so they are not in the work area." It is not a claim about where the
+        window IS — `set_frame` already said that and this file never second-guesses it. A Dock at the bottom
+        reserves the bottom; a panel on the left reserves the left; the two are the same request.
+      </description>
+      <entry name="top" value="0" summary="the top edge, where the menu bar is"/>
+      <entry name="bottom" value="1" summary="the bottom edge, where the Dock usually is"/>
+      <entry name="left" value="2" summary="the left edge"/>
+      <entry name="right" value="3" summary="the right edge"/>
+    </enum>
 
     <request name="set_frame">
       <description summary="where the window is and how big it is">
@@ -244,7 +354,8 @@
     <request name="destroy" type="destructor">
       <description summary="the window is gone">
         Destroys the object. The surface outlives it and may be given another role, as it may under
-        `xdg-shell`.
+        `xdg-shell`. **AND A RESERVATION GOES WITH IT**, because the reservation is this object's and the object
+        is gone; see `set_reserved`.
       </description>
     </request>
 
@@ -283,6 +394,68 @@
       <arg name="x" type="int" summary="left, in output coordinates"/>
       <arg name="y" type="int" summary="top, in output coordinates"/>
     </event>
+
+    <!-- **`set_reserved` SITS AFTER THE EVENTS, AND THE SCANNER IS WHY.** Wayland requires an interface's members
+         to be declared in NON-DECREASING `since` order, and events and requests share that one order even though
+         they have separate opcodes. Every member above is version 1; this is version 2; so it comes last. Moving
+         it up beside the other setters, where it reads best, makes `wayland-scanner` warn on every build —
+         "since version not increasing" — and a warning nobody can fix by reading the code is worse than a
+         comment saying where the door is. -->
+    <request name="set_reserved" since="2">
+      <description summary="reserve a strip of the output for this window">
+        **THE WORK AREA IS THE SERVER'S TO SAY, AND THIS IS HOW A CLIENT CONTRIBUTES TO IT.** `NSScreen`'s
+        `visibleFrame` is the frame minus the furniture, and on the Mac the furniture that is not the server's
+        own is a WINDOW — the Dock's, which the window server sees and subtracts. Agora has no private CGS to
+        derive that from, so the owner SAYS: `amount` pixels along `edge` are reserved, and every client's work
+        area shrinks by it from that moment on.
+
+        **IT IS A REQUEST ABOUT THE SCREEN AND NOT ABOUT THIS WINDOW'S FRAME.** Nothing here moves the window,
+        and `set_frame` is unaffected: a Dock may reserve 96 pixels at the bottom and then put its surface
+        anywhere it likes. The two are separate answers to separate questions, and folding them together would
+        be the server guessing what a level means.
+
+        **IT IS PER WINDOW BECAUSE ITS LIFETIME IS.** The reservation is released when the object is destroyed
+        or when the surface goes away, so a Dock that crashes does not leave the desktop with a phantom strip
+        missing. `amount` 0 releases it explicitly, which is what an autohiding Dock says before it hides — the
+        Mac's answer to the same question: an autohidden Dock is not in `visibleFrame`.
+
+        **A WINDOW HAS ONE RESERVATION, SO ASKING AGAIN MOVES IT.** A second `set_reserved` replaces the first
+        rather than adding to it, which is the Dock being dragged from the bottom to the side: one window, one
+        strip, and no accumulated nonsense from where it used to be. Two edges at once is two windows — which is
+        also what two panels are.
+
+        **AND SEVERAL WINDOWS MAY RESERVE THE SAME EDGE; THOSE AMOUNTS ADD.** That is the one aggregation that
+        needs no owner to arbitrate: two panels on the left stop where each says the other begins, and no client
+        is told which of the others is which. A server that took the maximum instead would hide the second one
+        under the first and call it agreement.
+      </description>
+      <arg name="edge" type="uint" enum="edge"/>
+      <arg name="amount" type="int" summary="pixels along that edge; 0 releases the reservation"/>
+    </request>
+
+    <!-- And this one is version 3, for the same reason: the interface's members are declared in non-decreasing
+         `since` order, so each new generation of doors goes at the end. -->
+    <request name="set_activatable" since="3">
+      <description summary="whether clicking this window may give its application the keyboard">
+        **THE DOCK'S SECOND REAL REQUEST, AND THE ONE THAT KEEPS THE MENU BAR WHERE IT WAS.** A click on a window
+        gives that window's application the keyboard — `-makeKeyAndOrderFront:` and the user's click together — and
+        the application's menu bar follows. That is right for every window a person works IN, and wrong for the
+        furniture a person works THROUGH: clicking a Dock tile must activate the APPLICATION THE TILE NAMES, not
+        the Dock, and a Dock that took the keyboard would take the menu bar with it and leave the desktop with no
+        bar at all. MEASURED, before this door existed: the session's Dock became the active application on its
+        first click and Workspace's menu bar disappeared.
+
+        **IT IS ABOUT THE KEYBOARD AND NOT ABOUT THE POINTER.** A non-activatable window still receives every
+        pointer event it is under: it can be clicked, dragged from and hovered, and its own controls work. What it
+        never does is BECOME THE APPLICATION IN FRONT — the focus stays exactly where it was, which is what makes
+        a click on a tile able to move the focus to somebody else without a storm of intermediate activations.
+
+        **IT IS ALSO NOT A POLICY ABOUT LEVELS.** The window server does not decide that "dock-level windows do not
+        activate": a panel or a palette at any level may ask for the same thing, and an application window that
+        wants the ordinary behaviour says nothing at all. Default is activatable.
+      </description>
+      <arg name="activatable" type="int" summary="zero: clicking this window never takes the keyboard"/>
+    </request>
   </interface>
 
 </protocol>
