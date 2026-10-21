@@ -61,6 +61,8 @@ if(AWS_WITH_DRM)
 endif()
 if(AWS_WITH_X11)
   pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
+  # XShm, which is what makes a present a pointer instead of 5.8 MB on the wire.
+  pkg_check_modules(XEXT REQUIRED IMPORTED_TARGET xext)
 endif()
 if(AWS_WITH_LIBINPUT)
   # LIINPUT'S UDEV PATH IS NOT SEPARABLE HERE, AND THE DEVIATION IS RECORDED RATHER THAN HIDDEN.
@@ -156,7 +158,7 @@ endif()
 
 if(AWS_WITH_X11)
   target_compile_definitions(window-server PRIVATE AWS_HAVE_X11)
-  target_link_libraries(window-server PRIVATE PkgConfig::X11)
+  target_link_libraries(window-server PRIVATE PkgConfig::X11 PkgConfig::XEXT)
   message(STATUS "window-server: x11 (nested) backend: on")
 else()
   message(STATUS "window-server: x11 (nested) backend: off (AWS_WITH_X11=OFF)")

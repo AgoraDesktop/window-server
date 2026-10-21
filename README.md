@@ -87,6 +87,46 @@ the client's own xkbcommon.
 person can type into the first thing that appears, and a CLICK moves it. The first half was missing and it
 showed: keys arrived with the focus nil and went nowhere.
 
+### 3a. What a click costs, measured in three places
+
+A session driven by hand felt sluggish — a click answering about a second late — and the fix was in the
+compositor, not in the client. Instrumenting the three processes with one wall clock (the client's event, the
+client's paint, the server's render and present) gave this chain for one click, at 1600x900, with a wallpaper
+client committing frames:
+
+| stage | before | after |
+|---|---|---|
+| shadow around a full-screen surface | 10 ms | 0.5 ms |
+| composite of one surface | 10-20 ms | 1-2 ms |
+| full render (clear + surfaces + bar) | 30 ms | 5-7 ms |
+| present (XPutImage) | 4-9 ms | 2-4 ms (XShm + one round trip) |
+| **click, press to pixels** | **150-1000 ms** | **60-90 ms** |
+
+The first row was a ring drawn as a rectangle: `aws_output_draw_shadow` walked the shadow's whole expanded
+rectangle and asked for a square root per pixel, so a desktop-sized window paid 1.4 million of them a frame.
+It now walks the ring — a row that crosses the frame paints its two side bands, a row outside it paints the
+whole width.
+
+The second row was the same mistake in the composite: `shape_coverage` was asked once per pixel for a number
+that is 255 for every pixel that is not within the corner radius of a corner. A row clear of both corner bands
+is now a COPY when the surface is opaque (no alpha to blend, and `XRGB8888`'s `X` is not alpha) and a
+zero-skip-and-blend when it is transparent (a desktop icon window is mostly nothing, so four pixels are asked
+at once). Only the corner bands still ask for a shape.
+
+The last row is a development backend's own cost: `XPutImage` sent 5.8 MB of pixels over the X connection for
+every frame. The backend now asks for MIT-SHM and draws straight into a segment the X server has already
+attached, so a present is a pointer and a `XSync` — the sync is deliberate, because the segment is drawn into
+again on the next frame and the server must have finished reading this one. A server without the extension
+falls back to the copy, because a compositor that refused to run on a remote X display would be worse than one
+that is slow on it.
+
+**AND THE CLIENT'S HALF WAS FIXED THE SAME DAY, WHICH IS WHAT BROUGHT THE LAST ROWS DOWN**: a click repainted the whole
+file window — every string and every icon — because the damage rectangle never became a CLIP, the compositor's frame
+callback answered with a whole-frame paint, and `-orderFront:` marked a window that was already on screen stale on
+every activation. With those three fixed a click paints its two cells: **3.6-10.8 ms**, against 20-45 ms for the whole
+window. See `libagora-app/README.md`'s "Damage" section and `APPKIT_DRAW_DIAG`, which prints the rectangle and the
+milliseconds of every paint.
+
 ### 4. libinput: written, built, and blocked by a permission
 
 `--input libinput` is implemented, links, assigns **seat0** successfully through logind — and then cannot open

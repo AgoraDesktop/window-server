@@ -114,6 +114,18 @@ static void aws_output_draw_system_menu(struct aws_backend *backend)
  * the window's radius for the bar's shadow painted a dark smudge INSIDE the bar's own corners — the distance
  * function reads a square corner as being outside a rounded shape, which is true and is not what a bar wants. */
 
+/* **SOURCE OVER, ON THE DESTINATION'S OWN BITS.** The frame buffer is opaque, so there is no alpha to carry and
+ * the blend happens here or nowhere. One helper, because the row loop and the corner bands both need it. */
+static uint32_t aws_blend_pixel(uint32_t destination, uint32_t source, uint32_t alpha)
+{
+	uint32_t inverse = 255u - alpha;
+	uint32_t r = (((source >> 16) & 0xFFu) * alpha + ((destination >> 16) & 0xFFu) * inverse) / 255u;
+	uint32_t g = (((source >> 8) & 0xFFu) * alpha + ((destination >> 8) & 0xFFu) * inverse) / 255u;
+	uint32_t b = ((source & 0xFFu) * alpha + (destination & 0xFFu) * inverse) / 255u;
+
+	return 0xFF000000u | (r << 16) | (g << 8) | b;
+}
+
 /* ONE PIXEL OF SHADOW: black, over what is already there, at `alpha` of 255. */
 static uint32_t aws_shadow_pixel(uint32_t destination, uint32_t alpha)
 {
@@ -123,6 +135,54 @@ static uint32_t aws_shadow_pixel(uint32_t destination, uint32_t alpha)
 	uint32_t b = (destination & 0xFFu) * inverse / 255u;
 
 	return 0xFF000000u | (r << 16) | (g << 8) | b;
+}
+
+/* ONE ROW'S SPAN OF SHADOW — see the ring note in `aws_output_draw_shadow`, which is the only caller and the
+ * reason the spans exist. */
+static void shadow_span(struct aws_backend *output, int row, int from, int to,
+			int cx, int cy, int innerW, int innerH, int radius)
+{
+	int dy;
+	int column;
+
+	if (row < AWS_MENU_BAR_HEIGHT || row >= output->height) {
+		return;
+	}
+	if (from < 0) {
+		from = 0;
+	}
+	if (to > output->width) {
+		to = output->width;
+	}
+	dy = (row > cy ? row - cy : cy - row) - innerH;
+	if (dy < 0) {
+		dy = 0;
+	}
+	for (column = from; column < to; column++) {
+		int dx, distance;
+		double t, falloff;
+		uint32_t alpha;
+
+		dx = (column > cx ? column - cx : cx - column) - innerW;
+		if (dx < 0) {
+			dx = 0;
+		}
+		/* THE INTEGER SQUARE ROOT IS ENOUGH: a distance in pixels is the unit a falloff wants, and
+		 * `sqrt` here would be the only double in the compositor's inner loop. */
+		distance = (int)sqrt((double)(dx * dx + dy * dy)) - radius;
+		if (distance <= 0 || distance > AWS_SHADOW_DEPTH) {
+			continue;	/* inside the frame, or past the shadow's reach */
+		}
+		t = 1.0 - (double)distance / (double)AWS_SHADOW_DEPTH;
+		falloff = t * t;
+		alpha = (uint32_t)((double)AWS_SHADOW_ALPHA * falloff);
+		if (alpha == 0) {
+			continue;
+		}
+		output->pixels[(size_t)row * (size_t)output->width + (size_t)column] =
+			aws_shadow_pixel(output->pixels[(size_t)row * (size_t)output->width + (size_t)column],
+					 alpha);
+	}
 }
 
 /* **AND THE SHADOW IS THE DISTANCE TO A ROUNDED RECTANGLE, WHICH IS WHY IT HAS ROUNDED CORNERS.** A rectangle's
@@ -144,8 +204,6 @@ static void aws_output_draw_shadow(struct aws_backend *output, int x, int y, int
 		return;
 	}
 	for (row = top; row < bottom; row++) {
-		int dy;
-
 		/* **AND NOTHING BEHIND THE MENU BAR CASTS A SHADOW ONTO IT.** The bar is the server's own furniture and the
 		 * topmost thing on the screen; a pop-down menu opens with its top edge AT the bar's bottom, so its shadow
 		 * would otherwise paint UPWARDS across the strip — a dark band above every open menu, which reads as a dirty
@@ -154,37 +212,23 @@ static void aws_output_draw_shadow(struct aws_backend *output, int x, int y, int
 		if (row < AWS_MENU_BAR_HEIGHT || row >= output->height) {
 			continue;
 		}
-		dy = (row > cy ? row - cy : cy - row) - innerH;
-		if (dy < 0) {
-			dy = 0;
-		}
-		for (column = left; column < right; column++) {
-			int dx, distance;
-			double t, falloff;
-			uint32_t alpha;
+		/* **THE SHADOW IS A RING, AND A ROW THROUGH THE FRAME PAINTS ONLY ITS TWO SIDES.** Every pixel a shadow can
+		 * reach is within `AWS_SHADOW_DEPTH` of the frame's edge — the falloff is zero past that — so the columns
+		 * between the frame's two corner arcs cannot receive one: their horizontal distance is zero and the vertical
+		 * one is at most the radius, which the radius takes off again. Walking them anyway was the first version,
+		 * and it asked for a square root per pixel over the frame's WHOLE AREA: MEASURED, 10 ms of a 30 ms composite
+		 * for a desktop-sized window, and the reason a click took a fifth of a second to appear. The two spans below
+		 * are the whole ring. */
+		{
+			int hole0 = x + radius;
+			int hole1 = x + w - radius;
 
-			if (column < 0 || column >= output->width) {
-				continue;
+			if (row >= y && row < y + h && hole1 > hole0) {
+				shadow_span(output, row, left, hole0, cx, cy, innerW, innerH, radius);
+				shadow_span(output, row, hole1, right, cx, cy, innerW, innerH, radius);
+			} else {
+				shadow_span(output, row, left, right, cx, cy, innerW, innerH, radius);
 			}
-			dx = (column > cx ? column - cx : cx - column) - innerW;
-			if (dx < 0) {
-				dx = 0;
-			}
-			/* THE INTEGER SQUARE ROOT IS ENOUGH: a distance in pixels is the unit a falloff wants, and
-			 * `sqrt` here would be the only double in the compositor's inner loop. */
-			distance = (int)sqrt((double)(dx * dx + dy * dy)) - radius;
-			if (distance <= 0 || distance > AWS_SHADOW_DEPTH) {
-				continue;	/* inside the frame, or past the shadow's reach */
-			}
-			t = 1.0 - (double)distance / (double)AWS_SHADOW_DEPTH;
-			falloff = t * t;
-			alpha = (uint32_t)((double)AWS_SHADOW_ALPHA * falloff);
-			if (alpha == 0) {
-				continue;
-			}
-			output->pixels[(size_t)row * (size_t)output->width + (size_t)column] =
-				aws_shadow_pixel(output->pixels[(size_t)row * (size_t)output->width + (size_t)column],
-						 alpha);
 		}
 	}
 }
@@ -297,6 +341,7 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 	const uint8_t *base;
 	int width, height, stride;
 	int transparent;
+	int corner;
 	int row, column;
 
 	if (shm == NULL) {
@@ -316,6 +361,17 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 		height = surface->frame_height;
 	}
 	transparent = wl_shm_buffer_get_format(shm) == WL_SHM_FORMAT_ARGB8888;
+	/* **THE SHAPE IS ASKED FOR ONLY WHERE A SHAPE CAN DIFFER FROM A RECTANGLE.** `shape_coverage` answers 255 for
+	 * every pixel that is not within the corner radius of a corner, and it says so itself — so asking it once per
+	 * pixel bought a call and a distance for a number this loop already knows. The radius is clamped exactly as that
+	 * function clamps it, so a surface too small to have a middle is asked about every pixel, as before. */
+	corner = AWS_SHADOW_RADIUS;
+	if (corner > width / 2) {
+		corner = width / 2;
+	}
+	if (corner > height / 2) {
+		corner = height / 2;
+	}
 
 	wl_shm_buffer_begin_access(shm);
 	base = wl_shm_buffer_get_data(shm);
@@ -325,24 +381,81 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 	}
 	for (row = 0; row < height; row++) {
 		int oy = surface->y + row;
+		int first = 0;
+		int last = width;
 		const uint32_t *source;
+		uint32_t *destination;
 
 		if (oy < 0 || oy >= output->height) {
 			continue;
 		}
+		/* THE ROW'S SPAN, CLIPPED TO THE OUTPUT ONCE rather than tested per pixel. */
+		if (surface->x < 0) {
+			first = -surface->x;
+		}
+		if (surface->x + last > output->width) {
+			last = output->width - surface->x;
+		}
+		if (first >= last) {
+			continue;
+		}
 		source = (const uint32_t *)(const void *)(base + (size_t)row * (size_t)stride);
-		for (column = 0; column < width; column++) {
-			int ox = surface->x + column;
+		destination = output->pixels + (size_t)oy * (size_t)output->width + (size_t)surface->x;
+		/* **A ROW BETWEEN THE CORNERS HAS ONE SHAPE FOR ALL OF ITS PIXELS, AND IT IS A RECTANGLE.** `shape_coverage`
+		 * says so itself: a pixel is rounded only when it is within the radius of a VERTICAL edge AND of a HORIZONTAL
+		 * one, so a row that is clear of both horizontal corner bands has no shape to ask about at all. Asking per
+		 * pixel, and blending per pixel, is what made a full-screen composite cost 20 ms — MEASURED, and the reason a
+		 * click with a wallpaper behind it waited a tenth of a second. THE THREE CASES BELOW ARE THE WHOLE ROW:
+		 * an opaque one is a copy, a transparent one is mostly nothing, and only the corner bands need the shape. */
+		if (corner <= 0 || (row >= corner && row < height - corner)) {
+			if (!transparent) {
+				/* AN OPAQUE ROW IS A COPY. The `X` in `XRGB8888` is not alpha and the output's is opaque. */
+				for (column = first; column < last; column++) {
+					destination[column] = source[column] | 0xFF000000u;
+				}
+				continue;
+			}
+			/* **AND A TRANSPARENT WINDOW IS MOSTLY NOTHING: four pixels are asked at once.** A desktop icon
+			 * window is a handful of glyphs on an empty buffer, so the zero runs are most of every row and the cost
+			 * of this surface should be the handful. */
+			column = first;
+			while (column < last) {
+				if (column + 4 <= last) {
+					uint64_t pair0, pair1;
+
+					memcpy(&pair0, source + column, sizeof pair0);
+					memcpy(&pair1, source + column + 2, sizeof pair1);
+					if ((pair0 | pair1) == 0) {
+						column += 4;
+						continue;
+					}
+				}
+				{
+					uint32_t pixel = source[column];
+					uint32_t alpha = pixel >> 24;
+
+					if (alpha != 0) {
+						uint32_t *out = destination + column;
+
+						if (alpha == 0xFFu) {
+							*out = pixel | 0xFF000000u;
+						} else {
+							*out = aws_blend_pixel(*out, pixel, alpha);
+						}
+					}
+				}
+				column++;
+			}
+			continue;
+		}
+		for (column = first; column < last; column++) {
 			uint32_t pixel = source[column];
 			unsigned shape;
 			uint32_t alpha;
 
-			if (ox < 0 || ox >= output->width) {
-				continue;
-			}
 			/* **THE WINDOW'S OWN SHAPE FIRST, WHICH IS A ROUNDED CORNER OR NOTHING AT ALL.** `shape` is the
 			 * corner's coverage: 255 everywhere but the four arcs, where it is the pixel the curve passes
-			 * through, blended below like any other partial alpha. */
+			 * through, blended below like any other partial alpha. Only the corner bands get here. */
 			shape = shape_coverage(output, surface, width, height, column, row);
 			if (shape == 0) {
 				continue;
@@ -355,17 +468,10 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 				continue;
 			}
 			if (alpha != 0xFFu) {
-				/* SOURCE OVER, on the destination's own bits: the frame buffer is opaque, so there is no
-				 * alpha to carry and the blend happens here or nowhere. */
-				uint32_t destination = output->pixels[(size_t)oy * (size_t)output->width + (size_t)ox];
-				uint32_t inverse = 255u - alpha;
-				uint32_t r = (((pixel >> 16) & 0xFFu) * alpha + ((destination >> 16) & 0xFFu) * inverse) / 255u;
-				uint32_t g = (((pixel >> 8) & 0xFFu) * alpha + ((destination >> 8) & 0xFFu) * inverse) / 255u;
-				uint32_t b = ((pixel & 0xFFu) * alpha + (destination & 0xFFu) * inverse) / 255u;
-
-				pixel = 0xFF000000u | (r << 16) | (g << 8) | b;
+				destination[column] = aws_blend_pixel(destination[column], pixel, alpha);
+			} else {
+				destination[column] = pixel | 0xFF000000u;
 			}
-			output->pixels[(size_t)oy * (size_t)output->width + (size_t)ox] = pixel | 0xFF000000u;
 		}
 	}
 	wl_shm_buffer_end_access(shm);

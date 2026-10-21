@@ -41,6 +41,10 @@
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/extensions/XShm.h>
+
+#include <sys/ipc.h>
+#include <sys/shm.h>
 
 struct x11_state {
 	Display *display;
@@ -50,6 +54,10 @@ struct x11_state {
 	XImage *image;
 	Atom wm_delete;
 	struct wl_event_source *source;
+	/* THE SHARED-MEMORY IMAGE, when the X server has MIT-SHM: the frame buffer IS the segment, so a present is a
+	 * pointer the server already has. `shm` is zero when it is not, and every use of it is guarded. */
+	XShmSegmentInfo shm;
+	int shared;
 };
 
 /* **A WALL-CLOCK MILLISECOND, SO A DIAGNOSTIC CAN BE LINED UP WITH ANOTHER PROCESS'S.** Two logs that each say
@@ -67,6 +75,18 @@ static void x11_present(struct aws_server *server)
 {
 	struct x11_state *x11 = server->backend.data;
 
+	if (x11->shared) {
+		/* **A PRESENT THAT PUTS NOTHING ON THE WIRE.** With MIT-SHM the frame buffer lives in a segment the X
+		 * server has already attached, so this names the image and the server reads it — where `XPutImage` sent
+		 * 5.8 MB of pixels over the connection for every frame at 1600x900, MEASURED at 7-9 ms a frame and the
+		 * largest single cost left once the composite was made cheap. `XSync` is deliberate: the segment is drawn
+		 * into again on the next frame, so the server must have FINISHED reading this one before the pointer is
+		 * reused, and a round trip to the local server is a fraction of the copy it replaces. */
+		XShmPutImage(x11->display, x11->window, x11->gc, x11->image, 0, 0, 0, 0,
+			     (unsigned)server->backend.width, (unsigned)server->backend.height, False);
+		XSync(x11->display, False);
+		return;
+	}
 	XPutImage(x11->display, x11->window, x11->gc, x11->image, 0, 0, 0, 0,
 		  (unsigned)server->backend.width, (unsigned)server->backend.height);
 	XFlush(x11->display);
@@ -170,6 +190,7 @@ static int x11_dispatch(int fd, uint32_t mask, void *data)
 static void x11_stop(struct aws_server *server)
 {
 	struct x11_state *x11 = server->backend.data;
+	int shared = (x11 != NULL) ? x11->shared : 0;
 
 	if (x11 == NULL) {
 		return;
@@ -182,6 +203,12 @@ static void x11_stop(struct aws_server *server)
 		x11->image->data = NULL;
 		XDestroyImage(x11->image);
 	}
+	if (x11->shared) {
+		XShmDetach(x11->display, &x11->shm);
+		shmdt(x11->shm.shmaddr);
+		shmctl(x11->shm.shmid, IPC_RMID, NULL);
+		x11->shared = 0;
+	}
 	if (x11->gc != NULL) {
 		XFreeGC(x11->display, x11->gc);
 	}
@@ -192,7 +219,12 @@ static void x11_stop(struct aws_server *server)
 		XCloseDisplay(x11->display);
 	}
 	free(x11);
-	free(server->backend.pixels);
+	/* **THE FRAME BUFFER IS THE CALLOC'D ONE ONLY WHEN IT IS NOT THE SEGMENT.** A shared buffer belongs to the
+	 * shm segment and is released by the detach above; `free` on it would be a free of an address the kernel owns. */
+	if (!shared) {
+		free(server->backend.pixels);
+	}
+	server->backend.pixels = NULL;
 	server->backend.data = NULL;
 }
 
@@ -239,10 +271,54 @@ int aws_backend_x11_start(struct aws_server *server)
 	x11->wm_delete = XInternAtom(x11->display, "WM_DELETE_WINDOW", False);
 	XSetWMProtocols(x11->display, x11->window, &x11->wm_delete, 1);
 	x11->gc = XCreateGC(x11->display, x11->window, 0, NULL);
-	x11->image = XCreateImage(x11->display, DefaultVisual(x11->display, x11->screen),
-				  (unsigned)DefaultDepth(x11->display, x11->screen), ZPixmap, 0,
-				  (char *)server->backend.pixels, (unsigned)server->backend.width,
-				  (unsigned)server->backend.height, 32, 0);
+	/* **THE SHARED-MEMORY FRAME BUFFER, WHICH IS THE ONLY PART OF THIS BACKEND THAT IS A COPY NOT A COMPROMISE.**
+	 * `XPutImage` sends the pixels; `XShmPutImage` names a segment both processes have mapped, so the compositor
+	 * writes into the server's memory and the present is a pointer. It is asked for and then FALLEN BACK FROM:
+	 * an X server without MIT-SHM (a remote display, an unusual server) is still a display, and a compositor that
+	 * refused to run on one would be worse than one that copies. */
+	if (XShmQueryExtension(x11->display)) {
+		x11->image = XShmCreateImage(x11->display, DefaultVisual(x11->display, x11->screen),
+					     (unsigned)DefaultDepth(x11->display, x11->screen), ZPixmap, NULL,
+					     &x11->shm, (unsigned)server->backend.width,
+					     (unsigned)server->backend.height);
+		if (x11->image != NULL) {
+			x11->shm.shmid = shmget(IPC_PRIVATE,
+						(size_t)x11->image->bytes_per_line * (size_t)x11->image->height,
+						IPC_CREAT | 0600);
+			if (x11->shm.shmid >= 0) {
+				x11->shm.shmaddr = x11->image->data = shmat(x11->shm.shmid, NULL, 0);
+				x11->shm.readOnly = False;
+				if (x11->shm.shmaddr != (char *)-1 &&
+				    XShmAttach(x11->display, &x11->shm)) {
+					/* THE SEGMENT IS OURS TO DESTROY once the server has attached it; the
+					 * attach is the handover and this is the receipt. */
+					shmctl(x11->shm.shmid, IPC_RMID, NULL);
+					x11->shared = 1;
+					/* THE CALLOC'D BUFFER IS THE FALLBACK'S, AND IT WAS ALREADY MADE; the segment replaces
+					 * it, so it goes here rather than leaking for the life of the session. */
+					free(server->backend.pixels);
+					server->backend.pixels = (uint32_t *)(void *)x11->shm.shmaddr;
+					fprintf(stderr, "window-server: x11 output is shared with the server (MIT-SHM)\n");
+				} else if (x11->shm.shmaddr != (char *)-1) {
+					shmdt(x11->shm.shmaddr);
+				}
+			}
+			if (!x11->shared) {
+				/* THE DATA IS NOT THE IMAGE'S TO FREE — it is a segment this process has just detached —
+				 * so it is cleared first, exactly as `x11_stop` does. */
+				x11->image->data = NULL;
+				XDestroyImage(x11->image);
+				x11->image = NULL;
+				x11->shm.shmid = 0;
+			}
+		}
+	}
+	if (x11->image == NULL) {
+		x11->image = XCreateImage(x11->display, DefaultVisual(x11->display, x11->screen),
+					  (unsigned)DefaultDepth(x11->display, x11->screen), ZPixmap, 0,
+					  (char *)server->backend.pixels, (unsigned)server->backend.width,
+					  (unsigned)server->backend.height, 32, 0);
+	}
 	if (x11->image == NULL) {
 		fprintf(stderr, "window-server: could not make an X image over the frame buffer\n");
 		x11_stop(server);
