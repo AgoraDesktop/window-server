@@ -468,7 +468,9 @@ snapshot a shell draws from (and the one thing an ordinary application never ask
 `close_window` are the click and the Quit, and `reopen_window` is the click that has nothing to raise — the
 application is asked to show a window and decides what that means. `tests/window_list.c` is the proof of all four,
 because it is a shell and two applications in one process, which is the only way to write those assertions without
-a race.
+a race. **And the other side of the same question is `agora_window.take_focus`**: an application saying "this one of
+MINE is key", which is `-makeKeyWindow` — focus without a raise, and only ever about a window the caller owns.
+Without it a window opened by a click that had nothing to raise came forward with the keyboard left behind.
 
 What is still absent on this side, named rather than left to be discovered: no minimized state, no session (so
 nothing emits `close` on shutdown), and no cross-process data device — which is what a drop on the Dock's Trash

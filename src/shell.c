@@ -456,6 +456,23 @@ static void window_set_activatable(struct wl_client *client, struct wl_resource 
 	}
 }
 
+/* **THE DOOR AN APPLICATION NEEDS FOR ITS OWN KEYBOARD, WHICH ONLY A CLICK OR A SHELL COULD GIVE IT BEFORE.**
+ * `-makeKeyWindow` is the application saying which of its windows receives the keys; the seat is the server's, so
+ * the sentence has to cross. It is `activate_window` without the raise and without the permission to name somebody
+ * else — a client can only ever say this about a window it owns, because the object is its own. */
+static void window_take_focus(struct wl_client *client, struct wl_resource *resource)
+{
+	struct aws_surface *surface = wl_resource_get_user_data(resource);
+
+	(void)client;
+	if (surface == NULL) {
+		return;
+	}
+	/* THE SEAT REFUSES A NON-ACTIVATABLE WINDOW AND A NO-OP REPEAT on its own — see `aws_seat_set_keyboard_focus`. */
+	aws_seat_set_keyboard_focus(surface->server, surface);
+	aws_shell_window_list_changed(surface->server);
+}
+
 static void window_set_pointer_capture(struct wl_client *client, struct wl_resource *resource, int32_t capture)
 {
 	struct aws_surface *surface = wl_resource_get_user_data(resource);
@@ -493,6 +510,7 @@ static const struct agora_window_interface agora_window_implementation = {
 	 * version 2 request) comes after the destructor, and this table follows the XML's order exactly. */
 	window_set_reserved,
 	window_set_activatable,
+	window_take_focus,
 };
 
 static void agora_window_destroy_resource(struct wl_resource *resource)

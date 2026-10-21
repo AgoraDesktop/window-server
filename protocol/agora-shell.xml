@@ -475,6 +475,20 @@
       <arg name="activatable" type="int" summary="zero: clicking this window never takes the keyboard"/>
     </request>
 
+    <request name="take_focus" since="5">
+      <description summary="make this window key, and take the keyboard with it">
+        **`-makeKeyWindow`, SAID TO THE SERVER.** Focus in this server is the seat's: the click path gives it, and a
+        shell's `activate_window` gives it. Neither is available to an application making one of its OWN windows
+        key — which is what `-[NSWindow makeKeyAndOrderFront:]` and a `showWindow:` do, and what an application that
+        just opened a window (a Dock's reopen, a File > New) is doing. Without this the window came forward and the
+        KEYBOARD STAYED WHERE IT WAS: MEASURED, a reopened Workspace window was frontmost in the list and typing
+        went to the desktop behind it.
+
+        It does not restack: `raise` is the other half and a caller orders the window itself. A window that has
+        said `set_activatable 0` is refused here like everywhere else, because the seat checks once for all doors.
+      </description>
+    </request>
+
     <!-- And the event that closes the reopen loop is version 5, at the end for the same ordering reason. -->
     <event name="reopen" since="5">
       <description summary="the shell asked this application to show a window again">

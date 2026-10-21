@@ -380,6 +380,28 @@ int main(void)
 		printf("ok: and it is now the front of the stacking order\n");
 	}
 
+	/* **AND A WINDOW MAY ASK FOR THE KEYBOARD ITSELF, WHICH IS `-makeKeyWindow` ACROSS THE SEAM.** A client that
+	 * opens a window has no way to be clicked first, so the application's own sentence — "this one is key" — has to
+	 * reach the seat. It is FOCUS WITHOUT A RAISE, which is the difference from `activate_window` and is why A can
+	 * take the keyboard while B is still in front. */
+	agora_window_take_focus(window_a);
+	if (settle(&state) != 0) {
+		return 1;
+	}
+	row = find(&state, id_a);
+	if (row == NULL || row->active != 1) {
+		fail(&state, "take_focus did not give A the keyboard");
+	} else if (state.rows[state.count - 1].id != id_b) {
+		fail(&state, "take_focus restacked the window, which is `raise`'s job");
+	} else {
+		printf("ok: take_focus moved the keyboard without touching the stacking order\n");
+	}
+	/* And back again, so the assertions below start from B having it. */
+	agora_shell_activate_window(state.shell, id_b);
+	if (settle(&state) != 0) {
+		return 1;
+	}
+
 	/* **A CLICK ON A TILE WHEN THERE IS NOTHING TO RAISE.** The application is ASKED to show a window — the event
 	 * lands on the window's own listener, and nothing about the window changes because the answer is the
 	 * application's. This is what a Dock asks when every window an application has is furniture. */
