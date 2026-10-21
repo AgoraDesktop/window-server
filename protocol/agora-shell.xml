@@ -36,7 +36,7 @@
     Copyright © 2026 Kyle J. Cardoza. MIT licensed.
   </copyright>
 
-  <interface name="agora_shell" version="4">
+  <interface name="agora_shell" version="5">
     <description summary="the window server's own window management">
       One global. It hands out the three objects above it: a window, which is what a surface becomes, an output,
       which is where the work area comes from, and a window list, which is what a shell component asks for.
@@ -45,8 +45,9 @@
       Wayland hands a new object the version of the object that made it, so an `agora_window` can only reach
       version 3 through a shell bound at 4. Version 2 added no request HERE; it is `agora_window.set_reserved`
       that arrived, and a shell bound at 1 keeps handing out version 1 windows. **VERSION 3 ADDED** `get_window_list`,
-      `activate_window` and `close_window`, and **VERSION 4 ADDS NOTHING HERE**: it carries
-      `agora_window.set_activatable`, the door a Dock needs and no application does.
+      `activate_window` and `close_window`, and **VERSION 4 ADDED NOTHING HERE**: it carried
+      `agora_window.set_activatable`, the door a Dock needs and no application does. **VERSION 5 ADDS
+      `reopen_window`**, the question a tile asks when the application has nothing to raise.
     </description>
 
     <enum name="error">
@@ -122,6 +123,23 @@
         session concern rather than a protocol one.
       </description>
       <arg name="id" type="uint" summary="a window id from the window list"/>
+    </request>
+
+    <request name="reopen_window" since="5">
+      <description summary="ask an application to show a window again">
+        **WHAT A CLICK ON A TILE MEANS WHEN THE APPLICATION HAS NOTHING TO RAISE.** A click is `activate_window`
+        for every window the application has — and an application can be running with no window a person can
+        work in, because the desktop a shell draws is furniture at a level below every window. On the Mac that
+        click still does something: the application is asked to reopen and IT decides what that means (Finder
+        opens a window). This is that question.
+
+        **THE WINDOW IS THE ADDRESS AND NOT THE SUBJECT.** Both sides name each other by window id and nothing
+        else, so the asking client names any window of the application — the frontmost one is the honest choice —
+        and the server forwards `agora_window.reopen` to that window's client. The window itself is not opened,
+        closed, raised or focused by this; what "again" means is the application's answer, not the server's. An
+        id nothing answers is ignored, exactly as `activate_window`'s is.
+      </description>
+      <arg name="id" type="uint" summary="any window of the application, from the window list"/>
     </request>
   </interface>
 
@@ -215,7 +233,7 @@
     </event>
   </interface>
 
-  <interface name="agora_window" version="3">
+  <interface name="agora_window" version="5">
     <description summary="a window, placed and sized by its application">
       **THE APPLICATION IS HONOURED.** Every set_ here is a DEMAND the server writes down and acts on, not a
       request it may refuse or adjust — which is the inversion of `xdg_toplevel` and the whole point of this
@@ -456,6 +474,20 @@
       </description>
       <arg name="activatable" type="int" summary="zero: clicking this window never takes the keyboard"/>
     </request>
+
+    <!-- And the event that closes the reopen loop is version 5, at the end for the same ordering reason. -->
+    <event name="reopen" since="5">
+      <description summary="the shell asked this application to show a window again">
+        **THE APPLICATION'S ANSWER IS THE POINT.** A Dock tile was clicked and this application was running
+        without a window a person could work in — nothing above the furniture levels, which is Workspace whenever
+        its desktop is on the screen and no file window is. The application decides what that click means: it may
+        open a window, raise one it had hidden, or do nothing at all, and the AppKit puts the question to its
+        delegate as `-applicationShouldHandleReopen:hasVisibleWindows:`.
+
+        THIS WINDOW IS NOT NAMED BY THE EVENT, because the answer need not be this window — it is the address the
+        question arrived at, nothing more.
+      </description>
+    </event>
   </interface>
 
 </protocol>

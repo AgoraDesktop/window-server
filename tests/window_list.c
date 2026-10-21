@@ -62,6 +62,7 @@ struct state {
 	int failures;
 
 	int closes;		/* `agora_window.close` events any of this probe's windows received */
+	int reopens;		/* `agora_window.reopen` events — the question a tile asks with nothing to raise */
 };
 
 /* ---------------------------------------------------------------------------------------------------
@@ -134,11 +135,20 @@ static void window_pointer_global(void *data, struct agora_window *window, int32
 	(void)data; (void)window; (void)x; (void)y;
 }
 
-/* IN THE PROTOCOL'S OWN ORDER: `close`, `work_area_changed`, `pointer_global`. */
+static void window_reopen(void *data, struct agora_window *window)
+{
+	struct state *state = data;
+
+	(void)window;
+	state->reopens++;
+}
+
+/* IN THE PROTOCOL'S OWN ORDER: `close`, `work_area_changed`, `pointer_global`, `reopen`. */
 static const struct agora_window_listener window_listener = {
 	window_close,
 	window_work_area_changed,
 	window_pointer_global,
+	window_reopen,
 };
 
 static void registry_global(void *data, struct wl_registry *registry, uint32_t name, const char *interface,
@@ -152,7 +162,7 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
 	} else if (strcmp(interface, wl_shm_interface.name) == 0) {
 		state->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
 	} else if (strcmp(interface, agora_shell_interface.name) == 0) {
-		state->shell = wl_registry_bind(registry, name, &agora_shell_interface, version < 4 ? version : 4);
+		state->shell = wl_registry_bind(registry, name, &agora_shell_interface, version < 5 ? version : 5);
 	}
 }
 
@@ -370,6 +380,21 @@ int main(void)
 		printf("ok: and it is now the front of the stacking order\n");
 	}
 
+	/* **A CLICK ON A TILE WHEN THERE IS NOTHING TO RAISE.** The application is ASKED to show a window — the event
+	 * lands on the window's own listener, and nothing about the window changes because the answer is the
+	 * application's. This is what a Dock asks when every window an application has is furniture. */
+	agora_shell_reopen_window(state.shell, id_a);
+	if (settle(&state) != 0) {
+		return 1;
+	}
+	if (state.reopens != 1) {
+		fail(&state, "reopen_window did not deliver agora_window.reopen to the application");
+	} else if (find(&state, id_a) == NULL || find(&state, id_a)->visible != 1) {
+		fail(&state, "reopen_window closed or hid the window it was addressed to");
+	} else {
+		printf("ok: reopen_window asked the application, and left the window alone\n");
+	}
+
 	/* **A QUIT FROM THE TILE'S MENU.** The application is ASKED, not destroyed: the event lands on B's own
 	 * listener and the window is still there until B decides. */
 	agora_shell_close_window(state.shell, id_b);
@@ -388,10 +413,11 @@ int main(void)
 	 * error there would kill the Dock over one stale tile. */
 	agora_shell_activate_window(state.shell, id_b + 1000);
 	agora_shell_close_window(state.shell, id_b + 1000);
+	agora_shell_reopen_window(state.shell, id_b + 1000);
 	if (settle(&state) != 0) {
 		return 1;
 	}
-	if (state.closes != 1) {
+	if (state.closes != 1 || state.reopens != 1) {
 		fail(&state, "an unknown id was answered by SOME window");
 	} else {
 		printf("ok: unknown ids are ignored rather than errors\n");

@@ -654,6 +654,28 @@ static void shell_close_window(struct wl_client *client, struct wl_resource *res
 	agora_window_send_close(surface->agora_window);
 }
 
+/* **THE OTHER HALF OF A CLICK THAT HAS NOTHING TO RAISE.** `activate_window` moves a window; this asks the
+ * application behind one to show something. The window is the ADDRESS and not the subject — both sides know each
+ * other by window ids and by nothing else — so what gets opened is the application's answer, not ours. */
+static void shell_reopen_window(struct wl_client *client, struct wl_resource *resource, uint32_t id)
+{
+	struct aws_server *server = wl_resource_get_user_data(resource);
+	struct aws_surface *surface = surface_for_id(server, id);
+
+	(void)client;
+	if (surface == NULL || surface->agora_window == NULL) {
+		return;
+	}
+	/* **AN EVENT NOBODY DECLARED MUST NOT BE SENT.** The window belongs to a client that may have bound the shell
+	 * at an older version than the one asking — a Dock at 5 can see a window made by a client at 3 — and Wayland
+	 * treats an unknown event as a protocol error on the receiving connection, which would kill that application
+	 * rather than leave it un-reopened. */
+	if (wl_resource_get_version(surface->agora_window) < 5) {
+		return;
+	}
+	agora_window_send_reopen(surface->agora_window);
+}
+
 static void window_list_destroy_resource(struct wl_resource *resource)
 {
 	struct aws_window_list *list = wl_resource_get_user_data(resource);
@@ -700,6 +722,7 @@ static const struct agora_shell_interface agora_shell_implementation = {
 	shell_get_window_list,
 	shell_activate_window,
 	shell_close_window,
+	shell_reopen_window,
 };
 
 static void bind_agora_shell(struct wl_client *client, void *data, uint32_t version, uint32_t id)
@@ -715,5 +738,5 @@ static void bind_agora_shell(struct wl_client *client, void *data, uint32_t vers
 
 void aws_shell_init(struct aws_server *server)
 {
-	wl_global_create(server->display, &agora_shell_interface, 4, server, bind_agora_shell);
+	wl_global_create(server->display, &agora_shell_interface, 5, server, bind_agora_shell);
 }

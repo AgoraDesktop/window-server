@@ -463,10 +463,16 @@ moves no pixels. **And a window may say that clicking it must not activate its a
 `tests/window_list.c` asserts that such a window gives the keyboard back and refuses `activate_window`. See
 [`DESIGN.md`](DESIGN.md).
 
-What is still absent on this side, named rather than left to be discovered: there is no way for a third client to
-enumerate windows or learn which application is frontmost, no activation request, no `close` ever sent (the event
-is declared and nothing emits it), no minimized state, and no cross-process data device — which is what the Dock's
-running-app list, its click-to-activate, its Quit, and a drop on its Trash icon each need.
+**WHAT A DOCK ASKS, AND WHAT IT CAN DO ABOUT THE ANSWER, IS NOW THE PROTOCOL'S OWN.** `get_window_list` is the
+snapshot a shell draws from (and the one thing an ordinary application never asks for), `activate_window` and
+`close_window` are the click and the Quit, and `reopen_window` is the click that has nothing to raise — the
+application is asked to show a window and decides what that means. `tests/window_list.c` is the proof of all four,
+because it is a shell and two applications in one process, which is the only way to write those assertions without
+a race.
+
+What is still absent on this side, named rather than left to be discovered: no minimized state, no session (so
+nothing emits `close` on shutdown), and no cross-process data device — which is what a drop on the Dock's Trash
+icon needs.
 
 ## Licence
 
