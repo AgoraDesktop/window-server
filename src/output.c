@@ -4,7 +4,6 @@
  * Copyright © 2026 Kyle J. Cardoza.
  * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
  * SPDX-License-Identifier: GPL-3.0-or-later
- * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * WHAT IS LEFT HERE AFTER THE RENDERER SPLIT, AND WHY IT IS THE RIGHT THING TO BE LEFT. This file used to be the
  * compositor: it walked the surfaces by level, drew shadows, blended client buffers and filled the menu bar. All of

@@ -4,7 +4,6 @@
  * Copyright © 2026 Kyle J. Cardoza.
  * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
  * SPDX-License-Identifier: GPL-3.0-or-later
- * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * THIS IS THE SHIPPING BACKEND. The headless one is for tests and the X11 one is for development; this is the
  * one a person's screen is attached to, and the only backend that needs the kernel's permission rather than a

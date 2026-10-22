@@ -4,7 +4,6 @@
  * Copyright © 2026 Kyle J. Cardoza.
  * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
  * SPDX-License-Identifier: GPL-3.0-or-later
- * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * TWO ANSWERS AND ONE OF THEM IS ALWAYS AVAILABLE. `cpu` composites into the backend's frame buffer and works
  * everywhere, including a machine with no GPU and a headless test run. `gl` draws through EGL and GLES2 and only

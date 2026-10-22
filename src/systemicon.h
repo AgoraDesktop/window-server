@@ -4,7 +4,6 @@
  * Copyright © 2026 Kyle J. Cardoza.
  * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
  * SPDX-License-Identifier: GPL-3.0-or-later
- * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * THE MARK IS DATA AND NOT AN ENUM. There are eleven distinct exact marks now — FreeBSD stands in for DragonFlyBSD
  * — plus the hamburger, and there will be more later. A resolver that returned an enum would grow a new value every

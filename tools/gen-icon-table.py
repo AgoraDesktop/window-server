@@ -2,7 +2,6 @@
 # Copyright © 2026 Kyle J. Cardoza.
 # SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
 
 """Generate the System menu icon tables and vector data from the TSVs and `.icon` files.
 
@@ -142,7 +141,6 @@ def emit_data_h(icons: dict[str, dict], ordered: list[str]) -> list[str]:
         " * Copyright © 2026 Kyle J. Cardoza.",
         " * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza",
         " * SPDX-License-Identifier: GPL-3.0-or-later",
-        " * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.",
         " */",
         "",
         "#ifndef AGORA_SYSTEMICON_DATA_H",
@@ -172,7 +170,6 @@ def emit_data_c(icons: dict[str, dict], ordered: list[str]) -> list[str]:
         " * Copyright © 2026 Kyle J. Cardoza.",
         " * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza",
         " * SPDX-License-Identifier: GPL-3.0-or-later AND CC0-1.0",
-        " * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.",
         " */",
         "",
         '#include "systemicon-data.h"',
@@ -234,7 +231,6 @@ def emit_table_c(
         " * Copyright © 2026 Kyle J. Cardoza.",
         " * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza",
         " * SPDX-License-Identifier: GPL-3.0-or-later",
-        " * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.",
         " */",
         "",
         '#include "systemicon-table.h"',

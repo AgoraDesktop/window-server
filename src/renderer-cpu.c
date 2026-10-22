@@ -4,7 +4,6 @@
  * Copyright © 2026 Kyle J. Cardoza.
  * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
  * SPDX-License-Identifier: GPL-3.0-or-later
- * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * THIS IS THE RENDERER THE SERVER SHIPPED WITH, MOVED OUT OF `output.c` AND NOT REWRITTEN. It is the one every
  * backend can run — headless has nothing else, and DRM/KMS has no EGL path yet — so it is not a fallback in the

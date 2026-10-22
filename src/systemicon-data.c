@@ -10,7 +10,6 @@
  * Copyright © 2026 Kyle J. Cardoza.
  * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
  * SPDX-License-Identifier: GPL-3.0-or-later AND CC0-1.0
- * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  */
 
 #include "systemicon-data.h"

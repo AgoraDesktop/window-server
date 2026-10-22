@@ -4,7 +4,6 @@
  * Copyright © 2026 Kyle J. Cardoza.
  * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
  * SPDX-License-Identifier: GPL-3.0-or-later
- * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * **THE BUG THIS FILE EXISTS FOR WAS REPORTED AS "it loses track of the pointer when the cursor leaves the
  * window".** Resizing drags a window's edge, and the edge follows the hand — but the compositor's copy of the

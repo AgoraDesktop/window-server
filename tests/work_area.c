@@ -4,7 +4,6 @@
  * Copyright © 2026 Kyle J. Cardoza.
  * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
  * SPDX-License-Identifier: GPL-3.0-or-later
- * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * WHAT IT PROVES, AND WHY IT IS A PROGRAM RATHER THAN A SCREENSHOT. `agora_window.set_reserved` is the door a Dock
  * asks through, and everything it does is INVISIBLE in a frame: no pixel moves, the window does not move, and the

@@ -4,7 +4,6 @@
  * Copyright © 2026 Kyle J. Cardoza.
  * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
  * SPDX-License-Identifier: GPL-3.0-or-later
- * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * AN INPUT SOURCE IS INDEPENDENT OF AN OUTPUT BACKEND, and keeping them apart is the point: `libinput` reads
  * the machine's devices and `host` takes the events a nested window is given, and either can be paired with

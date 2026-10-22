@@ -4,7 +4,6 @@
  * Copyright © 2026 Kyle J. Cardoza.
  * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
  * SPDX-License-Identifier: GPL-3.0-or-later
- * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * WHAT IT PROVES. The window server can be tested against a client that is nothing but the protocol: connect,
  * be given a role, be CONFIGURED, attach a shared-memory buffer, commit it, and be told the frame was taken.

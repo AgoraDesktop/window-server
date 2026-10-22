@@ -4,7 +4,6 @@
  * Copyright © 2026 Kyle J. Cardoza.
  * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
  * SPDX-License-Identifier: GPL-3.0-or-later
- * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * THIS IS A DEVELOPMENT BACKEND AND NOT A DISPLAY TARGET, and the distinction is the whole of the reasoning.
  * Agora's display target is Wayland on real hardware, with Xwayland for X CLIENTS. This backend exists because

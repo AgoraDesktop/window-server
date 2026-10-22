@@ -4,7 +4,6 @@
  * Copyright © 2026 Kyle J. Cardoza.
  * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
  * SPDX-License-Identifier: GPL-3.0-or-later
- * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * THE LADDER IS THE WHOLE OF THIS FILE: exact ID, alias, each `ID_LIKE` token in order, family, then the
  * hamburger. The tables are generated from `assets/system-menu-icons/`; this file contains the order and nothing

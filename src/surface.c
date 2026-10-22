@@ -4,7 +4,6 @@
  * Copyright © 2026 Kyle J. Cardoza.
  * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
  * SPDX-License-Identifier: GPL-3.0-or-later
- * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * THE TWO STATES A SURFACE HAS, AND WHY THEY ARE TWO. Wayland is double-buffered at the SURFACE, not at the
  * buffer: a client ATTACHES a buffer and later COMMITS it, and everything between those two calls is pending.
