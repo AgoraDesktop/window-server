@@ -473,6 +473,37 @@ static void window_take_focus(struct wl_client *client, struct wl_resource *reso
 	aws_shell_window_list_changed(surface->server);
 }
 
+/* **AND THE ANSWER TO A DOCK'S QUESTION, WHICH IS THE FIRST MENU THIS SERVER HAS EVER CARRIED.** The application
+ * hands over a description of its own items and this file does not read a byte of it: the format is the AppKit's
+ * at both ends, and a compositor that parsed a menu would have an opinion about what an item is — the same mistake
+ * a special case for "the dock" would be. What the server does is the one thing only it can: hand the answer to
+ * the client that asked, which is a fact it keeps under the WINDOW ID rather than a pointer (see
+ * `struct aws_dock_menu`), so a window destroyed mid-question is a question left unanswered rather than a crash.
+ *
+ * **EVERY PENDING ASK NAMING THIS WINDOW HEARS IT.** Two right-clicks on two docks, or on the same tile twice, are
+ * two questions with one answer, and each asker gets it. An answer nobody asked for is ignored rather than refused:
+ * the ask it belonged to may have timed out, or the Dock may have gone, and neither is the application's fault. */
+static void window_set_dock_menu(struct wl_client *client, struct wl_resource *resource, const char *menu)
+{
+	struct aws_surface *surface = wl_resource_get_user_data(resource);
+	struct aws_dock_menu *ask, *tmp;
+
+	(void)client;
+	if (surface == NULL || surface->id == 0) {
+		return;
+	}
+	wl_list_for_each_safe(ask, tmp, &surface->server->dock_menus, link) {
+		if (ask->window != surface->id) {
+			continue;
+		}
+		/* THE NODE STAYS — IT IS THE CLIENT'S OBJECT — but it has been answered, so a second answer to the same
+		 * question cannot be mistaken for this one's. */
+		ask->window = 0;
+		agora_dock_menu_send_menu(ask->resource, surface->app_id != NULL ? surface->app_id : "",
+					  menu != NULL ? menu : "");
+	}
+}
+
 static void window_set_pointer_capture(struct wl_client *client, struct wl_resource *resource, int32_t capture)
 {
 	struct aws_surface *surface = wl_resource_get_user_data(resource);
@@ -511,6 +542,7 @@ static const struct agora_window_interface agora_window_implementation = {
 	window_set_reserved,
 	window_set_activatable,
 	window_take_focus,
+	window_set_dock_menu,
 };
 
 static void agora_window_destroy_resource(struct wl_resource *resource)
@@ -694,6 +726,102 @@ static void shell_reopen_window(struct wl_client *client, struct wl_resource *re
 	agora_window_send_reopen(surface->agora_window);
 }
 
+/* ===================================================================================================
+ * THE DOCK MENU: ONE QUESTION, ONE ANSWER, AND ONE CHOICE SENT HOME.
+ *
+ * **THE SERVER'S WHOLE PART IN A MENU IS CARRYING IT.** The description is the AppKit's at both ends — the Dock
+ * composes the panel, the application owns the items — so nothing here parses a byte of it. What the server does
+ * is the part neither client can do for itself: it knows WHICH window an application owns and WHICH client asked
+ * about it, and it keeps the answer's address so the round trip closes.
+ *
+ * **AND IT IS A ROUND TRIP ON PURPOSE.** A tile's menu is a picture of what the application can do at this moment
+ * ("Open Recent" changes with the documents; a Play/Pause row changes with the player), so it is asked for when a
+ * person right-clicks and not cached anywhere. The Mac's Dock asks its applications the same way, which is why
+ * `-applicationDockMenu:` is a method rather than a stored property.
+ * =================================================================================================== */
+
+/* The asker's own object, and nothing else to clean up: the node lives exactly as long as the resource does. */
+static void dock_menu_destroy_resource(struct wl_resource *resource)
+{
+	struct aws_dock_menu *ask = wl_resource_get_user_data(resource);
+
+	if (ask != NULL) {
+		wl_list_remove(&ask->link);
+		free(ask);
+	}
+}
+
+/* **THE ONE REQUEST THIS OBJECT HAS, AND IT MUST BE HANDLED RATHER THAN LEFT OUT.** A resource whose
+ * implementation is NULL has no function pointer for the opcode a client's `destroy` carries, and libwayland
+ * dereferences it — MEASURED, as a compositor that segfaulted the moment a dock put its answer object down. The
+ * destructor is the whole vtable because it is the whole interface. */
+static void dock_menu_destroy(struct wl_client *client, struct wl_resource *resource)
+{
+	(void)client;
+	wl_resource_destroy(resource);
+}
+
+static const struct agora_dock_menu_interface agora_dock_menu_implementation = {
+	dock_menu_destroy,
+};
+
+static void shell_get_dock_menu(struct wl_client *client, struct wl_resource *resource, uint32_t id, uint32_t window)
+{
+	struct aws_server *server = wl_resource_get_user_data(resource);
+	struct aws_surface *surface = surface_for_id(server, window);
+	struct wl_resource *menu_resource;
+	struct aws_dock_menu *ask;
+
+	menu_resource = wl_resource_create(client, &agora_dock_menu_interface, 1, id);
+	if (menu_resource == NULL) {
+		wl_client_post_no_memory(client);
+		return;
+	}
+	ask = calloc(1, sizeof *ask);
+	if (ask == NULL) {
+		wl_resource_destroy(menu_resource);
+		wl_client_post_no_memory(client);
+		return;
+	}
+	ask->resource = menu_resource;
+	ask->window = window;
+	wl_list_insert(server->dock_menus.prev, &ask->link);
+	wl_resource_set_implementation(menu_resource, &agora_dock_menu_implementation, ask, dock_menu_destroy_resource);
+
+	/* **A QUESTION THE SERVER CANNOT DELIVER IS ANSWERED NOW, EMPTY.** The window may be gone, may be an
+	 * `xdg_toplevel` with no `agora_window` at all, or may belong to a client bound below version 6 — and in every
+	 * one of those cases "this application has no dock menu" is the honest answer, said immediately rather than
+	 * left for a timeout to say later. A shell component is a client of a protocol that grows, and it must not
+	 * hang because it asked an older one. */
+	if (surface == NULL || surface->agora_window == NULL ||
+	    wl_resource_get_version(surface->agora_window) < 6) {
+		ask->window = 0;
+		agora_dock_menu_send_menu(menu_resource, "", "");
+		return;
+	}
+	agora_window_send_dock_menu_requested(surface->agora_window);
+}
+
+/* **AND THE OTHER DIRECTION: THE ITEM, BACK TO THE APPLICATION THAT MADE IT.** The Dock drew the panel and knows
+ * only the id the application gave the item, so the id is what crosses; turning it back into an `NSMenuItem` and
+ * sending its action is the application's, because only it knows what choosing one means. */
+static void shell_dock_menu_action(struct wl_client *client, struct wl_resource *resource, uint32_t id, int32_t item)
+{
+	struct aws_server *server = wl_resource_get_user_data(resource);
+	struct aws_surface *surface = surface_for_id(server, id);
+
+	(void)client;
+	if (surface == NULL || surface->agora_window == NULL) {
+		return;
+	}
+	/* An event a resource's version does not have is a protocol error on that client's connection — see
+	 * `shell_reopen_window`, which is the same rule one version down. */
+	if (wl_resource_get_version(surface->agora_window) < 6) {
+		return;
+	}
+	agora_window_send_dock_menu_action(surface->agora_window, item);
+}
+
 static void window_list_destroy_resource(struct wl_resource *resource)
 {
 	struct aws_window_list *list = wl_resource_get_user_data(resource);
@@ -741,6 +869,8 @@ static const struct agora_shell_interface agora_shell_implementation = {
 	shell_activate_window,
 	shell_close_window,
 	shell_reopen_window,
+	shell_get_dock_menu,
+	shell_dock_menu_action,
 };
 
 static void bind_agora_shell(struct wl_client *client, void *data, uint32_t version, uint32_t id)
@@ -756,5 +886,5 @@ static void bind_agora_shell(struct wl_client *client, void *data, uint32_t vers
 
 void aws_shell_init(struct aws_server *server)
 {
-	wl_global_create(server->display, &agora_shell_interface, 5, server, bind_agora_shell);
+	wl_global_create(server->display, &agora_shell_interface, 6, server, bind_agora_shell);
 }

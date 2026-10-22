@@ -274,6 +274,22 @@ struct aws_window_list {
 	struct wl_list link;
 };
 
+/* **AND ONE OUTSTANDING QUESTION ABOUT A MENU.** A Dock that right-clicks a tile asks the application behind it for
+ * the items of its tile's menu, and the answer has to find its way back to the asker — so this is the asker's
+ * `agora_dock_menu` resource, held under the WINDOW ID it named. The node lives exactly as long as the resource
+ * does: `window` is set to zero once the answer has gone out, which is what makes a later answer to a stale
+ * question a no-op rather than a second menu.
+ *
+ * **THE WINDOW ID IS THE KEY AND NOT A POINTER, WHICH IS THE WHOLE OF WHY THIS IS SAFE.** A surface may be
+ * destroyed while a Dock is still waiting on it, and a node that held the surface would be walking freed memory
+ * the next time it was looked at. An id is a number; a question about a window that has gone away is simply never
+ * answered, which the asking client's timeout already covers. */
+struct aws_dock_menu {
+	struct wl_resource *resource;
+	unsigned int window;		/* the id the ask named; 0 once it has been answered */
+	struct wl_list link;
+};
+
 struct aws_server {
 	struct wl_display *display;
 	struct wl_event_loop *loop;
@@ -304,6 +320,9 @@ struct aws_server {
 	struct wl_list agora_outputs;
 	/* Every bound `agora_window_list`, so a window change reaches the dock that asked. */
 	struct wl_list window_lists;
+	/* **AND THE MENUS A DOCK IS WAITING FOR.** One node per `get_dock_menu`, keyed by the window it asked about; see
+	 * `struct aws_dock_menu`. Walked when an application answers, and by nothing else. */
+	struct wl_list dock_menus;
 	/* **THE NUMBER A WINDOW IS KNOWN BY OUTSIDE ITS OWN CLIENT.** A Dock holds no proxy for somebody else's
 	 * window, so `activate_window` and `close_window` name one by this id — the server's, stable for the life of
 	 * the window. Zero is never handed out, so zero can mean "no window". */

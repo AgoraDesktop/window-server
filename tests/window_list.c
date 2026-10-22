@@ -63,6 +63,19 @@ struct state {
 
 	int closes;		/* `agora_window.close` events any of this probe's windows received */
 	int reopens;		/* `agora_window.reopen` events — the question a tile asks with nothing to raise */
+
+	/* ---- AND THE TILE'S MENU ------------------------------------------------------------------------
+	 * The probe is both ends of the round trip: it is the DOCK when it asks `get_dock_menu` through its own
+	 * connection, and it is the APPLICATION when the server delivers the question to one of its windows. That is
+	 * the same one-process shape the rest of this file uses, and it is what makes a round trip assertable as a
+	 * sequence instead of raced. */
+	int menu_requests;	/* `dock_menu_requested` events the application heard */
+	int menus;		/* `agora_dock_menu.menu` answers the dock received */
+	int menus_answered;	/* how many of those arrived with a description */
+	char last_app_id[64];
+	char last_menu[256];
+	int menu_actions;	/* `dock_menu_action` events the application heard */
+	int last_action_item;
 };
 
 /* ---------------------------------------------------------------------------------------------------
@@ -143,12 +156,55 @@ static void window_reopen(void *data, struct agora_window *window)
 	state->reopens++;
 }
 
-/* IN THE PROTOCOL'S OWN ORDER: `close`, `work_area_changed`, `pointer_global`, `reopen`. */
+/* **THE QUESTION, ANSWERED WHERE IT IS ASKED.** An application that implements `-applicationDockMenu:` answers with a
+ * description of its items; this probe answers with a fixed one, because what is being tested is that the ANSWER
+ * reaches the dock and that the same window later hears which of its items was chosen. */
+static const char *const PROBE_MENU = "[{\"title\":\"Probe Item\",\"enabled\":true,\"state\":0,\"id\":1}]";
+
+static void window_dock_menu_requested(void *data, struct agora_window *window)
+{
+	struct state *state = data;
+
+	state->menu_requests++;
+	agora_window_set_dock_menu(window, PROBE_MENU);
+}
+
+static void window_dock_menu_action(void *data, struct agora_window *window, int32_t item)
+{
+	struct state *state = data;
+
+	(void)window;
+	state->menu_actions++;
+	state->last_action_item = (int)item;
+}
+
+/* IN THE PROTOCOL'S OWN ORDER: `close`, `work_area_changed`, `pointer_global`, `reopen`, `dock_menu_requested`,
+ * `dock_menu_action`. */
 static const struct agora_window_listener window_listener = {
 	window_close,
 	window_work_area_changed,
 	window_pointer_global,
 	window_reopen,
+	window_dock_menu_requested,
+	window_dock_menu_action,
+};
+
+/* AND THE DOCK'S SIDE OF IT: the answer arrives on the `agora_dock_menu` the ask made. */
+static void dock_menu_menu(void *data, struct agora_dock_menu *menu, const char *app_id, const char *description)
+{
+	struct state *state = data;
+
+	(void)menu;
+	state->menus++;
+	snprintf(state->last_app_id, sizeof state->last_app_id, "%s", app_id != NULL ? app_id : "");
+	snprintf(state->last_menu, sizeof state->last_menu, "%s", description != NULL ? description : "");
+	if (description != NULL && description[0] != '\0') {
+		state->menus_answered++;
+	}
+}
+
+static const struct agora_dock_menu_listener dock_menu_listener = {
+	dock_menu_menu,
 };
 
 static void registry_global(void *data, struct wl_registry *registry, uint32_t name, const char *interface,
@@ -162,7 +218,7 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
 	} else if (strcmp(interface, wl_shm_interface.name) == 0) {
 		state->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
 	} else if (strcmp(interface, agora_shell_interface.name) == 0) {
-		state->shell = wl_registry_bind(registry, name, &agora_shell_interface, version < 5 ? version : 5);
+		state->shell = wl_registry_bind(registry, name, &agora_shell_interface, version < 6 ? version : 6);
 	}
 }
 
@@ -415,6 +471,87 @@ int main(void)
 		fail(&state, "reopen_window closed or hid the window it was addressed to");
 	} else {
 		printf("ok: reopen_window asked the application, and left the window alone\n");
+	}
+
+	/* **AND THE TILE'S MENU: ASKED, ANSWERED, AND THE CHOICE SENT HOME.** This is the one thing a Dock cannot get
+	 * from the window list — the items belong to the application and the panel belongs to the Dock — and it is a
+	 * ROUND TRIP, so the assertion is a sequence rather than a flag. The probe is both ends, as it is everywhere
+	 * else in this file.
+	 *
+	 * **THE ANSWER ARRIVES ON THE OBJECT THE ASK MADE, WHICH IS WHY THE OBJECT EXISTS.** A window id names a window
+	 * and says nothing about who asked about it, so `agora_dock_menu` is the address the answer comes back to. */
+	{
+		struct agora_dock_menu *request;
+
+		request = agora_shell_get_dock_menu(state.shell, id_b);
+		agora_dock_menu_add_listener(request, &dock_menu_listener, &state);
+		/* **TWO ROUNDTRIPS, AND THE SECOND ONE IS THE ANSWER'S.** The question is delivered by the first; the answer
+		 * is a request the application sends FROM the listener, so it is still in the client's buffer when that
+		 * roundtrip returns. This is the round trip a dock waits on, and a probe that waited only one would be
+		 * asserting that the answer is synchronous — which is the one thing it is not. */
+		if (settle(&state) != 0 || settle(&state) != 0) {
+			return 1;
+		}
+		if (state.menu_requests != 1) {
+			fail(&state, "get_dock_menu did not deliver dock_menu_requested to the application");
+		} else if (state.menus != 1) {
+			fail(&state, "the application's answer did not reach the dock's object");
+		} else if (strcmp(state.last_app_id, "io.github.agoradesktop.probe.b") != 0) {
+			fail(&state, "the answer named the wrong application");
+		} else if (strcmp(state.last_menu, PROBE_MENU) != 0) {
+			fail(&state, "the description that arrived is not the one that was sent");
+		} else {
+			printf("ok: the dock asked, the application answered, and the description came back whole\n");
+		}
+		/* AND THE ITEM THE PERSON PICKED, BY THE ID THE APPLICATION NUMBERED IT WITH. */
+		agora_shell_dock_menu_action(state.shell, id_b, 7);
+		if (settle(&state) != 0) {
+			return 1;
+		}
+		if (state.menu_actions != 1 || state.last_action_item != 7) {
+			fail(&state, "dock_menu_action did not deliver the item the dock named");
+		} else {
+			printf("ok: the chosen item went home by its id\n");
+		}
+		agora_dock_menu_destroy(request);
+		if (settle(&state) != 0) {
+			return 1;
+		}
+	}
+
+	/* **A WINDOW NOBODY ANSWERS IS ANSWERED NOW, EMPTY.** A window id that has gone away — or one belonging to a client
+	 * bound below version 6 — must not leave the dock waiting out a timeout for a question the server cannot deliver.
+	 * The empty description IS the answer, and it arrives on the same object. */
+	{
+		struct agora_dock_menu *request = agora_shell_get_dock_menu(state.shell, id_b + 1000);
+
+		agora_dock_menu_add_listener(request, &dock_menu_listener, &state);
+		if (settle(&state) != 0) {
+			return 1;
+		}
+		if (state.menus != 2 || state.menus_answered != 1) {
+			fail(&state, "an ask about a window nothing answers was not answered empty");
+		} else if (state.menu_requests != 1) {
+			fail(&state, "an ask about a window nothing answers reached SOME window");
+		} else {
+			printf("ok: an ask the server cannot deliver is answered empty, immediately\n");
+		}
+		agora_dock_menu_destroy(request);
+		if (settle(&state) != 0) {
+			return 1;
+		}
+	}
+
+	/* **AND AN ANSWER NOBODY ASKED FOR IS IGNORED.** The ask it belonged to may have timed out, or the Dock may have
+	 * gone; neither is the application's fault, so this is a no-op rather than an error. */
+	agora_window_set_dock_menu(window_a, "[]");
+	if (settle(&state) != 0) {
+		return 1;
+	}
+	if (state.menus != 2) {
+		fail(&state, "an unsolicited dock menu answer was delivered to somebody");
+	} else {
+		printf("ok: an unsolicited answer is ignored rather than an error\n");
 	}
 
 	/* **A QUIT FROM THE TILE'S MENU.** The application is ASKED, not destroyed: the event lands on B's own

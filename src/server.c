@@ -32,6 +32,9 @@ struct aws_server *aws_server_create(const char *backend_name, const char *input
 	wl_list_init(&server->agora_outputs);
 	/* AND THE CLIENTS THAT ASKED WHAT WINDOWS EXIST — a Dock, usually one. */
 	wl_list_init(&server->window_lists);
+	/* **AND THE MENUS STILL BEING WAITED FOR.** Empty until a Dock right-clicks a tile, and empty again as soon as
+	 * every application has answered — nothing here outlives the answer it was made for. */
+	wl_list_init(&server->dock_menus);
 	/* **ZERO IS NEVER A WINDOW'S NUMBER**, so zero is free to mean "no window" in the list and in a lookup. */
 	server->next_window_id = 1;
 

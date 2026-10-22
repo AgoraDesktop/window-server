@@ -472,6 +472,20 @@ a race. **And the other side of the same question is `agora_window.take_focus`**
 MINE is key", which is `-makeKeyWindow` — focus without a raise, and only ever about a window the caller owns.
 Without it a window opened by a click that had nothing to raise came forward with the keyboard left behind.
 
+**AND A TILE'S MENU IS A ROUND TRIP, BECAUSE THE PANEL AND THE ITEMS HAVE TWO OWNERS.** A right-click on a tile shows
+what the application offers for that tile with the Dock's own rows under them — one panel, and the application
+cannot draw in it. So `get_dock_menu` asks an application for its dock menu and `agora_dock_menu.menu` carries the
+answer back to the client that asked (that object exists precisely so the answer has an address: a window id says
+nothing about who asked); `dock_menu_action` sends the chosen item's id home, and `agora_window.set_dock_menu` is the
+application's answer. **This server never parses a menu** — the description is the AppKit's at both ends, and a
+compositor with an opinion about items would be the same mistake a special case for "the dock" would be. An ask it
+cannot deliver (a window that has gone, or a client bound below version 6) is answered EMPTY NOW rather than left for
+a timeout to say later. `tests/window_list.c` asserts the whole round trip, including both of those answers.
+
+**THE SHELL GLOBAL IS AT VERSION 6.** Version 3 added the window list and the two requests on somebody else's
+window, 4 carried `set_activatable`, 5 added `reopen_window` and `take_focus`, and 6 is the tile's menu — four
+requests and two events, and no change to how windows are placed.
+
 What is still absent on this side, named rather than left to be discovered: no minimized state, no session (so
 nothing emits `close` on shutdown), and no cross-process data device — which is what a drop on the Dock's Trash
 icon needs.

@@ -36,7 +36,7 @@
     Copyright © 2026 Kyle J. Cardoza. MIT licensed.
   </copyright>
 
-  <interface name="agora_shell" version="5">
+  <interface name="agora_shell" version="6">
     <description summary="the window server's own window management">
       One global. It hands out the three objects above it: a window, which is what a surface becomes, an output,
       which is where the work area comes from, and a window list, which is what a shell component asks for.
@@ -46,8 +46,10 @@
       version 3 through a shell bound at 4. Version 2 added no request HERE; it is `agora_window.set_reserved`
       that arrived, and a shell bound at 1 keeps handing out version 1 windows. **VERSION 3 ADDED** `get_window_list`,
       `activate_window` and `close_window`, and **VERSION 4 ADDED NOTHING HERE**: it carried
-      `agora_window.set_activatable`, the door a Dock needs and no application does. **VERSION 5 ADDS
-      `reopen_window`**, the question a tile asks when the application has nothing to raise.
+      `agora_window.set_activatable`, the door a Dock needs and no application does. **VERSION 5 ADDED
+      `reopen_window`**, the question a tile asks when the application has nothing to raise. **VERSION 6 ADDS
+      `get_dock_menu` and `dock_menu_action`**: the two halves of a tile's menu, and the first thing in this
+      protocol that carries a MENU rather than a window's property.
     </description>
 
     <enum name="error">
@@ -141,6 +143,88 @@
       </description>
       <arg name="id" type="uint" summary="any window of the application, from the window list"/>
     </request>
+
+    <!-- **THE MENU IS ASKED FOR RATHER THAN PUBLISHED, AND THAT IS THE MAC'S OWN ORDER.** The Dock asks when it is
+         about to show a menu and not before, because a dock menu is a picture of what the application can do AT
+         THIS MOMENT — "Open Recent" changes with the documents, a Play/Pause row changes with the player. An
+         application that published eagerly would have to know every moment its menu went stale. So these two
+         requests are version 6, at the end for the ordering reason above. -->
+    <request name="get_dock_menu" since="6">
+      <description summary="ask an application for the menu its tile should offer">
+        **A DOCK'S RIGHT-CLICK, ASKED OF THE APPLICATION IT LANDED ON.** `window` is any window of that application
+        from the window list — the frontmost one is the honest choice — and it is an ADDRESS rather than a
+        subject, exactly as `reopen_window`'s is: the answer is the application's, and the server forwards
+        `agora_window.dock_menu_requested` to the window's client and nothing else.
+
+        **THE ANSWER ARRIVES ON THE `agora_dock_menu` THIS ASKED FOR**, and it is that object that makes the round
+        trip possible: a window id names a window, and the server needs to know WHICH CLIENT asked in order to
+        hand the answer back. The client destroys the object once it has the answer, has given up waiting, or has
+        gone away.
+
+        **AN ASK THE SERVER CANNOT FORWARD IS ANSWERED EMPTY, IMMEDIATELY.** The window may be gone, may belong to
+        an `xdg_toplevel` with no `agora_window` at all, or may be an `agora_window` bound below version 6 — and in
+        every one of those cases the honest answer is "this application has no dock menu", said now rather than
+        left for a timeout to say later. A shell component is a client of a protocol that grows, and it must not
+        hang because it asked an older one.
+
+        **SEVERAL ASKS MAY BE OUTSTANDING, AND EACH IS ANSWERED.** A person can right-click two tiles, or the same
+        tile twice; every pending `agora_dock_menu` naming that window hears the answer, because the answer is the
+        application's and not the ask's.
+      </description>
+      <arg name="id" type="new_id" interface="agora_dock_menu"/>
+      <arg name="window" type="uint" summary="any window of the application, from the window list"/>
+    </request>
+
+    <request name="dock_menu_action" since="6">
+      <description summary="the person chose an item of the application's dock menu">
+        **THE OTHER DIRECTION, AND THE REASON THE MENU'S CONTENTS HAVE TO CROSS AT ALL.** The Dock draws the menu —
+        it is the Dock's panel, at the Dock's screen edge, with the Dock's own items under the application's — so
+        the item the person picked is not the application's object and cannot send the application's action. What
+        the Dock knows is the ID the application gave that item in the description it published, and this sends it
+        home: the server forwards `agora_window.dock_menu_action` to the window named here, and the application
+        finds its own item and performs it. The AppKit does that on both sides (`NSDockMenu`), and the ids are its
+        to number.
+
+        An id nothing answers is ignored, exactly as `activate_window`'s stale id is: a menu dismissed as its
+        application quits is ordinary.
+      </description>
+      <arg name="window" type="uint" summary="the window the menu was asked about"/>
+      <arg name="item" type="int" summary="the id the application gave the item it published"/>
+    </request>
+  </interface>
+
+  <interface name="agora_dock_menu" version="1">
+    <description summary="one answer to one `get_dock_menu`">
+      **A THING THAT EXISTS FOR THE LENGTH OF ONE QUESTION.** A window id names a window; the answer has to find
+      the client that asked, and this object IS that name — the client makes one per ask and destroys it when the
+      answer has been read. It carries one event and nothing else, because there is nothing else to say.
+    </description>
+
+    <event name="menu">
+      <description summary="the application's dock menu, or an empty answer">
+        **`menu` IS THE APPLICATION'S OWN FORMAT, AND THIS PROTOCOL DOES NOT READ IT.** It is a description of an
+        `NSMenu` — the AppKit at both ends is the same library, so the two sides agree about it, and the window
+        server carries the string without interpreting a byte of it. The point of the rule is the one the dock
+        rule always makes: the server must not grow a special case for what a menu IS, and a compositor that
+        parsed one would have an opinion about items.
+
+        AN EMPTY STRING MEANS "THIS APPLICATION HAS NO DOCK MENU", which is an answer and not a failure: an
+        application that implements nothing is the ordinary case, and a Dock shows its own items alone.
+
+        `app_id` is the identifier the application's window declared, so the asking client can check that the
+        answer is about the application it asked about (a relaunch makes a new application with the same name).
+      </description>
+      <arg name="app_id" type="string"/>
+      <arg name="menu" type="string"/>
+    </event>
+
+    <request name="destroy" type="destructor">
+      <description summary="the answer has been read, or is no longer wanted">
+        Destroys the object. Nothing is left behind on the server side: an ask is not a resource the server keeps
+        once its answer has gone out, and one that is abandoned before the answer arrives is abandoned, which is
+        what a client's timeout already means.
+      </description>
+    </request>
   </interface>
 
   <interface name="agora_window_list" version="1">
@@ -233,7 +317,7 @@
     </event>
   </interface>
 
-  <interface name="agora_window" version="5">
+  <interface name="agora_window" version="6">
     <description summary="a window, placed and sized by its application">
       **THE APPLICATION IS HONOURED.** Every set_ here is a DEMAND the server writes down and acts on, not a
       request it may refuse or adjust — which is the inversion of `xdg_toplevel` and the whole point of this
@@ -501,6 +585,43 @@
         THIS WINDOW IS NOT NAMED BY THE EVENT, because the answer need not be this window — it is the address the
         question arrived at, nothing more.
       </description>
+    </event>
+
+    <!-- **AND THE MENU A DOCK'S RIGHT-CLICK SHOWS, WHICH IS TWO DOORS AND A ROUND TRIP.** Version 6, at the end for
+         the ordering reason the two notes above give. -->
+    <event name="dock_menu_requested" since="6">
+      <description summary="a shell is asking this application for its dock menu">
+        **THE APPLICATION'S ANSWER IS `set_dock_menu`, AND IT IS ASKED RATHER THAN CACHED.** A dock menu is a
+        picture of what the application can do at this moment, so the only moment it may be built is the moment it
+        is about to be shown. The AppKit puts the question to its delegate as `-applicationDockMenu:` — Apple's own
+        door, declared in this tree long before there was a Dock to ask it — and the answer goes straight back.
+
+        **AN APPLICATION MUST ANSWER, EVEN WITH NOTHING TO SAY**, because the Dock is holding a menu open for it:
+        `set_dock_menu` with an empty string is the answer "no items of my own", and it costs one request. A client
+        that never answers leaves the Dock to its timeout, which is the only thing a shell can do about an
+        application that has stopped reading its own events.
+      </description>
+    </event>
+
+    <request name="set_dock_menu" since="6">
+      <description summary="the answer to `dock_menu_requested`">
+        The menu, in the application's own format (see `agora_dock_menu.menu`), or an empty string for "none".
+        The server hands it to every client still waiting on this window and forgets it: a dock menu is not part of
+        a window's state, it is the answer to a question, and there is nothing to keep.
+
+        An answer nobody asked for is ignored rather than refused — the ask it belonged to may have timed out or
+        the Dock may have gone away, and neither is the application's fault.
+      </description>
+      <arg name="menu" type="string"/>
+    </request>
+
+    <event name="dock_menu_action" since="6">
+      <description summary="the person chose an item of the menu this application published">
+        It carries the item's id and nothing else, because the application is the only side that can turn an id
+        back into an object and only it knows what choosing one means. The AppKit finds the `NSMenuItem` in the
+        menu it published and sends its action, which is exactly what its own tracking loop would have done.
+      </description>
+      <arg name="item" type="int"/>
     </event>
   </interface>
 
