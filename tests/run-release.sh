@@ -1,9 +1,9 @@
+#!/bin/bash
 # Copyright © 2026 Kyle J. Cardoza.
 # SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
 
-#!/bin/bash
 # **A RELEASED BUFFER IS ONE THE COMPOSITOR HAS FINISHED WITH — AND ONLY ONE IT HAS REPLACED.**
 #
 # `wl_buffer.release` is a promise, and what makes it a promise is WHEN it is sent: a client is entitled to repaint

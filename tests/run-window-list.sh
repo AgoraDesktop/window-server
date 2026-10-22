@@ -1,9 +1,9 @@
+#!/bin/bash
 # Copyright © 2026 Kyle J. Cardoza.
 # SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
 
-#!/bin/bash
 # Start the window server headless and ask the window-list probe to be a Dock for a moment.
 #
 # Nothing here is photographed: the claim is what a SHELL COMPONENT is told about other applications' windows, and

@@ -1,9 +1,9 @@
+#!/bin/bash
 # Copyright © 2026 Kyle J. Cardoza.
 # SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
 
-#!/bin/bash
 # Start the window server headless and ask the work-area probe what the screen has left.
 #
 # There is no screenshot to compare here: a reservation moves no pixels. What is measured is the number the server

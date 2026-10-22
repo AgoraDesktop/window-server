@@ -1,9 +1,9 @@
+#!/usr/bin/env python3
 # Copyright © 2026 Kyle J. Cardoza.
 # SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
 
-#!/usr/bin/env python3
 """Convert a monochrome SVG path into the System menu's `.icon` format.
 
 THE INPUT IS A SIMPLE ICONS SVG (one `<path>`, a 24-unit viewBox, no fill-rule attribute). The output is the

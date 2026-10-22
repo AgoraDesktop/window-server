@@ -1,9 +1,9 @@
+#!/bin/bash
 # Copyright © 2026 Kyle J. Cardoza.
 # SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
 
-#!/bin/bash
 # Force each System menu mark, let one real client commit a frame, and check the server's screenshot.
 set -u
 

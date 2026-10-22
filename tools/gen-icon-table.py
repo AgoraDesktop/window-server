@@ -1,9 +1,9 @@
+#!/usr/bin/env python3
 # Copyright © 2026 Kyle J. Cardoza.
 # SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
 
-#!/usr/bin/env python3
 """Generate the System menu icon tables and vector data from the TSVs and `.icon` files.
 
 THE DATA IS THE SOURCE. `assets/system-menu-icons/{distros,aliases,families}.tsv` decide which mark an OS gets;
