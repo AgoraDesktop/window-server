@@ -1,8 +1,10 @@
 /*
  * osdetect.c — the probe ladder behind `struct aws_os_identity`.
  *
- * Copyright © 2026 Kyle J. Cardoza. MIT licensed.
- * SPDX-License-Identifier: MIT
+ * Copyright © 2026 Kyle J. Cardoza.
+ * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * THE ORDER IS THE POINT. `/etc/os-release` is the freedesktop answer and the best one; `/usr/lib/os-release` is
  * its vendor fallback; `/etc/lsb-release` is the older answer; and the per-distro release files are the last

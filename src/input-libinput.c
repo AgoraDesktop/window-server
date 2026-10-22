@@ -1,8 +1,10 @@
 /*
  * input-libinput.c — input from the machine's own devices.
  *
- * Copyright © 2026 Kyle J. Cardoza. MIT licensed.
- * SPDX-License-Identifier: MIT
+ * Copyright © 2026 Kyle J. Cardoza.
+ * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * THIS IS THE REAL INPUT PATH. libinput reads /dev/input and hands a compositor normalized events: a pointer
  * that is a pointer whatever the hardware is, a key that is already an EVDEV code (so there is no `- 8` here —

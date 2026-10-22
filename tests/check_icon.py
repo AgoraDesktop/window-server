@@ -1,3 +1,8 @@
+# Copyright © 2026 Kyle J. Cardoza.
+# SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
+
 #!/usr/bin/env python3
 """Check one forced System menu mark in the server's own screenshot.
 

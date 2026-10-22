@@ -1,7 +1,10 @@
 /*
  * system_icon — who does the System menu think it is running on?
  *
- * Copyright © 2026 Kyle J. Cardoza. MIT licensed. SPDX-License-Identifier: MIT
+ * Copyright © 2026 Kyle J. Cardoza.
+ * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * **THIS IS THE DETECTION, RESOLUTION AND COVERAGE TEST, NOT A SCREENSHOT TEST.** `os-release` is parsed
  * correctly, `ID_LIKE` is tried in order, a family fallback is chosen when no exact mark exists, the hamburger is

@@ -1,3 +1,8 @@
+# Copyright © 2026 Kyle J. Cardoza.
+# SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
+
 # The window server's tests.
 #
 # THE SERVER IS TESTED AGAINST ITS OWN CLIENT, not against libagora-app's: a component consumes another only as

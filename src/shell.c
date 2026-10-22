@@ -1,8 +1,10 @@
 /*
  * shell.c — agora_shell: the window management the Mac has, implemented.
  *
- * Copyright © 2026 Kyle J. Cardoza. MIT licensed.
- * SPDX-License-Identifier: MIT
+ * Copyright © 2026 Kyle J. Cardoza.
+ * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * THE CONTRACT IS `protocol/agora-shell.xml` AND THIS IS THE SERVER'S HALF OF IT. Three things it adds to what
  * `xdg-shell` can say, each measured against Apple's headers before it was written (see DESIGN.md):

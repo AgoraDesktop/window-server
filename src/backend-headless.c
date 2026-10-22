@@ -1,8 +1,10 @@
 /*
  * backend-headless.c — an output that is a buffer of pixels in this process.
  *
- * Copyright © 2026 Kyle J. Cardoza. MIT licensed.
- * SPDX-License-Identifier: MIT
+ * Copyright © 2026 Kyle J. Cardoza.
+ * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * IT PRESENTS NOTHING BECAUSE THERE IS NOTHING TO PRESENT TO: the frame buffer IS the output, and `present` is
  * left NULL rather than written as an empty function — a backend that has no screen should not have a place

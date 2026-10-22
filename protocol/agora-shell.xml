@@ -2,8 +2,8 @@
 <!--
   agora_shell — the window management the Mac has, which xdg-shell cannot express.
 
-  Copyright © 2026 Kyle J. Cardoza. MIT licensed.
-  SPDX-License-Identifier: MIT
+  Copyright © 2026 Kyle J. Cardoza.
+  SPDX-License-Identifier: GPL-3.0-or-later
 
   WHY THIS EXISTS AT ALL. `xdg-shell` is the bootstrap protocol: it is what a stock compositor speaks, which is
   why the window server implements it and why the AppKit was first made to talk it. IT CANNOT SAY THE THREE
@@ -33,7 +33,7 @@
 <protocol name="agora_shell">
 
   <copyright>
-    Copyright © 2026 Kyle J. Cardoza. MIT licensed.
+    Copyright © 2026 Kyle J. Cardoza.
   </copyright>
 
   <interface name="agora_shell" version="6">

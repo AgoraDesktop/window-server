@@ -1,8 +1,10 @@
 /*
  * dmabuf.c — `zwp_linux_dmabuf_v1`: the GPU buffers a client may hand over instead of pixels.
  *
- * Copyright © 2026 Kyle J. Cardoza. MIT licensed.
- * SPDX-License-Identifier: MIT
+ * Copyright © 2026 Kyle J. Cardoza.
+ * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * WHAT THIS REPLACES, IN ONE SENTENCE: a `wl_shm` window arrives as CPU memory the compositor must read and upload
  * on every frame, and a dma-buf window arrives as a file descriptor the GPU can sample where the client put it. The

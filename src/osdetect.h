@@ -1,8 +1,10 @@
 /*
  * osdetect.h — what operating system the server is running on, said as data.
  *
- * Copyright © 2026 Kyle J. Cardoza. MIT licensed.
- * SPDX-License-Identifier: MIT
+ * Copyright © 2026 Kyle J. Cardoza.
+ * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * THE IDENTITY IS PARSED ONCE, AT STARTUP, AND THEN ONLY READ. A compositor that asked `uname` or opened
  * `/etc/os-release` while compositing would be doing file I/O in the frame loop, and the answer cannot change

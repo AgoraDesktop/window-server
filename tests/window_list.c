@@ -1,8 +1,10 @@
 /*
  * window_list — what a Dock is told about other applications' windows, and what it can do about them.
  *
- * Copyright © 2026 Kyle J. Cardoza. MIT licensed.
- * SPDX-License-Identifier: MIT
+ * Copyright © 2026 Kyle J. Cardoza.
+ * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * **THE CLAIM IS A LOOP, NOT A NUMBER IN A FRAME.** A shell component's data source is `agora_window_list`: a
  * snapshot of every window the server has, re-sent when the set changes. This probe is the smallest possible shell

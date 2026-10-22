@@ -1,8 +1,10 @@
 /*
  * renderer-gl.c — the same scene, drawn by the GPU through EGL and GLES2.
  *
- * Copyright © 2026 Kyle J. Cardoza. MIT licensed.
- * SPDX-License-Identifier: MIT
+ * Copyright © 2026 Kyle J. Cardoza.
+ * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Portions of this file may derive from GNUstep; see THIRD-PARTY.md.
  *
  * WHY THIS FILE EXISTS AND WHY IT IS TESTED NESTED FIRST. There are two independent halves to "acceleration": the
  * RENDERER (turning surfaces, shadows and the bar into triangles) and the DISPLAY PATH (how the finished frame
