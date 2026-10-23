@@ -232,7 +232,14 @@ static void seat_get_keyboard(struct wl_client *client, struct wl_resource *reso
 	wl_resource_set_implementation(keyboard->resource, &keyboard_implementation, keyboard,
 				       keyboard_destroy_resource);
 	keyboard_send_keymap(server, keyboard->resource);
-	wl_keyboard_send_repeat_info(keyboard->resource, 25, 600);
+	/* REPEAT POLICY IS A VERSION-4 EVENT, and the seat is advertised at version 5 but BOUND at whatever the
+	 * client asked for — so this resource may be a version 1, 2 or 3 keyboard, where `repeat_info` does not
+	 * exist. Sending it anyway puts an event on the wire that the client's own dispatch cannot name: at best
+	 * it is dropped, at worst it desynchronises a client that validates event opcodes. The seat's `name`
+	 * event above is guarded the same way. */
+	if (wl_resource_get_version(keyboard->resource) >= WL_KEYBOARD_REPEAT_INFO_SINCE_VERSION) {
+		wl_keyboard_send_repeat_info(keyboard->resource, 25, 600);
+	}
 }
 
 static void seat_get_touch(struct wl_client *client, struct wl_resource *resource, uint32_t id)

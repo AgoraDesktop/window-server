@@ -159,11 +159,16 @@ static void surface_destroy_resource(struct wl_resource *resource)
 	aws_shell_release_reserve(surface);
 	free(surface->title);
 	free(surface->app_id);
-	/* **FORGET IT FIRST, THEN TAKE IT OUT, THEN RE-DECIDE.** The focus has to stop naming this surface BEFORE
-	 * it is freed, and no event may name it while it is being destroyed — see `aws_seat_surface_gone`. Taking it
-	 * out of the list and rechecking afterwards is what hands the focus to whatever is left under the pointer. */
-	aws_seat_surface_gone(surface->server, surface);
+	/* **OUT OF THE LIST FIRST, THEN FORGOTTEN, THEN RE-DECIDED — AND THE ORDER IS THE WHOLE OF IT.** A focus
+	 * reassignment asks "who is topmost now?" by walking `server->surfaces`, and this surface is still the
+	 * TOPMOST MAPPED CANDIDATE at this point. Telling the seat first — which is what this function used to do —
+	 * let that walk choose the surface being destroyed, so the keyboard ended up naming storage that was freed
+	 * two lines later: every later focus decision read it. Unlinking first makes the dying surface a candidate
+	 * for nothing, and the reassignment it triggers can only answer with what is genuinely left. See
+	 * `tests/surface_lifetime.c`, which destroys a focused topmost window and asserts the keyboard reaches the
+	 * window underneath. */
 	wl_list_remove(&surface->link);
+	aws_seat_surface_gone(surface->server, surface);
 	/* **AND A DOCK IS TOLD THE WINDOW IS GONE**, after it has left the list and before the memory goes — the
 	 * snapshot walks the list, so the order is the whole of it. */
 	aws_shell_window_list_changed(surface->server);

@@ -137,3 +137,24 @@ add_test(NAME window-server-dmabuf
   COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-dmabuf.sh"
           "$<TARGET_FILE:window-server>" "$<TARGET_FILE:window-server-test-client>")
 set_tests_properties(window-server-dmabuf PROPERTIES SKIP_RETURN_CODE 77)
+
+# **AND THE KEYBOARD'S VERSION BOUNDARY, AS A LIVE PROTOCOL TEST.** `wl_keyboard.repeat_info` is a version-4 event
+# and the seat is advertised at 5, so a client that binds 1–3 gets a keyboard resource that must never see it. The
+# probe is the smallest real client — registry, seat, keyboard — and the runner binds 1, 2, 3, 4 and 5 in turn.
+add_executable(window-server-seat-version-probe seat_version.c)
+target_link_libraries(window-server-seat-version-probe PRIVATE PkgConfig::WAYLAND_CLIENT)
+add_test(NAME window-server-seat-versions
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-seat-versions.sh"
+    $<TARGET_FILE:window-server> $<TARGET_FILE:window-server-seat-version-probe>)
+
+# **AND A MAPPED SURFACE'S DESTRUCTOR, DRIVEN FOR REAL.** `surface_destroy_resource` must take a dying surface out of
+# the focus candidates BEFORE the seat reassigns the keyboard, or the reassignment chooses the surface being freed.
+# The probe maps two windows, destroys the topmost focused one, and asserts the keyboard reaches the window underneath
+# — the client-visible half of an ordering whose other half is a use-after-free.
+add_executable(window-server-surface-lifetime-probe surface_lifetime.c "${_generated}/agora-shell-protocol.c")
+add_dependencies(window-server-surface-lifetime-probe agora-shell-bindings)
+target_include_directories(window-server-surface-lifetime-probe PRIVATE "${_generated}")
+target_link_libraries(window-server-surface-lifetime-probe PRIVATE PkgConfig::WAYLAND_CLIENT)
+add_test(NAME window-server-surface-lifetime
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-surface-lifetime.sh"
+    $<TARGET_FILE:window-server> $<TARGET_FILE:window-server-surface-lifetime-probe>)

@@ -92,13 +92,20 @@ void aws_server_destroy(struct aws_server *server)
 	/* CLIENTS GO FIRST, because destroying the display with clients attached is a protocol error and not a
 	 * cleanup — libwayland says so by refusing. */
 	wl_display_destroy_clients(server->display);
-	wl_display_destroy(server->display);
 	/* **THE RENDERER GIVES ITS CONTEXT BACK BEFORE THE BACKEND GIVES ITS WINDOW BACK**, because an EGL surface
 	 * names an X window and a swapped frame is not something to do after the window is gone. */
 	aws_renderer_shutdown(server);
+	/* **AND THE BACKEND AND INPUT LET GO OF THE EVENT LOOP WHILE IT STILL EXISTS.** Their shutdown functions call
+	 * `wl_event_source_remove`, and Wayland requires a source to be removed while the loop that owns it is alive —
+	 * `wl_display_destroy` destroys the loop with the display. This function used to destroy the display FIRST and
+	 * then remove sources from the loop it had just freed, which is an invalid list operation on every ordinary
+	 * exit, measured or not. */
 	aws_backend_shutdown(server);
 	aws_input_shutdown(server);
 	aws_seat_finish(server);
+	/* **THE DISPLAY GOES LAST**, once nothing holds a source on its loop and no client resource names platform
+	 * state that has been released. */
+	wl_display_destroy(server->display);
 	free(server->dmabuf_formats);
 	free(server);
 }

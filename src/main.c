@@ -216,8 +216,12 @@ int main(int argc, char **argv)
 	 * leaves a screen showing its last frame, which is the failure every backend in this tree is written to
 	 * avoid. Registering them ON THE EVENT LOOP means the loop stops and the ordinary exit path runs, in the
 	 * ordinary order, with the display given back. */
-	wl_event_loop_add_signal(server->loop, SIGINT, on_signal, server);
-	wl_event_loop_add_signal(server->loop, SIGTERM, on_signal, server);
+	/* **AND THE HANDLES ARE KEPT, BECAUSE A SOURCE IS THE LOOP'S TO REMOVE AND NOBODY ELSE'S.** Discarding
+	 * them left two 64-byte sources registered on the loop at exit; `wl_display_destroy` frees the loop without
+	 * walking its source list, so they were leaked — MEASURED under LSan as "128 byte(s) in 2 object(s)". They
+	 * are removed below, while the loop is alive, which is the only time Wayland allows it. */
+	struct wl_event_source *sigint_source = wl_event_loop_add_signal(server->loop, SIGINT, on_signal, server);
+	struct wl_event_source *sigterm_source = wl_event_loop_add_signal(server->loop, SIGTERM, on_signal, server);
 	while (server->running) {
 		/* **A RENDER THAT IS DUE DOES NOT WAIT FOR AN EVENT, AND THAT IS THE WHOLE OF A BUG A PERSON SPOTTED.**
 		 * A timeout of -1 means BLOCK UNTIL SOMETHING HAPPENS — and the only things that happen are a client's
@@ -305,6 +309,15 @@ int main(int argc, char **argv)
 				break;
 			}
 		}
+	}
+
+	/* **THE SIGNAL SOURCES GO BEFORE THE LOOP DOES**, for the same reason the backend's and input's do: the
+	 * loop owns the list they are on, and `aws_server_destroy` destroys it. */
+	if (sigint_source != NULL) {
+		wl_event_source_remove(sigint_source);
+	}
+	if (sigterm_source != NULL) {
+		wl_event_source_remove(sigterm_source);
 	}
 
 	fprintf(stderr, "window-server: %d frame(s) composited\n", server->frames);
