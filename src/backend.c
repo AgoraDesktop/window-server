@@ -64,6 +64,12 @@ void aws_backend_present(struct aws_server *server)
 	if (server->backend.present != NULL) {
 		server->backend.present(server);
 	}
+	/* **AND THEN THE EVENTS PRESENTING MAY HAVE SWALLOWED.** Presenting flushes, and a flush is where a native
+	 * library reads the connection into its own queue — see `struct aws_backend`'s `drain`. Doing it here, after
+	 * whatever presented, is what makes it a property of presenting rather than of one present implementation. */
+	if (server->backend.drain != NULL) {
+		server->backend.drain(server);
+	}
 }
 
 /* **WHOEVER ALLOCATED THE PIXELS FREES THEM, AND THAT IS THE BACKEND.** An unconditional `free` here was

@@ -59,6 +59,10 @@ struct x11_state {
 	 * pointer the server already has. `shm` is zero when it is not, and every use of it is guarded. */
 	XShmSegmentInfo shm;
 	int shared;
+	/* NONZERO WHILE THE QUEUE IS BEING DRAINED, so a present reached from inside a drain cannot drain again
+	 * underneath itself. An Expose schedules a frame rather than presenting, but a drain is also reachable from
+	 * the descriptor callback and from startup, and one flag makes every path safe rather than one path argued. */
+	int draining;
 };
 
 /* **A WALL-CLOCK MILLISECOND, SO A DIAGNOSTIC CAN BE LINED UP WITH ANOTHER PROCESS'S.** Two logs that each say
@@ -93,19 +97,20 @@ static void x11_present(struct aws_server *server)
 	XFlush(x11->display);
 }
 
-/* THE X CONNECTION IS A DESCRIPTOR LIKE ANY OTHER, so it is handed to the WAYLAND event loop rather than
- * waited on separately: one loop, one place where the process blocks, and no second poll to keep in step. */
-static int x11_dispatch(int fd, uint32_t mask, void *data)
+/* **THE ONE PLACE THE HOST'S QUEUE IS EMPTIED.** `XPending` does the two things this needs: it flushes what is
+ * still buffered for the server, and it reads whatever has arrived off the connection — so the queue it then reports
+ * is the real one, and the loop beside it collects even the events Xlib pulled in during a flush or a setup call
+ * rather than only those that made the descriptor readable. It is FINITE: every iteration consumes one event, and a
+ * flood from the host simply means this returns with the queue non-empty and the descriptor readable, which is a
+ * callback the loop will make. */
+static void x11_drain_events(struct aws_server *server)
 {
-	struct aws_server *server = data;
 	struct x11_state *x11 = server->backend.data;
 
-	(void)fd;
-	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)) {
-		fprintf(stderr, "window-server: the X connection went away\n");
-		server->running = 0;
-		return 0;
+	if (x11->draining) {
+		return;
 	}
+	x11->draining = 1;
 	while (XPending(x11->display) > 0) {
 		XEvent event;
 
@@ -187,6 +192,22 @@ static int x11_dispatch(int fd, uint32_t mask, void *data)
 			break;
 		}
 	}
+	x11->draining = 0;
+}
+
+/* **THE DESCRIPTOR SAID SOMETHING ARRIVED, SO DRAIN.** The loop wakes this process only when the connection is
+ * readable; what it then empties may be more than what woke it, which is why the pump is shared. */
+static int x11_dispatch(int fd, uint32_t mask, void *data)
+{
+	struct aws_server *server = data;
+
+	(void)fd;
+	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)) {
+		fprintf(stderr, "window-server: the X connection went away\n");
+		server->running = 0;
+		return 0;
+	}
+	x11_drain_events(server);
 	return 0;
 }
 
@@ -380,6 +401,9 @@ int aws_backend_x11_start(struct aws_server *server)
 	server->backend.data = x11;
 	server->backend.present = x11_present;
 	server->backend.release_present = x11_release_present;
+	/* **AND THE DRAIN, WHICH EVERY PRESENT GOES THROUGH.** It is the backend's and not the present's on purpose:
+	 * the GL renderer replaces `present` with its own swap, and the queue a swap leaves behind is the same one. */
+	server->backend.drain = x11_drain_events;
 	server->backend.stop = x11_stop;
 	fprintf(stderr, "window-server: nested in an X window on %s\n", DisplayString(x11->display));
 	return 0;

@@ -165,6 +165,20 @@ struct aws_backend {
 	 * backend's MIT-SHM segment and XImage), and that is what this asks it to give back. NULL for a backend that
 	 * never had a copy path to release. */
 	void (*release_present)(struct aws_server *server);
+	/* **CALLED AFTER EVERY PRESENT, WHATEVER DID THE PRESENTING, AND IT IS THE NATIVE LIBRARY'S QUEUE IT
+	 * EMPTIES.** A windowed backend's presentation goes through a library that keeps its OWN buffered input: Xlib
+	 * reads events off the connection into an internal queue during `XFlush`/`XSync` and during the setup calls
+	 * that precede them, and this server only ever drained that queue from its descriptor-ready callback. Once the
+	 * socket is emptied into Xlib's queue the descriptor is NOT readable, so the event loop has no reason to call
+	 * the callback and a key release sits in a queue nobody looks at until the next mouse move — which is exactly
+	 * the "a tap repeats until the pointer moves" a person reported, MEASURED from a nested session.
+	 *
+	 * IT BELONGS HERE rather than inside one backend's `present` because A RENDERER MAY REPLACE `present` (the GL
+	 * one does, through its swap) — so a drain bolted onto the CPU path would be missing from the path that most
+	 * needs it. Called after `present` has returned, so a drain may not present again recursively. NULL for a
+	 * backend with no such queue. */
+	void (*drain)(struct aws_server *server);
+
 	/* GIVE BACK WHATEVER `start` TOOK. */
 	void (*stop)(struct aws_server *server);
 
