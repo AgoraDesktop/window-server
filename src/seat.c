@@ -260,7 +260,7 @@ static void bind_seat(struct wl_client *client, void *data, uint32_t version, ui
 {
 	struct aws_server *server = data;
 	struct wl_resource *resource = wl_resource_create(client, &wl_seat_interface,
-							  version < 5 ? version : 5, id);
+							  version < 8 ? version : 8, id);
 
 	if (resource == NULL) {
 		wl_client_post_no_memory(client);
@@ -738,7 +738,19 @@ void aws_seat_init(struct aws_server *server)
 	wl_list_init(&server->pointers);
 	wl_list_init(&server->keyboards);
 	seat_build_keymap(server);
-	wl_global_create(server->display, &wl_seat_interface, 5, server, bind_seat);
+	/* **THE SEAT IS ADVERTISED AT 8, WHICH IS WHERE A POINTER LEARNS `axis_value120`.** The seat's own events stop
+	 * at version 2 (`name`); every number above it exists to let a POINTER or a KEYBOARD be bound higher, and a
+	 * child object inherits its parent's bound version — so a seat capped at 5 caps every pointer at 5, and the
+	 * v8 spelling of a wheel's steps can never be reached no matter how carefully it is implemented. Measured: a
+	 * client asking for 8 was answered with 5, which made the whole `axis_value120` path dead code until this
+	 * number moved.
+	 *
+	 * 8 AND NOT THE LIBRARY'S MAXIMUM: version 9 adds `axis_relative_direction`, which this server does not send
+	 * (a natural-scroll flag the compositor would have to know from the device), and advertising a version whose
+	 * new events never arrive is a promise a client may wait on. The clamp keeps a build against an older
+	 * libwayland honest as well. */
+	wl_global_create(server->display, &wl_seat_interface,
+			 wl_seat_interface.version < 8u ? wl_seat_interface.version : 8u, server, bind_seat);
 }
 
 void aws_seat_finish(struct aws_server *server)
