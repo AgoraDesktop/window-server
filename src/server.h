@@ -350,6 +350,9 @@ struct aws_server {
 
 	/* ---- THE SEAT. Which surfaces have the pointer and the keyboard, where the pointer is, and the xkb state
 	 * that turns a key into the MODIFIER STATE a client needs to translate it. ---- */
+	/* **ONE NODE PER CLIENT THAT ASKED**, and the two element types are here rather than private to `seat.c`
+	 * because the list member is here: a type declared on one side of that line and used on the other is how a
+	 * definition and its user drift apart. */
 	struct wl_list pointers;		/* struct aws_pointer, one per client that asked */
 	struct wl_list keyboards;		/* struct aws_keyboard */
 	struct aws_surface *pointer_focus;	/* the surface the pointer is over, or NULL */
@@ -360,6 +363,10 @@ struct aws_server {
 	int pointer_x;				/* the pointer, in OUTPUT coordinates */
 	int pointer_y;
 	int pointer_inside;			/* the pointer is inside the output at all */
+	/* AN AXIS HAS BEEN SENT SINCE THE LAST FRAME, which is what makes `axis_source` once per frame rather than
+	 * once per axis — the protocol asks for it in the frame the axis events belong to, and repeating it for the
+	 * second axis of one gesture would be a lie about how many gestures there were. */
+	int pointer_axis_frame_open;
 	struct xkb_context *xkb_context;
 	struct xkb_keymap *xkb_keymap;
 	struct xkb_state *xkb_state;
@@ -508,6 +515,16 @@ void aws_shell_menu_bar_area(struct aws_server *server, int *x, int *y, int *wid
 /* The packing of the status area, which a client adding or removing an item has just invalidated. */
 void aws_shell_place_status_items(struct aws_server *server);
 
+struct aws_pointer {
+	struct wl_resource *resource;
+	struct wl_list link;
+};
+
+struct aws_keyboard {
+	struct wl_resource *resource;
+	struct wl_list link;
+};
+
 /* seat.c — the seat: the devices, the focus, and the keymap. */
 void aws_seat_init(struct aws_server *server);
 void aws_seat_finish(struct aws_server *server);
@@ -518,6 +535,19 @@ void aws_seat_pointer_enter(struct aws_server *server, int x, int y);
 void aws_seat_pointer_leave(struct aws_server *server);
 void aws_seat_pointer_motion(struct aws_server *server, int x, int y);
 void aws_seat_pointer_button(struct aws_server *server, uint32_t evdev_button, int pressed);
+/* **THE WHEEL, WHICH IS A MOTION THAT CARRIES A DISTANCE.** A scroll is one axis of one frame: `axis` is
+ * `WL_POINTER_AXIS_*`, `value` the precise distance in that axis's own units, `source` where the motion came from
+ * (a wheel is not a trackpad is not a continuous device), and the two discrete numbers are the SAME distance said
+ * in whole steps — `discrete` for `wl_pointer.axis_discrete` (v5-v7) and `value120` for `wl_pointer.axis_value120`
+ * (v8+). Exactly one of those two goes on the wire, chosen by the client's bound version, which is what keeps a
+ * wheel tick from being counted twice.
+ *
+ * `aws_seat_pointer_frame` closes the batch: `wl_pointer.frame` is the protocol's "these belong together", and a
+ * backend that sends two axes in one gesture calls it once. Clients below version 5 have no frame at all and are
+ * sent the axis events alone, exactly as the protocol says. */
+void aws_seat_pointer_axis(struct aws_server *server, uint32_t axis, wl_fixed_t value, uint32_t source,
+			   int32_t discrete, int32_t value120);
+void aws_seat_pointer_frame(struct aws_server *server);
 /* **RE-DECIDE WHAT THE POINTER IS OVER, WITHOUT WAITING FOR IT TO MOVE.** What is under the pointer changes when
  * a surface is mapped, unmapped, moved, shown, hidden or restacked — none of which is a motion — so every one of
  * those doors calls this. Without it a surface that appears under a stationary pointer never gets the

@@ -45,15 +45,9 @@
 #include <wayland-server-protocol.h>
 #include <xkbcommon/xkbcommon.h>
 
-struct aws_pointer {
-	struct wl_resource *resource;
-	struct wl_list link;
-};
-
-struct aws_keyboard {
-	struct wl_resource *resource;
-	struct wl_list link;
-};
+/* **THE TWO ELEMENT TYPES LIVE IN `server.h`**, beside the lists they belong to: a test that wants to put a pointer
+ * on the seat without a client asking for one has to be able to build the element, and a second copy of the struct
+ * in a test file is a copy that can silently disagree with this one. */
 
 static uint32_t seat_now_ms(void)
 {
@@ -635,6 +629,81 @@ void aws_seat_pointer_button(struct aws_server *server, uint32_t evdev_button, i
 			aws_seat_pointer_recheck(server);
 		}
 	}
+}
+
+/* **ONE AXIS OF ONE FRAME, ROUTED LIKE A MOTION AND DELIVERED LIKE A BUTTON.** Three things decide what a client
+ * sees here, and each has its own reason for being asked in this order:
+ *
+ *   WHERE IT GOES is `aws_seat_pointer_target`'s answer, the same one motion and buttons use — a capture takes it
+ *   wherever the pointer is, a surface under the pointer otherwise, a tracking menu's fallback over the desktop.
+ *   The focus is re-established first, because a window that appeared under a stationary pointer would otherwise
+ *   scroll its neighbour; the recheck sends the `enter` the client is owed BEFORE the axis, which is the order a
+ *   client needs to accept the scroll at all.
+ *
+ *   WHAT IT IS is split by version, and the split is the whole of "no double counting": a wheel's distance can be
+ *   said precisely (`axis`) and in steps (`axis_discrete` from v5, `axis_value120` from v8 — never both), and a
+ *   client that bound below v5 hears only the precise value. `axis_source` is a v5 event and belongs to the frame
+ *   the axis events are in, so it is sent once per frame.
+ *
+ *   AND THE FRAME IS THE CALLER'S TO CLOSE. libinput delivers one event carrying both axes of a trackpad gesture, so
+ *   the backend calls this once per axis and then `aws_seat_pointer_frame` once — which is what makes a client's
+ *   single scroll handler run once per gesture instead of once per axis.
+ */
+void aws_seat_pointer_axis(struct aws_server *server, uint32_t axis, wl_fixed_t value, uint32_t source,
+			   int32_t discrete, int32_t value120)
+{
+	struct aws_surface *surface;
+	struct aws_pointer *pointer;
+	uint32_t time = seat_now_ms();
+
+	surface = aws_seat_pointer_target(server, aws_surface_at(server, server->pointer_x, server->pointer_y));
+	pointer_set_focus(server, surface);
+	if (surface == NULL) {
+		return;
+	}
+	wl_list_for_each(pointer, &server->pointers, link) {
+		uint32_t version;
+
+		if (!same_client(pointer->resource, surface->resource)) {
+			continue;
+		}
+		version = wl_resource_get_version(pointer->resource);
+		if (version >= WL_POINTER_AXIS_SOURCE_SINCE_VERSION && !server->pointer_axis_frame_open) {
+			wl_pointer_send_axis_source(pointer->resource, source);
+		}
+		if (version >= WL_POINTER_AXIS_VALUE120_SINCE_VERSION) {
+			/* **THE 120THS ARE THE WHEEL'S OWN UNIT AND THE PRECISE VALUE IS THE DISTANCE.** A v8 client that was
+			 * also sent `axis_discrete` would be told the same motion twice, which is the double count the
+			 * protocol's own note warns about — so the older event is not sent at all here. */
+			if (value120 != 0) {
+				wl_pointer_send_axis_value120(pointer->resource, axis, value120);
+			}
+		} else if (version >= WL_POINTER_AXIS_DISCRETE_SINCE_VERSION) {
+			if (discrete != 0) {
+				wl_pointer_send_axis_discrete(pointer->resource, axis, discrete);
+			}
+		}
+		wl_pointer_send_axis(pointer->resource, time, axis, value);
+	}
+	server->pointer_axis_frame_open = 1;
+}
+
+void aws_seat_pointer_frame(struct aws_server *server)
+{
+	struct aws_pointer *pointer;
+
+	/* NOTHING WAS SENT, SO THERE IS NO FRAME TO CLOSE — and a `frame` with no events in it is a client's scroll
+	 * handler running on nothing, once per motion, which is exactly the kind of quiet wrongness a frame exists to
+	 * avoid. */
+	if (!server->pointer_axis_frame_open) {
+		return;
+	}
+	wl_list_for_each(pointer, &server->pointers, link) {
+		if (wl_resource_get_version(pointer->resource) >= WL_POINTER_FRAME_SINCE_VERSION) {
+			wl_pointer_send_frame(pointer->resource);
+		}
+	}
+	server->pointer_axis_frame_open = 0;
 }
 
 void aws_seat_key(struct aws_server *server, uint32_t evdev_keycode, int pressed)

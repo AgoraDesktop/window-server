@@ -106,6 +106,46 @@ static void pointer_move(struct aws_server *server, struct libinput_state *in)
 	aws_seat_pointer_motion(server, (int)in->x, (int)in->y);
 }
 
+/* **ONE SCROLL EVENT, BOTH AXES, ONE FRAME.** libinput packs a two-axis gesture into a single event, and the
+ * protocol wants the axes in one frame — so both are sent here and `aws_seat_pointer_frame` closes it once. The
+ * position is refreshed first for the same reason a button does it: a scroll can arrive with no motion before it,
+ * and where it goes is decided by where the pointer IS.
+ *
+ * THE TWO NUMBERS ARE ONE DISTANCE SAID TWICE, and which of them reaches the client is the client's version's
+ * business (`aws_seat_pointer_axis` decides): `get_scroll_value` is the precise distance and
+ * `get_scroll_value_v120` the same motion in 120ths of a wheel step. A finger gesture has no discrete steps at all,
+ * and libinput answers zero there — which is the honest answer and the one that stops a trackpad from being
+ * reported as clicking its way down a document. */
+static void scroll_event(struct aws_server *server, struct libinput_event *event, uint32_t source)
+{
+	struct libinput_state *in = server->input;
+	struct libinput_event_pointer *pointer = libinput_event_get_pointer_event(event);
+	int sent = 0;
+
+	pointer_move(server, in);
+	if (libinput_event_pointer_has_axis(pointer, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL)) {
+		double value = libinput_event_pointer_get_scroll_value(pointer, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+		int32_t value120 = libinput_event_pointer_get_scroll_value_v120(pointer,
+									       LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+
+		aws_seat_pointer_axis(server, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_double(value), source,
+				      value120 / 120, value120);
+		sent = 1;
+	}
+	if (libinput_event_pointer_has_axis(pointer, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL)) {
+		double value = libinput_event_pointer_get_scroll_value(pointer, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL);
+		int32_t value120 = libinput_event_pointer_get_scroll_value_v120(pointer,
+									       LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL);
+
+		aws_seat_pointer_axis(server, WL_POINTER_AXIS_HORIZONTAL_SCROLL, wl_fixed_from_double(value), source,
+				      value120 / 120, value120);
+		sent = 1;
+	}
+	if (sent) {
+		aws_seat_pointer_frame(server);
+	}
+}
+
 static void handle_event(struct aws_server *server, struct libinput_event *event)
 {
 	struct libinput_state *in = server->input;
@@ -156,10 +196,30 @@ static void handle_event(struct aws_server *server, struct libinput_event *event
 			     libinput_event_keyboard_get_key_state(keyboard) == LIBINPUT_KEY_STATE_PRESSED);
 		break;
 	}
+	/* **THE WHEEL, AS THREE EVENT TYPES AND NOT ONE.** libinput 1.19 split the scroll event by SOURCE, because a
+	 * wheel, a finger on a trackpad and a continuous device are three different gestures with three different
+	 * units — and the old single `POINTER_AXIS` event is still sent **in addition**, which is exactly the double
+	 * count the report names. Its own header says so: "Ignore this event if you are processing SCROLL_WHEEL,
+	 * SCROLL_FINGER and SCROLL_CONTINUOUS." So the legacy type is ignored below, deliberately, and never both. */
+	case LIBINPUT_EVENT_POINTER_SCROLL_WHEEL:
+		scroll_event(server, event, WL_POINTER_AXIS_SOURCE_WHEEL);
+		break;
+	case LIBINPUT_EVENT_POINTER_SCROLL_FINGER:
+		scroll_event(server, event, WL_POINTER_AXIS_SOURCE_FINGER);
+		break;
+	case LIBINPUT_EVENT_POINTER_SCROLL_CONTINUOUS:
+		scroll_event(server, event, WL_POINTER_AXIS_SOURCE_CONTINUOUS);
+		break;
+	case LIBINPUT_EVENT_POINTER_AXIS:
+		/* **IGNORED, AND THAT IS THE FIX RATHER THAN AN OMISSION.** This is the deprecated event libinput still
+		 * emits beside the three above; processing it as well would deliver every wheel tick twice, once through
+		 * the modern path and once through this one. A build against a libinput older than the split would need
+		 * this branch instead, and the build requires 1.19 or later for the three types to exist at all. */
+		break;
 	default:
-		/* SCROLL, GESTURES, TABLETS AND SWITCHES ARE NOT DELIVERED YET, and they are dropped here rather than
-		 * half-translated: a client sent an axis event nothing in this tree draws is a client that learned
-		 * something untrue about its input. */
+		/* GESTURES, TABLETS AND SWITCHES ARE NOT DELIVERED YET, and they are dropped here rather than
+		 * half-translated: a client sent an event nothing in this tree draws is a client that learned something
+		 * untrue about its input. */
 		break;
 	}
 }

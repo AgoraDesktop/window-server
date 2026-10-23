@@ -158,3 +158,12 @@ target_link_libraries(window-server-surface-lifetime-probe PRIVATE PkgConfig::WA
 add_test(NAME window-server-surface-lifetime
   COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-surface-lifetime.sh"
     $<TARGET_FILE:window-server> $<TARGET_FILE:window-server-surface-lifetime-probe>)
+
+# **AND THE WHEEL, AS A VERSION SWEEP.** `wl_pointer.axis` is version 1; `axis_source` and a DISCRETE step count arrive
+# at 5, and 8 spells the same steps as `axis_value120` instead. Sending both spellings is a double count and sending a
+# v8 event to a v4 client is a protocol violation, so each bound version is driven separately and the exact sequence is
+# asserted. The seat is compiled in as it ships and the five `wl_pointer_send_*` doors are interposed.
+add_executable(window-server-pointer-axis pointer_axis.c "${CMAKE_CURRENT_SOURCE_DIR}/../src/seat.c")
+target_include_directories(window-server-pointer-axis PRIVATE "${_generated}" "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(window-server-pointer-axis PRIVATE PkgConfig::WAYLAND_SERVER PkgConfig::XKBCOMMON)
+add_test(NAME window-server-pointer-axis COMMAND window-server-pointer-axis)

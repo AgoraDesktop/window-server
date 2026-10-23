@@ -165,6 +165,33 @@ static void x11_drain_events(struct aws_server *server)
 			uint32_t button;
 			int pressed = event.type == ButtonPress;
 
+			/* **BUTTONS 4 TO 7 ARE THE WHEEL AND NOT BUTTONS AT ALL.** A nested session's mouse scrolls by
+			 * pressing them, and the mapping below used to fall through to the "other button" arm and report
+			 * BTN_SIDE — so scrolling in the demo clicked things instead of scrolling. X has no scroll event: the
+			 * wheel IS these four button numbers, and the conversion is the whole of what a nested backend owes.
+			 *
+			 * **A SEPARATE GAP FROM THE libinput PATH, deliberately.** This is the development backend's
+			 * translation of an X button into the same axis the real input path produces; the units are the ones
+			 * a wheel tick means to libinput (15.0 distance, 120 hundred-and-twentieths, one discrete step) so
+			 * that a client cannot tell which backend fed it.
+			 *
+			 * AND THE SIGNS ARE X'S, NOT WAYLAND'S: button 4 is wheel UP, and the protocol's positive vertical
+			 * distance is DOWN. Flipped once, here, so nothing above this line has to know. */
+			if (event.xbutton.button >= Button4 && event.xbutton.button <= 7) {
+				int up = (event.xbutton.button == Button4);
+				int down = (event.xbutton.button == Button5);
+				int left = (event.xbutton.button == 6);
+				uint32_t axis = (left || event.xbutton.button == 7)
+					? WL_POINTER_AXIS_HORIZONTAL_SCROLL
+					: WL_POINTER_AXIS_VERTICAL_SCROLL;
+				int32_t v120 = (up || left) ? -120 : 120;
+
+				aws_seat_pointer_motion(server, event.xbutton.x, event.xbutton.y);
+				aws_seat_pointer_axis(server, axis, wl_fixed_from_double(v120 / 8.0),
+						      WL_POINTER_AXIS_SOURCE_WHEEL, v120 / 120, v120);
+				aws_seat_pointer_frame(server);
+				break;
+			}
 			switch (event.xbutton.button) {
 			case Button1: button = 0x110; break;	/* BTN_LEFT */
 			case Button2: button = 0x112; break;	/* BTN_MIDDLE */
