@@ -29,11 +29,17 @@
  * name: a client that says "the bottom 96 pixels are mine" gets the Dock without the server knowing what a Dock is.
  */
 
+/* **`pipe2` IS GLIBC'S, AND THE SELECTION NEEDS ITS ATOMIC CLOSE-ON-EXEC.** A pipe made with `pipe` and then
+ * `fcntl` twice has a window in which a fork could leak the descriptors into a child that has no business with either
+ * end of an application's clipboard. */
+#define _GNU_SOURCE
 #include "server.h"
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "agora-shell-server-protocol.h"
 
@@ -865,6 +871,172 @@ static void shell_get_window_list(struct wl_client *client, struct wl_resource *
 	aws_shell_window_list_changed(server);
 }
 
+/* ==================================================================================================
+ * THE SELECTION — one owner, its types, and an fd between two clients. See CLIPBOARD-PLAN.md.
+ * ================================================================================================== */
+
+/* **ANNOUNCED UNSOLICITED, SO THE LIST OF BOUND SHELLS IS THE ONLY WAY TO SAY IT.** The order matters and is the
+ * protocol's: `selection_lost` first — so a reader's cache is emptied before anything is added to it — and then one
+ * `selection_offer` per type, in the owner's own order of preference. */
+static void selection_announce(struct aws_server *server)
+{
+	struct aws_shell_binding *binding, *tmp;
+	int i;
+
+	wl_list_for_each_safe(binding, tmp, &server->shell_bindings, link) {
+		/* **ONLY TO A CLIENT THAT BOUND AT 7.** These events are unsolicited, so every bound shell is a candidate —
+		 * and posting one above a client's version is a protocol violation, not a no-op. */
+		if (wl_resource_get_version(binding->resource) < 7) {
+			continue;
+		}
+		agora_shell_send_selection_lost(binding->resource);
+		for (i = 0; i < server->selection_type_count; i++) {
+			agora_shell_send_selection_offer(binding->resource, server->selection_types[i]);
+		}
+	}
+}
+
+/* **ONE PLACE THAT CHANGES THE OWNER, SO THE ANNOUNCEMENT CANNOT BE FORGOTTEN.** Called with a NULL owner to clear. It
+ * copies the types because the request's array is the client's and lives only for the call. */
+static void selection_replace(struct aws_server *server, struct wl_resource *owner, char **types, int count)
+{
+	int i;
+
+	for (i = 0; i < server->selection_type_count; i++) {
+		free(server->selection_types[i]);
+		server->selection_types[i] = NULL;
+	}
+	server->selection_type_count = 0;
+	server->selection_owner = owner;
+	/* **CAPPED AND REFUSED RATHER THAN TRUNCATED**: a client offering more types than the server keeps would
+	 * otherwise believe it had offered all of them. */
+	if (count > (int)(sizeof server->selection_types / sizeof server->selection_types[0])) {
+		count = (int)(sizeof server->selection_types / sizeof server->selection_types[0]);
+	}
+	for (i = 0; owner != NULL && i < count; i++) {
+		if (types[i] == NULL) {
+			continue;
+		}
+		server->selection_types[server->selection_type_count] = strdup(types[i]);
+		if (server->selection_types[server->selection_type_count] != NULL) {
+			server->selection_type_count++;
+		}
+	}
+	selection_announce(server);
+}
+
+static int selection_offers(struct aws_server *server, const char *mime_type)
+{
+	int i;
+
+	for (i = 0; i < server->selection_type_count; i++) {
+		if (server->selection_types[i] != NULL && strcmp(server->selection_types[i], mime_type) == 0) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* **AN `array` IS OPAQUE BYTES, NOT A LIST OF POINTERS.** Wayland hands an array argument over as the bytes the client
+ * put in it, so a type list is the strings written back to back, each NUL-terminated — and this walks that blob rather
+ * than treating it as a `char **`, which is what the first version did and what took the server down on the first
+ * `set_selection` (a `strdup` of a pointer that was never a pointer). The encoding is stated in the protocol XML, because
+ * an array of strings needs saying. */
+static void shell_set_selection(struct wl_client *client, struct wl_resource *resource, struct wl_array *types)
+{
+	struct aws_server *server = wl_resource_get_user_data(resource);
+	char *list[32];
+	const char *cursor = (const char *)types->data;
+	const char *end = cursor + types->size;
+	int count = 0;
+
+	(void)client;
+	if (server == NULL) {
+		return;
+	}
+	while (cursor < end && count < (int)(sizeof list / sizeof list[0])) {
+		size_t length = strnlen(cursor, (size_t)(end - cursor));
+
+		if (length == 0) {
+			break;			/* an empty type is not a type */
+		}
+		list[count++] = (char *)cursor;
+		cursor += length + 1;
+	}
+	/* THE OWNER IS THE SHELL RESOURCE, so a client that goes away takes its selection with it — see the destroy
+	 * handler below, which is the same path a `clear_selection` takes. */
+	selection_replace(server, resource, list, count);
+}
+
+static void shell_clear_selection(struct wl_client *client, struct wl_resource *resource)
+{
+	struct aws_server *server = wl_resource_get_user_data(resource);
+
+	(void)client;
+	if (server == NULL) {
+		return;
+	}
+	if (server->selection_owner == resource) {
+		selection_replace(server, NULL, NULL, 0);
+	}
+}
+
+/* **A REQUEST IS ANSWERED WITH AN FD, OR WITH A REASON, AND NEVER WITH SILENCE.** The pipe is created here and its two
+ * ends are posted immediately, one to each client: the server holds neither, reads neither, and cannot block on
+ * either. The write end goes to the owner (`selection_requested`), the read end to the asker (`selection_sent`). */
+static void shell_request_selection(struct wl_client *client, struct wl_resource *resource, const char *mime_type)
+{
+	struct aws_server *server = wl_resource_get_user_data(resource);
+	int fds[2];
+
+	(void)client;
+	if (server == NULL || mime_type == NULL) {
+		return;
+	}
+	if (server->selection_owner == NULL) {
+		agora_shell_send_selection_refused(resource, mime_type, AGORA_SHELL_SELECTION_REFUSAL_NO_OWNER);
+		return;
+	}
+	if (!selection_offers(server, mime_type)) {
+		agora_shell_send_selection_refused(resource, mime_type, AGORA_SHELL_SELECTION_REFUSAL_WRONG_TYPE);
+		return;
+	}
+	if (pipe2(fds, O_CLOEXEC) != 0) {
+		/* NOT A REFUSAL: the selection is there and the type is there, and the server has run out of descriptors.
+		 * The protocol's answer to that is an error on the client, which is what this posts. */
+		wl_client_post_no_memory(client);
+		return;
+	}
+	agora_shell_send_selection_requested(server->selection_owner, mime_type, fds[1]);
+	agora_shell_send_selection_sent(resource, mime_type, fds[0]);
+	/* OUR COPIES GO, AND ONLY OURS: libwayland has duplicated both into the messages. */
+	close(fds[0]);
+	close(fds[1]);
+}
+
+/* **A SHELL RESOURCE GOING AWAY TAKES TWO THINGS WITH IT**: its place in the broadcast list, and the selection if it was
+ * the owner — which is the promise stated in the plan, that a selection dies with its owner.
+ *
+ * THE RESOURCE'S USER DATA IS STILL THE SERVER, and that is deliberate: every request on this interface reads the server
+ * out of it, and moving the pointer to a wrapper would have made eight working handlers wrong to save this one search.
+ * The node is found by its resource instead, in a list that is as long as the number of clients. */
+static void agora_shell_destroy_resource(struct wl_resource *resource)
+{
+	struct aws_server *server = wl_resource_get_user_data(resource);
+	struct aws_shell_binding *binding, *tmp;
+
+	wl_list_for_each_safe(binding, tmp, &server->shell_bindings, link) {
+		if (binding->resource == resource) {
+			wl_list_remove(&binding->link);
+			free(binding);
+			break;
+		}
+	}
+	if (server->selection_owner == resource) {
+		selection_replace(server, NULL, NULL, 0);
+	}
+}
+
 static const struct agora_shell_interface agora_shell_implementation = {
 	shell_get_window,
 	shell_get_output,
@@ -874,20 +1046,45 @@ static const struct agora_shell_interface agora_shell_implementation = {
 	shell_reopen_window,
 	shell_get_dock_menu,
 	shell_dock_menu_action,
+	shell_set_selection,
+	shell_clear_selection,
+	shell_request_selection,
 };
 
 static void bind_agora_shell(struct wl_client *client, void *data, uint32_t version, uint32_t id)
 {
-	struct wl_resource *resource = wl_resource_create(client, &agora_shell_interface, version, id);
+	struct aws_server *server = data;
+	struct aws_shell_binding *binding = calloc(1, sizeof *binding);
+	struct wl_resource *resource;
 
-	if (resource == NULL) {
+	if (binding == NULL) {
 		wl_client_post_no_memory(client);
 		return;
 	}
-	wl_resource_set_implementation(resource, &agora_shell_implementation, data, NULL);
+	resource = wl_resource_create(client, &agora_shell_interface, version, id);
+	if (resource == NULL) {
+		free(binding);
+		wl_client_post_no_memory(client);
+		return;
+	}
+	binding->server = server;
+	binding->resource = resource;
+	wl_list_insert(server->shell_bindings.prev, &binding->link);
+	/* THE USER DATA IS THE SERVER, as it always was: the eight requests on this interface read it. */
+	wl_resource_set_implementation(resource, &agora_shell_implementation, server,
+				       agora_shell_destroy_resource);
+	/* **A CLIENT THAT BINDS AFTER SOMEBODY COPIED STILL HAS TO KNOW WHAT IS ON THE CLIPBOARD**, which is why the
+	 * current offer is replayed to a new binding rather than only announced on change. */
+	if (server->selection_owner != NULL && version >= 7) {
+		int i;
+
+		for (i = 0; i < server->selection_type_count; i++) {
+			agora_shell_send_selection_offer(resource, server->selection_types[i]);
+		}
+	}
 }
 
 void aws_shell_init(struct aws_server *server)
 {
-	wl_global_create(server->display, &agora_shell_interface, 6, server, bind_agora_shell);
+	wl_global_create(server->display, &agora_shell_interface, 7, server, bind_agora_shell);
 }

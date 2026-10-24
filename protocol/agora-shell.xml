@@ -36,7 +36,7 @@
     Copyright © 2026 Kyle J. Cardoza.
   </copyright>
 
-  <interface name="agora_shell" version="6">
+  <interface name="agora_shell" version="7">
     <description summary="the window server's own window management">
       One global. It hands out the three objects above it: a window, which is what a surface becomes, an output,
       which is where the work area comes from, and a window list, which is what a shell component asks for.
@@ -49,7 +49,11 @@
       `agora_window.set_activatable`, the door a Dock needs and no application does. **VERSION 5 ADDED
       `reopen_window`**, the question a tile asks when the application has nothing to raise. **VERSION 6 ADDS
       `get_dock_menu` and `dock_menu_action`**: the two halves of a tile's menu, and the first thing in this
-      protocol that carries a MENU rather than a window's property.
+      protocol that carries a MENU rather than a window's property. **VERSION 7 ADDS THE SELECTION**: `set_selection`,
+      `clear_selection`, `request_selection` and the five events that carry an offer, an fd, or a refusal — the first
+      thing in this protocol that says anything about an application other than the one being talked to. See
+      `CLIPBOARD-PLAN.md` for why the compositor owns it, why the transfer is an fd rather than a copy, and what a
+      client bound below 7 never sees.
     </description>
 
     <enum name="error">
@@ -191,6 +195,106 @@
       <arg name="window" type="uint" summary="the window the menu was asked about"/>
       <arg name="item" type="int" summary="the id the application gave the item it published"/>
     </request>
+
+    <!-- ============================================================================================ -->
+    <!-- THE SELECTION, WHICH IS THE FIRST THING HERE THAT IS ABOUT MORE THAN ONE APPLICATION.          -->
+    <!-- ============================================================================================ -->
+
+    <enum name="selection_refusal">
+      <description summary="why a selection request could not be served">
+        **THREE ANSWERS, BECAUSE THEY MEAN THREE DIFFERENT THINGS TO A READER** — and because silence, which is what a
+        protocol without them would give, cannot be told apart from "there is nothing on the clipboard". A paste that
+        silently becomes the empty string is the failure people actually hate.
+      </description>
+      <entry name="no_owner" value="0" summary="nothing is on the clipboard"/>
+      <entry name="wrong_type" value="1" summary="an owner exists but cannot serve that type"/>
+      <entry name="owner_gone" value="2" summary="the owner disappeared between the offer and the request"/>
+    </enum>
+
+    <request name="set_selection" since="7">
+      <description summary="this client owns the selection, and these are the types it can serve">
+        **IT REPLACES WHATEVER WAS THERE, FROM WHICHEVER CLIENT, AND THERE IS NO FOCUS CHECK.** A background
+        application may own the selection — that is what "copy from a window that just lost focus" means — and gating
+        this on focus would be a policy nobody asked for.
+
+        The types are MIME types (`text/plain;charset=utf-8`, `image/png`), in the owner's order of preference, and
+        **THE ARRAY IS THEIR BYTES RATHER THAN AN ARRAY OF POINTERS**: an `array` is opaque to Wayland, so the strings are
+        written back to back with a NUL after each. A client that marshals a `char **` sends pointers to itself, which is
+        a mistake the server now cannot make on its behalf. The
+        server announces them to every client as `selection_offer`, one event per type, preceded by `selection_lost` if
+        there was a previous owner — so a reader has exactly one transition to handle.
+
+        **NOTHING IS SENT WITH THIS REQUEST.** The owner produces bytes only when somebody asks (`selection_requested`),
+        which is what keeps the server out of the data path entirely.
+      </description>
+      <arg name="types" type="array"
+           summary="MIME types this client can serve, each NUL-terminated, back to back"/>
+    </request>
+
+    <request name="clear_selection" since="7">
+      <description summary="this client no longer owns anything">
+        The owner giving the selection up while it is still running. Every client hears `selection_lost`. An owner that
+        destroys its shell resource — or whose connection goes away — has the same effect without asking.
+      </description>
+    </request>
+
+    <request name="request_selection" since="7">
+      <description summary="give me a readable fd for this type">
+        **THE ANSWER IS A FILE DESCRIPTOR, NOT DATA.** The server creates a pipe, hands the WRITE end to the owner
+        (`selection_requested`) and the READ end to the asker (`selection_sent`). The owner writes and closes; the asker
+        reads to EOF. Nothing passes through the server: no bytes, no size limit, and no way for a hostile owner to make
+        the compositor allocate a payload.
+
+        A request that cannot be served is answered immediately and specifically with `selection_refused`, never by
+        silence. A request that CAN be served is answered with the fd BEFORE the data is written — the promise is the
+        fd, and EOF is the end of the payload. A reader that must not block reads with `O_NONBLOCK` and treats `EAGAIN`
+        as "not yet".
+      </description>
+      <arg name="mime_type" type="string" summary="the type wanted, exactly as it was offered"/>
+    </request>
+
+    <event name="selection_offer" since="7">
+      <description summary="the selection offers this type">
+        One event per type, sent to every client when the selection changes, after any `selection_lost` that came with
+        the change. **UNSOLICITED**, which is what makes the reader's cache possible: a client that wants to know what
+        can be pasted knows it without asking, and a client that does not care ignores this.
+      </description>
+      <arg name="mime_type" type="string"/>
+    </event>
+
+    <event name="selection_lost" since="7">
+      <description summary="there is no selection any more">
+        The owner cleared it, destroyed its resource, or was replaced. A reader's cache is empty from this moment.
+      </description>
+    </event>
+
+    <event name="selection_requested" since="7">
+      <description summary="somebody wants this type; write it into fd">
+        To the OWNER. The fd is the write end of a pipe whose read end is already on its way to the asker. The owner
+        writes the bytes, closes the fd, and is done; the server neither knows nor cares how much was written.
+      </description>
+      <arg name="mime_type" type="string"/>
+      <arg name="fd" type="fd" summary="write the payload here, then close it"/>
+    </event>
+
+    <event name="selection_sent" since="7">
+      <description summary="here is the fd the owner will write into">
+        To the ASKER. The fd is readable; EOF is the end of the payload, and an empty payload is a legitimate answer
+        (an owner may offer a type it produces nothing for). The owner has been asked already, so a reader that blocks
+        waits only on the owner.
+      </description>
+      <arg name="mime_type" type="string"/>
+      <arg name="fd" type="fd" summary="read the payload here, to EOF"/>
+    </event>
+
+    <event name="selection_refused" since="7">
+      <description summary="that request cannot be served, and here is why">
+        The answer to a `request_selection` that produced no fd. The reason is what lets a reader tell "there is nothing
+        on the clipboard" from "there is something, but not that" from "it went away while I was asking".
+      </description>
+      <arg name="mime_type" type="string"/>
+      <arg name="reason" type="uint" enum="selection_refusal"/>
+    </event>
   </interface>
 
   <interface name="agora_dock_menu" version="1">

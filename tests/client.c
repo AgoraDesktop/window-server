@@ -65,6 +65,14 @@ struct client {
 	 * OUT LOUD rather than silent: a test that quietly stopped testing the thing it named would be worse than one
 	 * that failed. */
 	int use_dmabuf;
+	/* **THE SELECTION'S TWO ROLES, WHICH ARE TWO PROCESSES.** `--offer` makes this client own the selection with one
+	 * type and answer requests by writing the payload; `--request` asks for a type, reads what it gets, and prints it.
+	 * A test then runs both against one server, which is the only way to prove the fd really crosses. */
+	const char *offer_type;
+	const char *offer_payload;
+	const char *request_type;
+	int selection_answered;			/* the requester's fd arrived */
+	int selection_refused;			/* and the reason it did not */
 
 	struct wl_surface *surface;
 	struct agora_window *window;
@@ -477,6 +485,82 @@ static int create_dmabuf_buffer(struct client *client)
 }
 #endif /* AWS_HAVE_GBM */
 
+/* **THE OWNER'S HALF: WRITE AND CLOSE.** The fd is the write end of a pipe whose other end is already on its way to the
+ * asker, so the server neither sees the bytes nor waits for them. */
+static void selection_requested(void *data, struct agora_shell *shell, const char *mime_type, int32_t fd)
+{
+	struct client *client = data;
+	size_t length;
+
+	(void)shell;
+	if (client->offer_payload == NULL || fd < 0) {
+		close(fd);
+		return;
+	}
+	length = strlen(client->offer_payload);
+	if (write(fd, client->offer_payload, length) != (ssize_t)length) {
+		fprintf(stderr, "client: could not write the selection payload\n");
+	}
+	close(fd);
+	if (getenv("AG_CLIENT_DIAG") != NULL) {
+		fprintf(stderr, "  DIAG selection: served %s (%zu byte(s))\n", mime_type, length);
+	}
+}
+
+/* **THE READER'S HALF: READ TO EOF AND PRINT.** What lands on stdout is what the test asserts, so the payload crosses
+ * two processes and a pipe without this program proving anything about itself. */
+static void selection_sent(void *data, struct agora_shell *shell, const char *mime_type, int32_t fd)
+{
+	struct client *client = data;
+	char buffer[4096];
+	ssize_t got;
+
+	(void)shell;
+	client->selection_answered = 1;
+	if (fd < 0) {
+		return;
+	}
+	got = read(fd, buffer, sizeof buffer - 1);
+	close(fd);
+	if (got < 0) {
+		got = 0;
+	}
+	buffer[got] = '\0';
+	printf("selection %s: %s\n", mime_type, buffer);
+	fflush(stdout);
+}
+
+static void selection_refused(void *data, struct agora_shell *shell, const char *mime_type, uint32_t reason)
+{
+	struct client *client = data;
+
+	(void)shell;
+	client->selection_refused = (int)reason + 1;
+	printf("selection %s: refused (%u)\n", mime_type, (unsigned)reason);
+	fflush(stdout);
+}
+
+static void selection_offer(void *data, struct agora_shell *shell, const char *mime_type)
+{
+	(void)data; (void)shell;
+	if (getenv("AG_CLIENT_DIAG") != NULL) {
+		fprintf(stderr, "  DIAG selection: offered %s\n", mime_type);
+	}
+}
+
+static void selection_lost(void *data, struct agora_shell *shell)
+{
+	(void)data; (void)shell;
+}
+
+static const struct agora_shell_listener shell_listener = {
+	selection_offer,
+	selection_lost,
+	selection_requested,
+	selection_sent,
+	selection_refused,
+};
+
 static void registry_global(void *data, struct wl_registry *registry, uint32_t name, const char *interface,
 			    uint32_t version)
 {
@@ -496,7 +580,12 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
 		client->dmabuf = wl_registry_bind(registry, name, &zwp_linux_dmabuf_v1_interface,
 						  version < 3 ? version : 3);
 	} else if (strcmp(interface, agora_shell_interface.name) == 0) {
-		client->shell = wl_registry_bind(registry, name, &agora_shell_interface, 1);
+		/* **SEVEN, WHICH IS WHERE THE SELECTION IS** — and clamped to what the server advertises, because a client
+		 * cannot bind above its server and the protocol says so by refusing. */
+		client->shell = wl_registry_bind(registry, name, &agora_shell_interface, version < 7 ? version : 7);
+		if (client->shell != NULL && agora_shell_get_version(client->shell) >= 7) {
+			agora_shell_add_listener(client->shell, &shell_listener, client);
+		}
 	}
 }
 
@@ -550,6 +639,12 @@ int main(int argc, char **argv)
 			client.level = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--buffer-scale") == 0 && i + 1 < argc) {
 			client.buffer_scale = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "--offer") == 0 && i + 1 < argc) {
+			client.offer_type = argv[++i];
+		} else if (strcmp(argv[i], "--payload") == 0 && i + 1 < argc) {
+			client.offer_payload = argv[++i];
+		} else if (strcmp(argv[i], "--request") == 0 && i + 1 < argc) {
+			client.request_type = argv[++i];
 		} else if (strcmp(argv[i], "--quadrants") == 0) {
 			client.quadrants = 1;
 		} else if (strcmp(argv[i], "--status-length") == 0 && i + 1 < argc) {
@@ -571,6 +666,43 @@ int main(int argc, char **argv)
 	client.registry = wl_display_get_registry(client.display);
 	wl_registry_add_listener(client.registry, &registry_listener, &client);
 	wl_display_roundtrip(client.display);
+
+	/* **THE SELECTION'S TWO ROLES LEAVE THE WINDOW BEHIND.** A selection test wants two processes talking through one
+	 * server and nothing else; a window on each side would add a compositor to what is being measured. */
+	if (client.offer_type != NULL || client.request_type != NULL) {
+		if (client.shell == NULL || agora_shell_get_version(client.shell) < 7) {
+			fprintf(stderr, "client: the server has no selection (agora_shell is below version 7)\n");
+			return 2;
+		}
+		if (client.request_type != NULL) {
+			agora_shell_request_selection(client.shell, client.request_type);
+			wl_display_flush(client.display);
+			/* UNTIL AN ANSWER OR A DEADLINE: an answer is an fd or a refusal, and both end the wait. */
+			for (i = 0; i < 200 && !client.selection_answered && client.selection_refused == 0; i++) {
+				wl_display_dispatch(client.display);
+			}
+			return (client.selection_answered || client.selection_refused != 0) ? 0 : 1;
+		}
+		{
+			/* **THE BYTES OF THE LIST, NOT A LIST OF POINTERS**: see the protocol's own note. Each type is written
+			 * with its terminating NUL. */
+			struct wl_array types;
+			size_t length = strlen(client.offer_type) + 1;
+			char *slot;
+
+			wl_array_init(&types);
+			slot = (char *)wl_array_add(&types, length);
+			memcpy(slot, client.offer_type, length);
+			agora_shell_set_selection(client.shell, &types);
+			wl_array_release(&types);
+			/* **AND IT STAYS ALIVE TO SERVE**, because the owner produces the bytes on demand: a client that
+			 * offered and exited would have offered nothing. */
+			for (i = 0; i < 200; i++) {
+				wl_display_dispatch(client.display);
+			}
+			return 0;
+		}
+	}
 	if (client.compositor == NULL || client.shm == NULL || client.shell == NULL) {
 		fprintf(stderr, "client: the compositor is missing a required global\n");
 		return 1;

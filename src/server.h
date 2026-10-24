@@ -376,6 +376,14 @@ struct aws_server {
 	struct wl_list agora_outputs;
 	/* Every bound `agora_window_list`, so a window change reaches the dock that asked. */
 	struct wl_list window_lists;
+	/* **EVERY BOUND `agora_shell`, BECAUSE THE SELECTION IS ANNOUNCED UNSOLICITED.** A window change has a client to
+	 * tell; a selection change does not ask anybody first, so the list of bound shells is the only way to say it. */
+	struct wl_list shell_bindings;
+	/* **THE SELECTION ITSELF: ONE OWNER AND ITS TYPES.** The compositor keeps the claim and the vocabulary and never
+	 * the data — a request for it turns into an fd between the two clients. See CLIPBOARD-PLAN.md. */
+	struct wl_resource *selection_owner;
+	char *selection_types[32];
+	int selection_type_count;
 	/* **AND THE MENUS A DOCK IS WAITING FOR.** One node per `get_dock_menu`, keyed by the window it asked about; see
 	 * `struct aws_dock_menu`. Walked when an application answers, and by nothing else. */
 	struct wl_list dock_menus;
@@ -588,6 +596,15 @@ void aws_shell_menu_bar_area(struct aws_server *server, int *x, int *y, int *wid
 
 /* The packing of the status area, which a client adding or removing an item has just invalidated. */
 void aws_shell_place_status_items(struct aws_server *server);
+
+/* **ONE NODE PER BOUND `agora_shell`, AND IT OWNS NOTHING BUT ITS PLACE IN THE LIST.** The selection is announced
+ * unsolicited, so the list is the only way to reach a client that never asked; the resource is kept beside it because a
+ * broadcast has to name one. */
+struct aws_shell_binding {
+	struct aws_server *server;
+	struct wl_resource *resource;
+	struct wl_list link;
+};
 
 struct aws_pointer {
 	struct wl_resource *resource;

@@ -33,6 +33,7 @@ struct aws_server *aws_server_create(const char *backend_name, const char *input
 	wl_list_init(&server->agora_outputs);
 	/* AND THE CLIENTS THAT ASKED WHAT WINDOWS EXIST — a Dock, usually one. */
 	wl_list_init(&server->window_lists);
+	wl_list_init(&server->shell_bindings);
 	/* **AND THE MENUS STILL BEING WAITED FOR.** Empty until a Dock right-clicks a tile, and empty again as soon as
 	 * every application has answered — nothing here outlives the answer it was made for. */
 	wl_list_init(&server->dock_menus);

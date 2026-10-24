@@ -221,3 +221,11 @@ add_test(NAME window-server-session-vt COMMAND window-server-session-vt)
 add_test(NAME window-server-idle-timeout
   COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-idle-timeout.sh"
     $<TARGET_FILE:window-server> $<TARGET_FILE:window-server-test-client>)
+
+# **AND THE SELECTION, BETWEEN TWO PROCESSES.** The compositor owns the claim and never the data: a request turns into a
+# pipe whose ends go to the owner and the asker, so what this asserts is that bytes written by one process arrive in
+# another — plus the three refusals, which are as much of the contract as the success, and the promise that a selection
+# dies with its owner.
+add_test(NAME window-server-clipboard
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-clipboard.sh"
+    $<TARGET_FILE:window-server> $<TARGET_FILE:window-server-test-client>)
