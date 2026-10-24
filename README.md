@@ -119,8 +119,8 @@ window-server: gl renderer: EGL 1.5, NVIDIA GeForce GTX 1060 6GB/PCIe/SSE2
 **THE NESTED OUTPUT IS WHERE THE GPU RENDERER WAS BUILT, AND THAT IS THE ARGUMENT RATHER THAN A CONVENIENCE.**
 Acceleration is two independent halves: the renderer, and the display path that gets a finished frame onto the
 glass. Nested X11 exercises the first with no DRM master, no KMS driver, no virtual terminal and no logind seat,
-and on this machine it is the *only* place the first half is testable at all — the DRM path is blocked by
-`nvidia_drm.modeset=0` (see §5). A DRM accelerated path is therefore a GBM swapchain added **under** this renderer,
+and on this machine it is the only place the first half is testable end to end: the DRM path is proven to the
+dry run (see §5) and not to the picture. A DRM accelerated path is therefore a GBM swapchain added **under** this renderer,
 not a second renderer beside it.
 
 **AND THE TWO RENDERERS ARE CHECKED AGAINST EACH OTHER, NOT AGAINST A FEELING.** Both answer `--screenshot`; the GL
@@ -280,13 +280,19 @@ the group `rw` is already there, and nothing else has to change.
 Notice what is NOT wrong: udev finds the devices, libinput builds them, and the seat assignment succeeds. The
 failure is one `open()` and it is the operating system's answer rather than the compositor's.
 
-### 5. DRM/KMS: written, and unrunnable on a machine with no KMS
+### 5. DRM/KMS: written, proven to the modeset on this machine, not yet composited on glass by its author
 
-`--backend drm` is the shipping backend: it opens a card, takes DRM master, allocates a **dumb buffer**, maps
-it, points a CRTC at it and hands the mapping to the compositing loop — so frames are written straight onto the
-screen with no copy, no GBM, no EGL and no page flipping. What that costs is tearing, which is the honest first
-version; `drmModePageFlip` with two buffers is the next refinement and the backend interface already has the
-shape for it (`present` exists and is simply unused).
+`--backend drm` is the shipping backend: it opens a card, takes DRM master, allocates **two dumb buffers**, maps
+them, and points a CRTC at them through an atomic commit — no copy, no GBM, no EGL. Frames are written straight
+into the buffer that is not being scanned, and the swap is a flip at vblank (`flip_pending` holds the loop off the
+page the display may still be reading).
+
+**WHAT IS MEASURED HERE VERSUS WHAT IS CLAIMED.** `AWS_DRM_DRY_RUN=1` takes the device, picks the connector, mode,
+CRTC and plane, allocates both buffers and both framebuffers and the mode blob, and gives master back without
+setting anything: that passes on this machine with `nvidia_drm.modeset=1`. A *committed* modeset has not been
+replayed by this file's author since the HiDPI and virtual-terminal work landed, so the picture on glass is
+unverified — see §6 for the terminal machinery that must be right before anyone tries it on a machine they cannot
+reach over SSH.
 
 **Two things it must do that a windowed backend never does**, and both are safety rather than features:
 
