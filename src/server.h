@@ -93,6 +93,18 @@ struct aws_surface {
 	 * big it says it is, and `level` is the integer the composition is ordered by. See `src/shell.c`. */
 	int frame_width;
 	int frame_height;
+	/* **THE CLIENT'S BUFFER IS THIS MANY DEVICE PIXELS PER LOGICAL ONE, AND THE COMPOSITOR HAS TO KNOW.**
+	 * `wl_surface.set_buffer_scale` is how a client says "my buffer is 2x the surface I am describing": a
+	 * 640x400 window on a 2x output sends a 1280x800 buffer and asks for it to be placed as 640x400. Everything
+	 * above this line — the frame, the level, the hit test, the shell's placement — is in LOGICAL pixels, so the
+	 * scale is only ever a divisor at the two places that touch the BUFFER: compositing it and hit-testing it.
+	 * Until this existed the request was an empty function, so a client that honoured an advertised output scale
+	 * would have overflowed its own frame by the factor.
+	 *
+	 * DOUBLE-BUFFERED, as the protocol says: the request takes effect on the NEXT commit, which is why the
+	 * pending copy is here. A client sets the scale and the size together and they must land together. */
+	int buffer_scale;			/* device pixels per logical pixel; 1 until a client says otherwise */
+	int pending_buffer_scale;		/* what the scale becomes on the next commit */
 	int level;
 	/* **AND THE ONE KIND OF WINDOW WHOSE PLACEMENT IS NOT THE APPLICATION'S.** `NSStatusItem` has a length and
 	 * no position, so its width is the whole of what its client is asked for and the packing is `shell.c`'s.

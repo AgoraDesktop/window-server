@@ -167,3 +167,13 @@ add_executable(window-server-pointer-axis pointer_axis.c "${CMAKE_CURRENT_SOURCE
 target_include_directories(window-server-pointer-axis PRIVATE "${_generated}" "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 target_link_libraries(window-server-pointer-axis PRIVATE PkgConfig::WAYLAND_SERVER PkgConfig::XKBCOMMON)
 add_test(NAME window-server-pointer-axis COMMAND window-server-pointer-axis)
+
+# **AND A BUFFER BIGGER THAN THE SURFACE IT DESCRIBES.** `wl_surface.set_buffer_scale` is how a HiDPI client says "this
+# buffer is 2x the frame I asked for". Until the compositor kept that number the request was an empty function, so a
+# client that honoured a scale would have overflowed its own frame by the factor. The client draws four colours into a
+# 2x buffer and the screenshot proves the WHOLE of it was downsampled into the 1x frame: all four quarters present, and
+# nothing outside the frame.
+add_test(NAME window-server-buffer-scale
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-buffer-scale.sh"
+    $<TARGET_FILE:window-server> $<TARGET_FILE:window-server-test-client>
+    "${PYTHON3}" "${CMAKE_CURRENT_SOURCE_DIR}/check_scale.py")

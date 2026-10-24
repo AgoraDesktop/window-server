@@ -317,6 +317,59 @@ static unsigned shape_coverage(const struct aws_backend *output, const struct aw
 	return cover;
 }
 
+/* **ONE LOGICAL PIXEL OUT OF A SCALED BUFFER'S BLOCK OF THEM.** A 2x client's buffer has four device pixels for every
+ * logical pixel the compositor places, and the answer that keeps a glyph's stem as dark as it was drawn is the AVERAGE
+ * of the block, not the first pixel of it — nearest-neighbour would drop three of every four pixels and turn text into
+ * a broken pattern of stems.
+ *
+ * THE AVERAGING IS SAFE ON PREMULTIPLIED PIXELS, which is what a transparent window's buffer holds: averaging
+ * premultiplied channels and the alpha together keeps them consistent, and un-premultiplying first would divide by an
+ * alpha that may be zero.
+ *
+ * `XRGB8888`'s top byte is not alpha, so it is masked out of the sum and forced back on the way out — otherwise a
+ * client that leaves junk there would average it into the colour. */
+static uint32_t scaled_block_pixel(const uint8_t *base, size_t stride, int buffer_width, int buffer_height,
+				   int sx, int sy, int scale, int transparent)
+{
+	unsigned sum_a = 0, sum_r = 0, sum_g = 0, sum_b = 0;
+	unsigned count = 0;
+	int dy, dx;
+
+	for (dy = 0; dy < scale; dy++) {
+		int y = sy + dy;
+		const uint32_t *row;
+
+		if (y >= buffer_height) {
+			break;
+		}
+		row = (const uint32_t *)(const void *)(base + (size_t)y * stride);
+		for (dx = 0; dx < scale; dx++) {
+			int x = sx + dx;
+			uint32_t pixel;
+
+			if (x >= buffer_width) {
+				break;
+			}
+			pixel = row[x];
+			if (transparent) {
+				sum_a += (pixel >> 24) & 0xFFu;
+			}
+			sum_r += (pixel >> 16) & 0xFFu;
+			sum_g += (pixel >> 8) & 0xFFu;
+			sum_b += pixel & 0xFFu;
+			count++;
+		}
+	}
+	if (count == 0) {
+		return 0;
+	}
+	if (!transparent) {
+		sum_a = 0xFFu * count;	/* an opaque buffer has no alpha to average */
+	}
+	return (((sum_a + count / 2) / count) << 24) | (((sum_r + count / 2) / count) << 16)
+		| (((sum_g + count / 2) / count) << 8) | ((sum_b + count / 2) / count);
+}
+
 /* ONE CLIENT BUFFER ONTO THE OUTPUT, CLIPPED TO IT. A window half off the right edge is a normal state, not an
  * error, so the clipping is not an edge case — it is the loop.
  *
@@ -326,7 +379,9 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 {
 	struct wl_shm_buffer *shm = wl_shm_buffer_get(surface->current_buffer);
 	const uint8_t *base;
+	int buffer_width, buffer_height;
 	int width, height, stride;
+	int scale;
 	int transparent;
 	int corner;
 	int row, column;
@@ -334,9 +389,15 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 	if (shm == NULL) {
 		return;
 	}
-	width = wl_shm_buffer_get_width(shm);
-	height = wl_shm_buffer_get_height(shm);
+	buffer_width = wl_shm_buffer_get_width(shm);
+	buffer_height = wl_shm_buffer_get_height(shm);
 	stride = wl_shm_buffer_get_stride(shm);
+	/* **THE SURFACE IS THE BUFFER DIVIDED BY THE CLIENT'S SCALE.** Everything below — the frame clip, the corner
+	 * radius, the destination row — is in LOGICAL pixels, because that is the space the compositor places windows
+	 * in. With the scale at 1 (every client that says nothing) this is the same arithmetic it always was. */
+	scale = surface->buffer_scale > 0 ? surface->buffer_scale : 1;
+	width = buffer_width / scale;
+	height = buffer_height / scale;
 	/* **AND THE FRAME IS THE WINDOW'S BOUNDS, SO A BIGGER BUFFER IS CLIPPED TO IT.** MEASURED, not assumed: a
 	 * status item's buffer is 320x200 while the server placed it in a 64x24 box, and without this the item ran
 	 * 200 rows down the screen — a status item taller than the menu bar it is drawn in. The frame is what the
@@ -458,6 +519,55 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 				destination[column] = aws_blend_pixel(destination[column], pixel, alpha);
 			} else {
 				destination[column] = pixel | 0xFF000000u;
+			}
+		}
+	}
+
+	/* **AND A SCALED BUFFER IS DRAWN ONE LOGICAL PIXEL AT A TIME.** The loops above are written in buffer pixels because
+	 * almost every client is 1:1 and the fast paths there (an opaque row is a copy, four transparent pixels are asked
+	 * at once) are most of what makes a composite cheap. A scaled buffer would make every one of them wrong — the
+	 * destination row is the SOURCE row divided, and a row-major copy has no such correspondence — so it takes the
+	 * general path: sample the block, then the same shape and alpha rules the corner branch above uses. */
+	if (scale > 1) {
+		for (row = 0; row < height; row++) {
+			int oy = surface->y + row;
+			int first = 0;
+			int last = width;
+
+			if (oy < 0 || oy >= output->height) {
+				continue;
+			}
+			if (surface->x < 0) {
+				first = -surface->x;
+			}
+			if (surface->x + last > output->width) {
+				last = output->width - surface->x;
+			}
+			for (column = first; column < last; column++) {
+				uint32_t pixel = scaled_block_pixel(base, (size_t)stride, buffer_width, buffer_height,
+								    column * scale, row * scale, scale, transparent);
+				unsigned shape = shape_coverage(output, surface, width, height, column, row);
+				uint32_t alpha;
+
+				if (shape == 0) {
+					continue;
+				}
+				alpha = transparent ? (pixel >> 24) : 0xFFu;
+				if (shape != 255) {
+					alpha = (alpha * shape + 127u) / 255u;
+				}
+				if (alpha == 0) {
+					continue;
+				}
+				if (alpha != 0xFFu) {
+					output->pixels[(size_t)oy * (size_t)output->width + (size_t)surface->x + (size_t)column] =
+						aws_blend_pixel(output->pixels[(size_t)oy * (size_t)output->width
+									       + (size_t)surface->x + (size_t)column],
+								pixel, alpha);
+				} else {
+					output->pixels[(size_t)oy * (size_t)output->width + (size_t)surface->x + (size_t)column] =
+						pixel | 0xFF000000u;
+				}
 			}
 		}
 	}

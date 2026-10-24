@@ -17,6 +17,12 @@
  *
  *   client [--width W] [--height H] [--frames N] [--hold] [--colour RRGGBB] [--image PATH]
  *          [--x X] [--y Y] [--level L] [--status-length N] [--dmabuf]
+ *          [--buffer-scale N] [--quadrants]
+ *
+ * **`--buffer-scale` IS THE HIDPI CLIENT'S HALF OF `wl_surface`.** It allocates a buffer N times the frame, tells the
+ * surface so with `set_buffer_scale`, and leaves the compositor to place it as the frame it described. `--quadrants`
+ * fills that buffer with four colours, so a screenshot proves the WHOLE buffer was downscaled into the window rather
+ * than its first quarter being drawn at double size.
  *
  * **`--image` IS THE WALLPAPER'S DOOR.** A JPEG is decoded with libjpeg — the same decoder Core Graphics uses in
  * this tree — scaled to COVER the window and cropped at its centre. The flat colour remains the default, because
@@ -91,6 +97,15 @@ struct client {
 	 * never change. `--hold` is how a test says "this one is scenery". */
 	int hold;
 	uint32_t colour;
+	/* **A CLIENT THAT RENDERS AT 2x.** `--buffer-scale N` makes the BUFFER N times the frame it described and says so
+	 * with `wl_surface.set_buffer_scale`, which is what a HiDPI client does: the compositor must place it as the
+	 * frame it asked for and downsample the buffer into it. `--quadrants` fills the buffer with four colours so a
+	 * downscale is visible in a screenshot: if the compositor drew only the first quarter of the buffer, three of
+	 * the four colours would be missing. */
+	int buffer_scale;
+	int quadrants;
+	int buffer_width;
+	int buffer_height;
 
 	/* THE WALLPAPER IMAGE, when --image named one: RGB, three bytes per sample. */
 	const char *image_path;
@@ -247,7 +262,7 @@ static void submit_frame(struct client *client)
 	}
 	wl_callback_add_listener(callback, &frame_listener, client);
 	wl_surface_attach(client->surface, buffer, 0, 0);
-	wl_surface_damage_buffer(client->surface, 0, 0, client->width, client->height);
+	wl_surface_damage_buffer(client->surface, 0, 0, client->buffer_width, client->buffer_height);
 	wl_surface_commit(client->surface);
 }
 
@@ -279,22 +294,35 @@ static void fill_pixels(struct client *client, void *data, int stride)
 	int x, y;
 
 	if (client->image_rgb != NULL) {
-		double scale_x = (double)client->width / (double)client->image_width;
-		double scale_y = (double)client->height / (double)client->image_height;
+		double scale_x = (double)client->buffer_width / (double)client->image_width;
+		double scale_y = (double)client->buffer_height / (double)client->image_height;
 		double scale = (scale_x > scale_y) ? scale_x : scale_y;
-		double origin_x = ((double)client->image_width - (double)client->width / scale) / 2.0;
-		double origin_y = ((double)client->image_height - (double)client->height / scale) / 2.0;
+		double origin_x = ((double)client->image_width - (double)client->buffer_width / scale) / 2.0;
+		double origin_y = ((double)client->image_height - (double)client->buffer_height / scale) / 2.0;
 
-		for (y = 0; y < client->height; y++) {
-			for (x = 0; x < client->width; x++) {
+		for (y = 0; y < client->buffer_height; y++) {
+			for (x = 0; x < client->buffer_width; x++) {
 				pixels[y * words + x] = sample_image(client, x, y, scale, origin_x, origin_y);
+			}
+		}
+	} else if (client->quadrants) {
+		/* **FOUR COLOURS, ONE PER QUARTER OF THE BUFFER.** A downscale that took the first pixel of each block, or a
+		 * compositor that drew only the buffer's top-left quarter, would show one colour; a correct one shows all
+		 * four, each in its own quarter of the placed window. */
+		for (y = 0; y < client->buffer_height; y++) {
+			for (x = 0; x < client->buffer_width; x++) {
+				int right = x >= client->buffer_width / 2;
+				int bottom = y >= client->buffer_height / 2;
+
+				pixels[y * words + x] = bottom ? (right ? 0x00FFFFFFu : 0x000000FFu)
+							       : (right ? 0x0000FF00u : 0x00FF0000u);
 			}
 		}
 	} else {
 		/* A FLAT COLOUR, and one that nothing else in the test uses: the assertion is that THIS colour is at the
 		 * cascade's first position and the compositor's own background is everywhere else. */
-		for (y = 0; y < client->height; y++) {
-			for (x = 0; x < client->width; x++) {
+		for (y = 0; y < client->buffer_height; y++) {
+			for (x = 0; x < client->buffer_width; x++) {
 				pixels[y * words + x] = client->colour;
 			}
 		}
@@ -305,8 +333,8 @@ static void fill_pixels(struct client *client, void *data, int stride)
  * which is what every other test here uses. */
 static int create_buffer_slot(struct client *client, int slot)
 {
-	int stride = client->width * 4;
-	size_t size = (size_t)stride * (size_t)client->height;
+	int stride = client->buffer_width * 4;
+	size_t size = (size_t)stride * (size_t)client->buffer_height;
 	struct wl_shm_pool *pool;
 	struct wl_buffer **out = slot >= 0 ? &client->buffers[slot] : &client->buffer;
 	uint32_t **pixels_out = slot >= 0 ? &client->buffer_pixels[slot] : &client->pixels;
@@ -333,7 +361,7 @@ static int create_buffer_slot(struct client *client, int slot)
 	*pixels_out = data;
 	fill_pixels(client, data, stride);
 	pool = wl_shm_create_pool(client->shm, fd, (int32_t)size);
-	*out = wl_shm_pool_create_buffer(pool, 0, client->width, client->height, stride,
+	*out = wl_shm_pool_create_buffer(pool, 0, client->buffer_width, client->buffer_height, stride,
 					 WL_SHM_FORMAT_XRGB8888);
 	wl_shm_pool_destroy(pool);
 	close(fd);
@@ -386,14 +414,15 @@ static int create_dmabuf_buffer(struct client *client)
 	{
 		uint64_t modifiers[1] = { DRM_FORMAT_MOD_LINEAR };
 
-		bo = gbm_bo_create_with_modifiers(device, (uint32_t)client->width, (uint32_t)client->height,
+		bo = gbm_bo_create_with_modifiers(device, (uint32_t)client->buffer_width, (uint32_t)client->buffer_height,
 						  DRM_FORMAT_XRGB8888, modifiers, 1);
 	}
 	if (bo == NULL) {
-		fprintf(stderr, "client: gbm could not allocate a %dx%d buffer\n", client->width, client->height);
+		fprintf(stderr, "client: gbm could not allocate a %dx%d buffer\n", client->buffer_width,
+			client->buffer_height);
 		goto fail;
 	}
-	map = gbm_bo_map(bo, 0, 0, (uint32_t)client->width, (uint32_t)client->height,
+	map = gbm_bo_map(bo, 0, 0, (uint32_t)client->buffer_width, (uint32_t)client->buffer_height,
 			 GBM_BO_TRANSFER_WRITE, &stride, &map_data);
 	if (map == MAP_FAILED) {
 		fprintf(stderr, "client: the GPU buffer could not be mapped\n");
@@ -412,7 +441,8 @@ static int create_dmabuf_buffer(struct client *client)
 	params = zwp_linux_dmabuf_v1_create_params(client->dmabuf);
 	zwp_linux_buffer_params_v1_add(params, fd, 0, offset, stride,
 				       (uint32_t)(modifier >> 32), (uint32_t)modifier);
-	client->buffer = zwp_linux_buffer_params_v1_create_immed(params, client->width, client->height,
+	client->buffer = zwp_linux_buffer_params_v1_create_immed(params, client->buffer_width,
+								 client->buffer_height,
 								 DRM_FORMAT_XRGB8888, 0);
 	zwp_linux_buffer_params_v1_destroy(params);
 	close(fd);
@@ -488,6 +518,7 @@ int main(int argc, char **argv)
 	memset(&client, 0, sizeof client);
 	client.width = 320;
 	client.height = 200;
+	client.buffer_scale = 1;
 	client.colour = 0x00C050FFu;	/* a blue no background would be */
 	client.max_frames = 3;
 	client.frame_x = 100;
@@ -517,10 +548,20 @@ int main(int argc, char **argv)
 			client.frame_y = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--level") == 0 && i + 1 < argc) {
 			client.level = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "--buffer-scale") == 0 && i + 1 < argc) {
+			client.buffer_scale = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "--quadrants") == 0) {
+			client.quadrants = 1;
 		} else if (strcmp(argv[i], "--status-length") == 0 && i + 1 < argc) {
 			client.status_length = atoi(argv[++i]);
 		}
 	}
+
+	if (client.buffer_scale < 1) {
+		client.buffer_scale = 1;
+	}
+	client.buffer_width = client.width * client.buffer_scale;
+	client.buffer_height = client.height * client.buffer_scale;
 
 	client.display = wl_display_connect(NULL);
 	if (client.display == NULL) {
@@ -541,7 +582,14 @@ int main(int argc, char **argv)
 	 * it. So the client says where it goes and draws — and what the test then checks is that the server put it
 	 * exactly there, which is the whole claim being made. */
 	client.window = agora_shell_get_window(client.shell, client.surface);
+	/* THE FRAME IS THE LOGICAL SIZE — the size the window IS, which is what the compositor places and hit-tests. */
 	agora_window_set_frame(client.window, client.frame_x, client.frame_y, client.width, client.height);
+	/* **AND THE BUFFER IS THE SCALED SIZE.** This is the pair a HiDPI client sends: "my surface is width x height and
+	 * my buffer is `scale` device pixels per logical one". A compositor that ignores the second number composites the
+	 * buffer 1:1 and the window overflows its own frame by the factor — which is what this test exists to rule out. */
+	if (client.buffer_scale > 1) {
+		wl_surface_set_buffer_scale(client.surface, client.buffer_scale);
+	}
 	/* **AND IT ASKS FOR A FRAME AS WELL, ON PURPOSE.** What is measured then is the SERVER's placement winning,
 	 * rather than a client that happened never to ask to be anywhere. */
 	if (client.status_length > 0) {

@@ -294,6 +294,15 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
 	 * (That client commits twice because `AGWindowShow` commits and `-orderFront:` calls it after
 	 * `-cg_ensureWindow` already has. That redundancy is worth removing and is NOT the bug: any client may
 	 * commit without attaching, and a compositor that unmaps it is wrong about the protocol.) */
+	/* **THE SCALE LANDS WITH THE BUFFER IT DESCRIBES.** Both are double-buffered on `wl_surface`, and the client sets
+	 * them together — a scale applied a commit early would composite the previous frame's pixels at the new divisor. */
+	if (surface->pending_buffer_scale > 0) {
+		surface->buffer_scale = surface->pending_buffer_scale;
+		surface->pending_buffer_scale = 0;
+	}
+	if (surface->buffer_scale <= 0) {
+		surface->buffer_scale = 1;
+	}
 	if (surface->pending_attached) {
 		struct wl_resource *previous = surface->current_buffer;
 
@@ -368,9 +377,22 @@ static void surface_set_buffer_transform(struct wl_client *client, struct wl_res
 	(void)client; (void)resource; (void)transform;
 }
 
+/* **"MY BUFFER IS SCALED" — A DIVISOR THE COMPOSITOR NOW KEEPS.** See `aws_surface`'s `buffer_scale`: the buffer is
+ * `scale` device pixels per logical one, so a 2x client's 1280x800 buffer is a 640x400 surface. A factor below one is
+ * not representable in the protocol (and would be a client asking to be magnified), so it is clamped rather than
+ * honoured — the alternative is a division that silently turns a window inside out. */
 static void surface_set_buffer_scale(struct wl_client *client, struct wl_resource *resource, int32_t scale)
 {
-	(void)client; (void)resource; (void)scale;
+	struct aws_surface *surface = aws_surface_from_resource(resource);
+
+	(void)client;
+	if (surface == NULL) {
+		return;
+	}
+	/* DOUBLE-BUFFERED, as `wl_surface` says: this takes effect on the next commit, together with the buffer the
+	 * commit attaches. Applying it here would resize a surface that has not yet been given the pixels that scale
+	 * describes, and the compositor would composite a 1x buffer as if it were 2x for one frame. */
+	surface->pending_buffer_scale = (scale > 0) ? scale : 1;
 }
 
 static const struct wl_surface_interface surface_implementation = {
@@ -839,6 +861,15 @@ struct aws_surface *aws_surface_at(struct aws_server *server, int x, int y)
 				height = dmabuf->height;
 			} else {
 				continue;
+			}
+			/* **AND THE RECTANGLE IS IN LOGICAL PIXELS, WHICH IS THE BUFFER DIVIDED BY ITS SCALE.** Everything that
+			 * asks this function — the pointer, a click, the shell's placement — speaks logical pixels, and a 2x
+			 * client's 1280x800 buffer is a 640x400 window. Without the division a scaled window would take clicks
+			 * in a rectangle twice its own size, which is the sort of bug that reads as "the click went to the window
+			 * behind". */
+			if (surface->buffer_scale > 1) {
+				width /= surface->buffer_scale;
+				height /= surface->buffer_scale;
 			}
 			if (x >= surface->x && x < surface->x + width && y >= surface->y && y < surface->y + height) {
 				return surface;

@@ -788,6 +788,15 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 		transparent = wl_shm_buffer_get_format(shm) == WL_SHM_FORMAT_ARGB8888;
 		from_shm = 1;
 	}
+	/* **THE QUAD IS THE BUFFER DIVIDED BY THE CLIENT'S SCALE, WHICH IS WHAT MAKES THE SAMPLER'S BILINEAR FILTER THE
+	 * DOWNSCALE.** A 2x client's 1280x800 buffer is a 640x400 window; the texture is the whole 1280x800 and the quad
+	 * is 640x400, so the four device pixels of every logical pixel are filtered into one. This is the same divisor
+	 * the CPU renderer's block average applies, and the two must agree or `--renderer` would be visible in the
+	 * result. See `aws_surface`'s `buffer_scale`. */
+	if (surface->buffer_scale > 1) {
+		width /= surface->buffer_scale;
+		height /= surface->buffer_scale;
+	}
 	/* **AND THE FRAME IS THE WINDOW'S BOUNDS, SO A BIGGER BUFFER IS CLIPPED TO IT** — the CPU renderer's rule,
 	 * and the reason a 320x200 status item does not run down the screen. */
 	if (surface->frame_width > 0 && width > surface->frame_width) {
@@ -799,9 +808,14 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 	if (width <= 0 || height <= 0) {
 		return;
 	}
-	/* The shm texture holds only the clamped region; the imported one is the whole buffer. */
-	uv_w = from_shm ? (float)width : (float)dmabuf->width;
-	uv_h = from_shm ? (float)height : (float)dmabuf->height;
+	/* **`u_uv_div` IS WHAT THE QUAD'S EXTENT IS DIVIDED BY TO GET A TEXTURE COORDINATE, so it is the QUAD's
+	 * extent whenever the texture covers exactly the region being drawn — which is both cases here: the shm
+	 * texture is uploaded from the visible region and an imported buffer is the whole thing mapped over the
+	 * quad. Written as the quad's own numbers rather than as each source's pixel size, because the two agreed
+	 * by accident at scale 1 and stop agreeing the moment a client scales: a 2x buffer mapped with
+	 * `texture_w = buffer width` would sample only the top-left quarter of itself. */
+	uv_w = (float)width;
+	uv_h = (float)height;
 
 	/* **THE FOUR CORNER DECISIONS, WHICH ARE `shape_coverage`'S AND NOT A SECOND OPINION.** A corner is rounded
 	 * only where the window is free of the output's own edges; a menu hanging from the bar keeps its top corners
@@ -829,7 +843,12 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 	}
 
 	if (from_shm) {
-		upload_client_buffer(gl, shm, width, height, stride);
+		/* **THE UPLOAD IS THE VISIBLE REGION IN BUFFER PIXELS.** `width`/`height` are logical by now, so a scaled
+		 * client's texture is its buffer's top-left `width x scale` by `height x scale` — which is the region the
+		 * quad will be filled from, and the same clipping rule the CPU renderer applies when the frame is smaller
+		 * than the buffer. */
+		upload_client_buffer(gl, shm, width * (surface->buffer_scale > 0 ? surface->buffer_scale : 1),
+				     height * (surface->buffer_scale > 0 ? surface->buffer_scale : 1), stride);
 		texture = gl->client_texture;
 		gl_textured(gl, &gl->texture, GL_TEXTURE_2D, texture, (float)surface->x, (float)surface->y,
 			    (float)width, (float)height, uv_w, uv_h, radius, tl, tr, bl, br, 0,
