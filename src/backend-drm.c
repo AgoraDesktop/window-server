@@ -40,6 +40,7 @@
  *   taken a display away from whoever owns it, and one that destroys a buffer a live CRTC is scanning is worse.
  */
 
+#include "scale.h"
 #include "server.h"
 
 #include <stdio.h>
@@ -603,19 +604,39 @@ int aws_backend_drm_start(struct aws_server *server)
 	}
 	server->backend.width = (int)mode.hdisplay;
 	server->backend.height = (int)mode.vdisplay;
-	/* **THE PANEL'S OWN PHYSICAL SIZE IS THE ONLY HONEST SOURCE, AND IT IS ALLOWED TO BE WRONG.** A connector reports
-	 * its width in millimetres, so `pixels x 25.4 / mm` is the DPI the display actually has — 4K on a 13" panel comes
-	 * out around 340 and 1080p on a 24" around 92. Two thresholds are as far as a compositor should guess: 144 dpi and
-	 * up is a display that wants 2x, and everything below it is 1x. NOT THREE, because a 340-dpi panel is a laptop
-	 * whose owner runs it at 2x in every other desktop too, and because a wrong guess here makes a screen nobody can
-	 * use. `--scale` overrides all of it, which matters: a great many 4K monitors report bogus millimetres. */
-	if (server->backend.user_scale == 0 && connector->mmWidth > 0) {
-		double dpi = (double)mode.hdisplay * 25.4 / (double)connector->mmWidth;
+	/* **A POINT IS 1/72 INCH, SO THE PANEL'S OWN MILLIMETRES DECIDE THE SCALE.** A connector reports its active
+	 * width in millimetres, so `pixels x 25.4 / mm / 72` is the number of device pixels that make a logical point
+	 * on THIS display. That is what makes a 13" 4K panel and a 24" 1080p panel agree about the size of a menu bar
+	 * and a window control: the dense panel gets a larger scale and more physical detail at the same point size.
+	 *
+	 * The formula is exact rather than rounded to 1x or 2x — a 96-dpi screen really is 1.333… device pixels per
+	 * point — and `aws_scale_from_physical_size` is where the EDID sanity checks live, because a wrong reported
+	 * size must not resize every window. `--scale` still overrides all of it. */
+	if (server->backend.user_scale == 0) {
+		double derived = aws_scale_from_physical_size((int)mode.hdisplay, connector->mmWidth);
 
-		server->backend.scale = (dpi >= 144.0) ? 2 : 1;
-		if (server->backend.scale != 1) {
-			fprintf(stderr, "window-server: this display is %.0f dpi, so the output scale is %d "
-					"(override with --scale)\n", dpi, server->backend.scale);
+		if (derived > 0.0) {
+			server->backend.scale = derived;
+			fprintf(stderr, "window-server: this display is %ux%u on %d mm (%.0f dpi), so the output scale "
+					"is %g to keep 72 points an inch (override with --scale)\n",
+				mode.hdisplay, mode.vdisplay, connector->mmWidth,
+				(double)mode.hdisplay * 25.4 / (double)connector->mmWidth, server->backend.scale);
+		}
+	}
+	/* **AND THE LOGICAL SCREEN IS THE MODE DIVIDED BY THAT SCALE.** It is kept rather than derived later for the
+	 * same reason the X11 backend keeps the requested size: with a fractional scale, `width / scale` does not
+	 * return a number that can be multiplied back, and a screen whose size changes depending on how it is asked
+	 * about would be a screen of the wrong size. */
+	{
+		double scale = aws_output_scale(server);
+
+		server->backend.logical_width = (int)((double)mode.hdisplay / scale + 0.5);
+		server->backend.logical_height = (int)((double)mode.vdisplay / scale + 0.5);
+		if (server->backend.logical_width < 1) {
+			server->backend.logical_width = 1;
+		}
+		if (server->backend.logical_height < 1) {
+			server->backend.logical_height = 1;
 		}
 	}
 

@@ -737,7 +737,10 @@ static void gl_draw_menu_bar(struct aws_server *server)
 	struct gl_state *gl = server->renderer->data;
 
 	{
-		int s = (server->backend.scale > 0) ? server->backend.scale : 1;
+		/* **A FRACTIONAL SCALE IS A REAL SCALE.** 1.5 device pixels per point is a 1080p panel at a comfortable
+		 * size, and truncating it to 1 here would draw the bar two-thirds of its device height — the picture
+		 * disagreeing with the framebuffer rather than merely being soft. */
+		float s = (float)aws_output_scale(server);
 
 		gl_solid(gl, 0.0f, 0.0f, (float)gl->width, (float)(AWS_MENU_BAR_HEIGHT * s), AWS_MENU_BAR_COLOUR);
 	upload_coverage(gl, server->system_menu_icon);
@@ -827,18 +830,22 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 	 * by the output scale on the way to the shader — the corners, the radius and the rect. The uv divisor is the quad's
 	 * own extent, so it is the SCALED one: the fraction the shader computes from it must still be 1.0. */
 	{
-		int out_scale = (gl->width > 0 && server->backend.scale > 0) ? server->backend.scale : 1;
+		/* **AND THE SCALE IS THE FRACTIONAL ONE, NOT AN INTEGER.** A whole-number cast was invisible at 1x and 2x
+		 * and wrong at every scale between them, which is most panels: 96 dpi is 1.333… device pixels per point. */
+		float out_scale = (float)aws_output_scale(server);
 
-		quad_x = (float)(surface->x * out_scale);
-		quad_y = (float)(surface->y * out_scale);
-		quad_w = (float)(width * out_scale);
-		quad_h = (float)(height * out_scale);
-		radius *= (float)out_scale;
+		quad_x = (float)surface->x * out_scale;
+		quad_y = (float)surface->y * out_scale;
+		quad_w = (float)width * out_scale;
+		quad_h = (float)height * out_scale;
+		radius *= out_scale;
 	}
 
 	/* **THE FOUR CORNER DECISIONS, WHICH ARE `shape_coverage`'S AND NOT A SECOND OPINION.** A corner is rounded
 	 * only where the window is free of the output's own edges; a menu hanging from the bar keeps its top corners
-	 * square; a surface entirely inside the bar is a piece of the bar and is square all round. */
+	 * square; a surface entirely inside the bar is a piece of the bar and is square all round. The comparison is
+	 * LOGICAL on both sides — `gl->width` is the framebuffer in device pixels, and comparing a logical window edge
+	 * with it would round the corners of a window that reaches the screen edge on any scaled output. */
 	in_bar = surface->y >= 0 && surface->y + surface->frame_height <= AWS_MENU_BAR_HEIGHT;	/* logical, both sides */
 	hangs_from_bar = surface->y == AWS_MENU_BAR_HEIGHT;
 	radius = (float)AWS_SHADOW_RADIUS;
@@ -849,9 +856,10 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 		radius = (float)height / 2.0f;
 	}
 	tl = (!in_bar && !hangs_from_bar && surface->x > 0 && surface->y > 0) ? 1.0f : 0.0f;
-	tr = (!in_bar && !hangs_from_bar && surface->x + width < gl->width && surface->y > 0) ? 1.0f : 0.0f;
-	bl = (!in_bar && surface->x > 0 && surface->y + height < gl->height) ? 1.0f : 0.0f;
-	br = (!in_bar && surface->x + width < gl->width && surface->y + height < gl->height) ? 1.0f : 0.0f;
+	tr = (!in_bar && !hangs_from_bar && surface->x + width < aws_output_width(server) && surface->y > 0) ? 1.0f : 0.0f;
+	bl = (!in_bar && surface->x > 0 && surface->y + height < aws_output_height(server)) ? 1.0f : 0.0f;
+	br = (!in_bar && surface->x + width < aws_output_width(server) &&
+	      surface->y + height < aws_output_height(server)) ? 1.0f : 0.0f;
 
 	/* THE SHADOW FIRST, because it is a shadow on the things behind. */
 	if (!in_bar) {

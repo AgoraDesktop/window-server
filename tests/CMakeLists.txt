@@ -83,6 +83,16 @@ add_executable(window-server-system-icon
 target_include_directories(window-server-system-icon PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 add_test(NAME window-server-system-icon COMMAND window-server-system-icon)
 
+# **AND 72 POINTS MUST BE AN INCH, WHICH IS ARITHMETIC AND NOT A DISPLAY.** The scale a physical panel asks for is
+# the one policy the backends share, so it is compiled in as it ships and asked directly — no Wayland server, no
+# EDID, and no screenshot can show that a 96-dpi panel got 4/3 rather than 1. `scale.h` is deliberately free of
+# Wayland so this test needs neither the server headers nor a display.
+add_executable(window-server-scale
+  scale.c
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/scale.c")
+target_include_directories(window-server-scale PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+add_test(NAME window-server-scale COMMAND window-server-scale)
+
 # **THE DIAGNOSTIC DOORS ARE TESTED WITHOUT A DISPLAY**, which is the property that makes them useful on a machine
 # whose compositor will not start. `--dump-os-identity` and `--list-system-menu-icons` return before the backend is
 # created; an unknown override is rejected by the same path.
@@ -203,3 +213,11 @@ add_test(NAME window-server-output-scale-1-5
 add_executable(window-server-session-vt session_vt.c "${CMAKE_CURRENT_SOURCE_DIR}/../src/session-vt.c")
 target_include_directories(window-server-session-vt PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 add_test(NAME window-server-session-vt COMMAND window-server-session-vt)
+
+# **AND A SERVER WITH NOTHING TO DRAW MUST EXIT.** `--frames N` counts composited frames, so no client means no exit
+# condition at all — MEASURED as a hung shell, and as a claimed terminal that stranded a session. The deadline is about
+# the FIRST frame only, so the second half of this test proves it disarms: a client draws, and the server outlives the
+# deadline by three times over.
+add_test(NAME window-server-idle-timeout
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-idle-timeout.sh"
+    $<TARGET_FILE:window-server> $<TARGET_FILE:window-server-test-client>)

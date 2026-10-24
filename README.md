@@ -394,6 +394,36 @@ virtual-KMS module on this machine to test against either. So the backend is bui
 **refuses with the reason** — and the paths to making it testable are `nvidia_drm.modeset=1` (a kernel module
 parameter plus an initramfs rebuild and a reboot) or installing `vkms`.
 
+### 5a. A point is 1/72 inch, so the scale comes from the panel
+
+The output has two sizes: `width x height` is the framebuffer in **device pixels**, and the **logical** screen is
+what clients are told about. The scale is the number between them — device pixels per logical point — and its
+default is not a threshold guess at 1x or 2x. It is derived from the display's own physical size, because a point
+is a physical unit:
+
+```
+    dpi   = pixels_wide * 25.4 / millimetres_wide
+    scale = dpi / 72
+```
+
+A 24" 1080p monitor (1920 px across 531 mm) is 91.8 dpi, so its scale is 1.276; a 13" 4K laptop panel (3840 px
+across 294 mm) is 331.8 dpi, so its scale is 4.61. Both show a menu bar of the same physical height and text of
+the same physical size; the dense panel simply has more pixels to draw it with. The same rule runs the **nested
+X11 backend** against the host screen's millimetres, so a nested session is the physical size it would be natively,
+and the **DRM backend** against the connector's reported active width.
+
+**EDID IS NOT BELIEVED BLINDLY.** A connector that reports no millimetres, a width under 50 mm, or a dots-per-inch
+outside 50–400 says nothing usable — a wrong scale resizes every window on the screen — so the answer is "no answer"
+and the scale stays 1. `--scale N` still overrides the derivation entirely, which is the escape hatch for a monitor
+with a corrupt size block.
+
+**AND A CLIENT STILL HEARS AN INTEGER.** `wl_output.scale` is an integer in the protocol, so `aws_output_scale_integer`
+rounds up: a 1.28x output is advertised as 2, the client renders at 2x, and the compositor downsamples 2 -> 1.28.
+That is what makes a fractional scale sharp instead of a magnifying glass. `headless` has no panel to ask, so it
+stays at 1 unless `--scale` says otherwise.
+
+The arithmetic and its guards are `src/scale.c`, and `tests/scale.c` asks them directly — no display required.
+
 ### 6. It is tested without the AppKit
 
 `ctest` — the server, a client that is nothing but the protocol, and a check that reads the server's own
@@ -501,6 +531,12 @@ icon needs.
 MIT — see [`LICENSE`](LICENSE).
 
 ### 6. Claiming a terminal, and how to undo it
+
+**STATUS: UNTESTED ON GLASS.** Everything in this section is implemented, builds, and is covered only as far as its
+refusals and its unit tests go — **no claimed terminal has been composited on by a DRM backend**. The first attempt
+stranded a session (see the deadline and the deferred arming below, which exist because of it). Someone else is testing
+it and will report back; until that report exists, treat `--launcher vt` as experimental and do not run it where you
+cannot recover over SSH.
 
 `--launcher vt --vt N` switches to terminal `N` and takes it: `VT_ACTIVATE` + `VT_WAITACTIVE`, then `setsid` +
 `TIOCSCTTY` so that terminal is this process's controlling one, and — once the first frame has been composited —

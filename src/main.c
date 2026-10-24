@@ -78,24 +78,34 @@ static int on_vt_acquire(int signal_number, void *data)
 	return 0;
 }
 
-/* **A TERMINAL WITH NOTHING ON IT MUST GIVE ITSELF BACK, AND THAT IS A DEADLINE RATHER THAN A POLICY.** `--frames N`
- * counts COMPOSITED frames, so a compositor with no client composites none and never reaches its own exit condition —
- * it sits on somebody's screen until it is killed. MEASURED, on this machine, by the person whose session it was: the
- * screen went to a login prompt, stayed there, and the terminal it had claimed could not be switched away from because
- * the VT negotiation it had armed was waiting for an answer from a process that had nothing to draw.
+/* **A COMPOSITOR THAT NEVER COMPOSITES MUST NOT OUTLIVE ITS USEFULNESS, AND THAT IS A DEADLINE RATHER THAN A POLICY.**
+ * `--frames N` counts COMPOSITED frames, so a server with no client composites none and never reaches its own exit
+ * condition — it sits there until it is killed. MEASURED twice: once as a test that hung a shell for a minute, and once
+ * as a claimed terminal that left a person's session on a login prompt they could not leave.
  *
- * So a claim has a deadline: `--vt-timeout` seconds to produce a frame, after which the terminal is given back and the
- * process exits with a message. It is disarmed by the first frame, so a working session never sees it. */
-static struct wl_event_source *s_vt_timer;
+ * THE DEADLINE IS ABOUT THE *FIRST* FRAME AND NOT ABOUT IDLENESS. A desktop with nothing to draw is a working desktop
+ * — a clock ticking once a minute is not a stall — so once one frame has been composited the deadline is gone for good.
+ * What it catches is a compositor that never got that far: no client, a client that never mapped, a display that never
+ * took a frame.
+ *
+ * `--idle-timeout` is the same deadline for every backend; `--vt-timeout` is it for a claimed terminal, where the cost
+ * of overstaying is somebody else's session. Whichever is armed, the first frame disarms both. */
+static struct wl_event_source *s_startup_timer;
 static int s_vt_watching;
 
-static int on_vt_timeout(void *data)
+static int on_startup_timeout(void *data)
 {
 	struct aws_server *server = data;
 
-	fprintf(stderr, "window-server: nothing was composited on terminal %d within the deadline — giving it "
-			"back (a server with no client has nothing to draw; raise --vt-timeout if that is what "
-			"happened)\n", s_vt.number);
+	if (s_vt.number >= 0) {
+		fprintf(stderr, "window-server: nothing was composited on terminal %d within the deadline — giving "
+				"it back (a server with no client has nothing to draw; raise --vt-timeout if that is "
+				"what happened)\n", s_vt.number);
+	} else {
+		fprintf(stderr, "window-server: nothing was composited within the deadline — exiting (a server with "
+				"no client has nothing to draw; raise or disable --idle-timeout if that is what "
+				"happened)\n");
+	}
 	server->running = 0;
 	return 0;
 }
@@ -143,15 +153,22 @@ static void usage(const char *program)
 		"  --backend NAME    where the pixels go: %s (default headless)\n"
 		"  --renderer NAME   who draws them: %s (default auto: gl when a backend has a GPU present)\n"
 		"  --input NAME      where input comes from: %s (default libinput)\n"
-		"  --width/--height  the output's size, in pixels (default 1280x720)\n"
+		"  --width/--height  the output's size, in points (default 1280x720; the DRM backend uses the\n"
+		"                    display's mode instead)\n"
+		"  --scale N         device pixels per logical point. The default, 0, derives it from the\n"
+		"                    display so that 72 points are 1 inch on any panel; give a number to\n"
+		"                    override it (1.5 and 2 are the usual choices)\n"
 		"  --socket NAME     the Wayland socket's name; the default is chosen and printed\n"
 		"  --launcher NAME   where the terminal comes from: existing (default — run it from a text\n"
 		"                    console) or vt (switch to --vt N; needs root, and a display manager may\n"
 		"                    own the terminal you name — see --vt-timeout)\n"
 		"  --vt N            the terminal --launcher vt switches to. REQUIRED, and never chosen for\n"
 		"                    you: a terminal the kernel calls free may be somebody's login prompt\n"
-		"  --vt-timeout N    seconds a claimed terminal may go without a composited frame before it is\n"
+		"  --vt-timeout N    seconds a CLAIMED TERMINAL may go without a composited frame before it is\n"
 		"                    given back and the server exits (default 10; 0 disables)\n"
+		"  --idle-timeout N  seconds ANY backend may go without a composited frame before the server\n"
+		"                    exits (default 10; 0 disables). It is about the FIRST frame only: a\n"
+		"                    desktop with nothing to draw is a working desktop, not a stall\n"
 		"  --frames N        composite N frames, then stop (0, the default, runs until killed)\n"
 		"  --screenshot P    write the final output to a PPM file\n"
 		"  --system-menu-icon NAME\n"
@@ -170,9 +187,11 @@ int main(int argc, char **argv)
 	const char *input = NULL;
 	const char *renderer = NULL;
 	int width = 1280;
-	/* **THE DEVICE PIXELS PER LOGICAL PIXEL, AND 0 MEANS "ASK THE BACKEND".** `--scale 2` is what makes a HiDPI
-	 * panel usable today: clients keep drawing at the sizes they always did and the compositor presents them twice
-	 * as large, which is the right SIZE and a soft picture. A client that renders at 2x itself (buffer_scale) is then
+	/* **THE DEVICE PIXELS PER LOGICAL POINT, AND 0 MEANS "DERIVE IT FROM THE DISPLAY".** A point is 1/72 inch, so
+	 * the backend reads the monitor's pixel width and its millimetres and computes the scale that keeps that true —
+	 * 96 dpi gives 1.333…, a 13" 4K panel about 4.6. `--scale 2` overrides it, which is what makes a HiDPI panel
+	 * usable today: clients keep drawing at the sizes they always did and the compositor presents them twice as
+	 * large, which is the right SIZE and a soft picture. A client that renders at 2x itself (buffer_scale) is then
 	 * 1:1 and sharp — so the two halves are independent, and neither has to wait for the other. */
 	double scale = 0.0;
 	/* **WHERE THE DISPLAY COMES FROM: THE TERMINAL IT WAS STARTED ON, OR A NEW ONE IT CLAIMS.**
@@ -184,6 +203,9 @@ int main(int argc, char **argv)
 	 * with a display manager, and taking it moves a person off their session. */
 	int vt_number = 0;
 	int vt_timeout = 10;
+	/* **THE SAME DEADLINE FOR EVERY BACKEND.** 10 seconds to produce a frame, then exit; 0 disables. It is what makes
+	 * `--frames N` safe to run with nothing connected, which is how a compositor gets tested. */
+	int idle_timeout = 10;
 	int height = 720;
 	int frames = 0;
 	const char *socket_name = NULL;
@@ -212,6 +234,8 @@ int main(int argc, char **argv)
 			scale = atof(argv[++i]);
 		} else if (strcmp(argv[i], "--vt") == 0 && i + 1 < argc) {
 			vt_number = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "--idle-timeout") == 0 && i + 1 < argc) {
+			idle_timeout = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--vt-timeout") == 0 && i + 1 < argc) {
 			vt_timeout = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--launcher") == 0 && i + 1 < argc) {
@@ -344,12 +368,20 @@ int main(int argc, char **argv)
 		server->os_identity.source != NULL ? server->os_identity.source : "(none)",
 		server->os_identity.id[0] != '\0' ? server->os_identity.id : "(none)");
 
-	if (s_vt.number >= 0) {
-		/* **THE DEADLINE STARTS WITH THE CLAIM**, and it is on the event loop so it fires while the loop is blocked
-		 * waiting for a client that may never come. */
-		s_vt_timer = wl_event_loop_add_timer(server->loop, on_vt_timeout, server);
-		if (s_vt_timer != NULL && vt_timeout > 0) {
-			wl_event_source_timer_update(s_vt_timer, vt_timeout * 1000);
+	{
+		/* **THE DEADLINE IS ARMED BEFORE THE FIRST FRAME AND NEVER AGAIN.** It lives on the event loop so it fires
+		 * while the loop is blocked waiting for a client that may never come; a claimed terminal uses its own
+		 * timeout, because overstaying there costs somebody their session. */
+		int deadline = idle_timeout;
+
+		if (s_vt.number >= 0 && (vt_timeout <= 0 || vt_timeout < deadline)) {
+			deadline = vt_timeout;
+		}
+		if (deadline > 0) {
+			s_startup_timer = wl_event_loop_add_timer(server->loop, on_startup_timeout, server);
+			if (s_startup_timer != NULL) {
+				wl_event_source_timer_update(s_startup_timer, deadline * 1000);
+			}
 		}
 	}
 	server->running = 1;
@@ -452,8 +484,8 @@ int main(int argc, char **argv)
 			/* THE FIRST FRAME IS THE PROOF THAT THERE IS A COMPOSITOR HERE, so the deadline goes and the terminal
 			 * negotiation arrives. Both are one-way: a session that later goes quiet keeps its terminal, as a
 			 * session should. */
-			if (s_vt_timer != NULL) {
-				wl_event_source_timer_update(s_vt_timer, 0);
+			if (s_startup_timer != NULL) {
+				wl_event_source_timer_update(s_startup_timer, 0);
 			}
 			if (server->frames == 1) {
 				vt_watch_arm(server);
@@ -476,9 +508,9 @@ int main(int argc, char **argv)
 	if (sighup_source != NULL) {
 		wl_event_source_remove(sighup_source);
 	}
-	if (s_vt_timer != NULL) {
-		wl_event_source_remove(s_vt_timer);
-		s_vt_timer = NULL;
+	if (s_startup_timer != NULL) {
+		wl_event_source_remove(s_startup_timer);
+		s_startup_timer = NULL;
 	}
 
 	fprintf(stderr, "window-server: %d frame(s) composited\n", server->frames);
