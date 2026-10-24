@@ -418,6 +418,33 @@ static void window_set_app_id(struct wl_client *client, struct wl_resource *reso
 	aws_shell_window_list_changed(surface->server);
 }
 
+/* **THE BADGE, WHICH IS PUSHED RATHER THAN ASKED FOR.** Stored on the window like `app_id` — it is the only
+ * application state this server keeps — and carried on the window list, so a Dock learns it in the snapshot it already
+ * takes. An empty string is the ordinary "no badge", and it is what an application that never sets one reports. */
+static void window_set_badge(struct wl_client *client, struct wl_resource *resource, const char *badge)
+{
+	struct aws_surface *surface = wl_resource_get_user_data(resource);
+	struct aws_server *server;
+	struct aws_surface *other;
+
+	if (surface == NULL) {
+		return;
+	}
+	/* **THE BADGE IS THE APPLICATION'S, SO EVERY WINDOW OF THE CONNECTION GETS IT.** The storage is per window (the
+	 * only application state this server keeps), but the MEANING is per application: an app with two windows that set
+	 * the badge on one must not leave the other reporting no badge to a Dock that read that one. The connection is the
+	 * application, so this is the scope. */
+	server = surface->server;
+	wl_list_for_each(other, &server->surfaces, link) {
+		if (other->resource == NULL || wl_resource_get_client(other->resource) != client) {
+			continue;
+		}
+		free(other->badge);
+		other->badge = strdup(badge != NULL ? badge : "");
+	}
+	aws_shell_window_list_changed(server);
+}
+
 /* **AND THE ONE A DRAG TAKES, WHICH IS A REAL GRAB.** See the protocol's `set_pointer_capture`: while this is
  * set the pointer goes to THIS surface wherever it is, because the window a hand is resizing moves out from under
  * it. One at a time, like the fallback above; destroying the surface, releasing the last button, or asking with
@@ -552,6 +579,7 @@ static const struct agora_window_interface agora_window_implementation = {
 	window_set_activatable,
 	window_take_focus,
 	window_set_dock_menu,
+	window_set_badge,
 };
 
 static void agora_window_destroy_resource(struct wl_resource *resource)
@@ -656,6 +684,12 @@ void aws_shell_window_list_changed(struct aws_server *server)
 						     surface->title != NULL ? surface->title : "",
 						     surface->level, surface->visible ? 1 : 0,
 						     server->keyboard_focus == surface ? 1 : 0);
+			/* **A LIST BOUND AT 1 IS NEVER SENT THIS.** The badge has its own event precisely so an older
+			 * listener is not handed a wire it cannot parse; the guard is the version the RESOURCE was made at. */
+			if (wl_resource_get_version(list->resource) >= 2) {
+				agora_window_list_send_badge(list->resource, surface->id,
+							     surface->badge != NULL ? surface->badge : "");
+			}
 		}
 		agora_window_list_send_done(list->resource);
 	}
@@ -1086,5 +1120,5 @@ static void bind_agora_shell(struct wl_client *client, void *data, uint32_t vers
 
 void aws_shell_init(struct aws_server *server)
 {
-	wl_global_create(server->display, &agora_shell_interface, 7, server, bind_agora_shell);
+	wl_global_create(server->display, &agora_shell_interface, 8, server, bind_agora_shell);
 }

@@ -43,6 +43,7 @@ struct row {
 	unsigned int id;
 	char app_id[64];
 	char title[64];
+	char badge[64];
 	int level;
 	int visible;
 	int active;
@@ -111,6 +112,23 @@ static void list_window(void *data, struct agora_window_list *list, uint32_t id,
 	row->active = (int)active;
 }
 
+/* **THE BADGE COMES BESIDE THE WINDOW IT BELONGS TO**, so the row is already there when it arrives; the id is what
+ * pairs them. */
+static void list_badge(void *data, struct agora_window_list *list, uint32_t id, const char *badge)
+{
+	struct state *state = data;
+	int i;
+
+	(void)list;
+	for (i = 0; i < state->count; i++) {
+		if (state->rows[i].id == id) {
+			snprintf(state->rows[i].badge, sizeof state->rows[i].badge, "%s",
+				 badge != NULL ? badge : "");
+			return;
+		}
+	}
+}
+
 static void list_done(void *data, struct agora_window_list *list)
 {
 	struct state *state = data;
@@ -123,6 +141,7 @@ static void list_done(void *data, struct agora_window_list *list)
 static const struct agora_window_list_listener list_listener = {
 	list_begin,
 	list_window,
+	list_badge,
 	list_done,
 };
 
@@ -219,7 +238,7 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
 	} else if (strcmp(interface, wl_shm_interface.name) == 0) {
 		state->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
 	} else if (strcmp(interface, agora_shell_interface.name) == 0) {
-		state->shell = wl_registry_bind(registry, name, &agora_shell_interface, version < 6 ? version : 6);
+		state->shell = wl_registry_bind(registry, name, &agora_shell_interface, version < 8 ? version : 8);
 	}
 }
 
@@ -353,6 +372,7 @@ int main(void)
 	agora_window_add_listener(window_a, &window_listener, &state);
 	agora_window_set_app_id(window_a, "io.github.agoradesktop.probe.a");
 	agora_window_set_title(window_a, "A");
+	agora_window_set_badge(window_a, "3");
 	agora_window_set_frame(window_a, 0, 40, 200, 100);
 	buffer_a = make_buffer(&state, 200, 100, 0x00FF0000u);
 	if (buffer_a == NULL) {
@@ -371,7 +391,8 @@ int main(void)
 	}
 	row = &state.rows[0];
 	id_a = row->id;
-	if (id_a == 0 || strcmp(row->app_id, "io.github.agoradesktop.probe.a") != 0 || strcmp(row->title, "A") != 0) {
+	if (id_a == 0 || strcmp(row->app_id, "io.github.agoradesktop.probe.a") != 0 || strcmp(row->title, "A") != 0
+	    || strcmp(row->badge, "3") != 0) {
 		fail(&state, "the row for A has the wrong identity");
 	} else if (row->visible != 1 || row->active != 1 || row->level != 0) {
 		fail(&state, "the row for A has the wrong state — a mapped first window is visible and active");

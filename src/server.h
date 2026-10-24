@@ -86,6 +86,7 @@ struct aws_surface {
 	struct wl_resource *xdg_toplevel;
 	char *title;
 	char *app_id;
+	char *badge;			/* the Dock tile's label this application set; empty when none */
 	int configure_sent;			/* the initial configure has gone; it is sent once */
 	int configured;				/* the client has acked a configure and may attach a buffer */
 	int mapped;

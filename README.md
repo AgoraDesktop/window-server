@@ -467,7 +467,10 @@ that is written down is a decision and one that is not is a surprise.
   application states its frame and the server honours it; that cascade is gone. What remains absent is anything
   that would place a window the application did not, and the furniture the server owns beyond a menu bar's
   reserve. **The server's half of that model is implemented: `agora_shell`** — see `protocol/agora-shell.xml`
-  and [`DESIGN.md`](DESIGN.md).
+  and [`DESIGN.md`](DESIGN.md). **Version 8 adds the Dock tile's badge**: `agora_window.set_badge` is the
+  application pushing the label its tile shows (the connection is the application, so every one of its windows
+  carries it), and `agora_window_list.badge` hands it to a Dock in the snapshot it already takes — its own event
+  rather than another argument on `window`, because an older listener must not be handed a wire it cannot parse.
 
 ## Build and run
 
