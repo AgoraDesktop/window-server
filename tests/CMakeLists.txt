@@ -83,15 +83,22 @@ add_executable(window-server-system-icon
 target_include_directories(window-server-system-icon PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 add_test(NAME window-server-system-icon COMMAND window-server-system-icon)
 
-# **AND 72 POINTS MUST BE AN INCH, WHICH IS ARITHMETIC AND NOT A DISPLAY.** The scale a physical panel asks for is
-# the one policy the backends share, so it is compiled in as it ships and asked directly — no Wayland server, no
-# EDID, and no screenshot can show that a 96-dpi panel got 4/3 rather than 1. `scale.h` is deliberately free of
-# Wayland so this test needs neither the server headers nor a display.
+# **AND 72 POINTS MUST BE AN INCH, WHICH IS ARITHMETIC AND NOT A DISPLAY.** The policy the backends share — the
+# panel's measured dpi, with 96 dpi only as the fallback when it reports no usable size — is compiled in as it ships
+# and asked directly: no Wayland server, no EDID, and no screenshot can show that a 91.8-dpi screen got 1.28 rather
+# than a rounded 1 or 2. `scale.h` is deliberately free of Wayland so this test needs neither the server headers nor a
+# display.
 add_executable(window-server-scale
   scale.c
   "${CMAKE_CURRENT_SOURCE_DIR}/../src/scale.c")
 target_include_directories(window-server-scale PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 add_test(NAME window-server-scale COMMAND window-server-scale)
+
+# **AND THE OVERRIDE THE UNIT TEST CANNOT SEE: THE COMMAND LINE.** `--dpi 144` must reach the framebuffer as 2x, the
+# startup line must name both spellings, and `--dpi` together with `--scale` must be refused rather than letting one
+# silently win. It is a headless server with no client and a one-second deadline, so it needs no display.
+add_test(NAME window-server-dpi-override
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-dpi-override.sh" "$<TARGET_FILE:window-server>")
 
 # **THE DIAGNOSTIC DOORS ARE TESTED WITHOUT A DISPLAY**, which is the property that makes them useful on a machine
 # whose compositor will not start. `--dump-os-identity` and `--list-system-menu-icons` return before the backend is

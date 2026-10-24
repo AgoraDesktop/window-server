@@ -68,13 +68,22 @@ static void output_menu_bar_area(void *data, struct agora_output *output, int32_
 	(void)data; (void)output; (void)x; (void)y; (void)width; (void)height; (void)colour;
 }
 
+/* **AND THE REAL SCALE, WHICH THIS TEST DOES NOT MEASURE BUT MUST STILL ANSWER.** libwayland aborts on an event whose
+ * listener slot is NULL, and `preferred_scale` is now sent on every bind — so the slot is filled even though the
+ * number is not what this probe is asking about. */
+static void output_preferred_scale(void *data, struct agora_output *output, wl_fixed_t scale)
+{
+	(void)data; (void)output; (void)scale;
+}
+
 static const struct agora_output_listener output_listener = {
-	/* TWO EVENTS, AND BOTH SLOTS ARE FILLED BECAUSE BOTH ARE ALWAYS SENT: `agora_output` declares `work_area`
-	 * first and `menu_bar_area` second, in that order, and libwayland ABORTS on an event whose listener slot is
-	 * NULL — MEASURED while writing this test: "listener function for opcode 1 of agora_output is NULL". The
-	 * bar's region is not what this test measures, so its callback is named and does nothing. */
+	/* THREE EVENTS, AND EVERY SLOT IS FILLED BECAUSE EVERY ONE IS SENT: `agora_output` declares `work_area`,
+	 * `menu_bar_area` and (since version 2) `preferred_scale` in that order, and libwayland ABORTS on an event whose
+	 * listener slot is NULL — MEASURED while writing this test: "listener function for opcode 1 of agora_output is
+	 * NULL". The two events this test does not measure still get named callbacks that do nothing. */
 	output_work_area,
 	output_menu_bar_area,
+	output_preferred_scale,
 };
 
 static void window_close(void *data, struct agora_window *window)

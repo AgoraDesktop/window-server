@@ -16,6 +16,7 @@
  */
 
 #include "server.h"
+#include "scale.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,8 +44,12 @@ int aws_backend_init(struct aws_server *server, const char *name, int width, int
 	 * display (drm) overwrites width/height with its mode and its logical size is that divided by the scale. So the
 	 * framebuffer below is always `width x height`, and `aws_output_width()` is always the number clients are told.
 	 *
-	 * THE ONE FIELD IS WHY THIS IS ONE PLACE: `--scale` wins, a backend's own hint is used when nobody said, and 1
-	 * is the answer for anything that cannot tell. */
+	 * THE ONE FIELD IS WHY THIS IS ONE PLACE: `--scale` (or its `--dpi` spelling, which `main` has already converted)
+	 * wins, a backend's own hint is used when nobody said, and 1 is the answer for anything that cannot tell. */
+	/* **THE SCALE IS QUANTISED ONCE, BEFORE THE FRAMEBUFFER OR A CLIENT SEES IT.** See `aws_scale_quantized`: the
+	 * wire carries 1/256 and a client sizes its buffer from the number it is told, so an unquantised server scale
+	 * would make the two disagree by a fraction of a texel and turn every 1:1 blit into a resample. */
+	scale = aws_scale_quantized(scale);
 	server->backend.user_scale = (scale > 0.0) ? scale : 0.0;
 	if (scale <= 0.0) {
 		scale = 1.0;	/* provisional: a backend may replace this from its display during start */

@@ -70,6 +70,16 @@ struct aws_server *aws_server_create(const char *backend_name, const char *input
 		free(server);
 		return NULL;
 	}
+	/* **AND NOW THE BACKEND KNOWS WHAT IS DRAWING.** A GPU backend waits until here to allocate anything that the
+	 * renderer might make unnecessary: the DRM one would otherwise spend two framebuffers of dumb memory before a
+	 * GBM swapchain takes the screen, which at 8K is 265 MB nobody needed. */
+	if (server->backend.start_present != NULL && server->backend.start_present(server) != 0) {
+		aws_renderer_shutdown(server);
+		aws_backend_shutdown(server);
+		wl_display_destroy(server->display);
+		free(server);
+		return NULL;
+	}
 	/* **AND THE GPU-BUFFER PROTOCOL, WHICH EXISTS ONLY IF THE RENDERER CAN IMPORT.** It is created here and not
 	 * with the globals above because its format list IS the renderer's answer, and a client cannot bind anything
 	 * until `wl_display_add_socket_auto` runs in `main` — which is after this returns. */

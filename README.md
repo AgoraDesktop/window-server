@@ -111,17 +111,17 @@ window-server: gl renderer: EGL 1.5, NVIDIA GeForce GTX 1060 6GB/PCIe/SSE2
 
 - **`cpu`** is the original compositor, moved verbatim to `src/renderer-cpu.c`. Every backend can run it.
 - **`gl`** is EGL + GLES2 (`src/renderer-gl.c`). Shadows and rounded corners are the same distance function and the
-  same constants as the CPU path, in a shader.
-- **`auto`** (the default) takes `gl` when a backend hands it a native window — today only the nested X11 backend —
-  and falls to `cpu` otherwise. A renderer **asked for by name** that cannot start is a hard failure, not a silent
-  fallback.
+  same constants as the CPU path, in a shader. It draws into an X11 window on the nested output and into a **GBM
+  surface** on DRM/KMS; on the latter, `gl_present` locks the front buffer and the backend names it to the plane.
+- **`auto`** (the default) takes `gl` when a backend hands it a drawable — an X11 window or a GBM device — and falls to
+  `cpu` otherwise. A renderer **asked for by name** that cannot start is a hard failure, not a silent fallback.
 
-**THE NESTED OUTPUT IS WHERE THE GPU RENDERER WAS BUILT, AND THAT IS THE ARGUMENT RATHER THAN A CONVENIENCE.**
+**THE NESTED OUTPUT IS WHERE THE GPU RENDERER WAS BUILT, AND IT IS STILL WHERE THE PICTURE IS WATCHED.**
 Acceleration is two independent halves: the renderer, and the display path that gets a finished frame onto the
-glass. Nested X11 exercises the first with no DRM master, no KMS driver, no virtual terminal and no logind seat,
-and on this machine it is the only place the first half is testable end to end: the DRM path is proven to the
-dry run (see §5) and not to the picture. A DRM accelerated path is therefore a GBM swapchain added **under** this renderer,
-not a second renderer beside it.
+glass. Nested X11 exercises both without a DRM master, a KMS driver, a virtual terminal or a logind seat. The DRM
+output now has the second half too — a GBM surface and an atomic plane commit — but the machine this tree is
+developed on has NVIDIA's GBM, whose `gbm_surface_create` answers `ENOSYS`, so that path is written and compiled
+and not yet run against a picture; the CPU fallback is what drives a real DRM screen here.
 
 **AND THE TWO RENDERERS ARE CHECKED AGAINST EACH OTHER, NOT AGAINST A FEELING.** Both answer `--screenshot`; the GL
 one reads its frame back with `glReadPixels` before it swaps. A CPU frame and a GL frame of the same scene differ
@@ -280,19 +280,32 @@ the group `rw` is already there, and nothing else has to change.
 Notice what is NOT wrong: udev finds the devices, libinput builds them, and the seat assignment succeeds. The
 failure is one `open()` and it is the operating system's answer rather than the compositor's.
 
-### 5. DRM/KMS: written, proven to the modeset on this machine, not yet composited on glass by its author
+### 5. DRM/KMS: two display paths, the GPU one written and the CPU one measured
 
-`--backend drm` is the shipping backend: it opens a card, takes DRM master, allocates **two dumb buffers**, maps
-them, and points a CRTC at them through an atomic commit — no copy, no GBM, no EGL. Frames are written straight
-into the buffer that is not being scanned, and the swap is a flip at vblank (`flip_pending` holds the loop off the
-page the display may still be reading).
+`--backend drm` is the shipping backend: it opens a card, takes DRM master, chooses a connector/mode/CRTC/plane, and
+puts an atomic commit on the CRTC. **There are two ways a frame reaches that plane, chosen after the renderer:**
+
+- **GBM/GL, the preferred one.** The GL renderer makes a `GBM_FORMAT_XRGB8888` surface with `GBM_BO_USE_SCANOUT |
+  GBM_BO_USE_RENDERING`, draws into it, and on present locks the front buffer and hands it to the backend, which
+  makes a framebuffer (`drmModeAddFB2WithModifiers`, so a tiled layout is described rather than assumed) and flips
+  the plane to it. No CPU pixels, no copy, and no dumb buffer at all — which is what makes 8K possible: the two dumb
+  pages it replaces are 265 MB.
+- **The CPU fallback, for a driver whose GBM cannot scan out.** Two dumb buffers are mapped into this process, the
+  scene is written into the one not being scanned, and the swap is a vblank flip (`flip_pending` holds the loop off
+  the page the display may still be reading). NVIDIA's GBM is this case: `gbm_surface_create` answers `ENOSYS`, the
+  renderer falls back to `cpu`, and the pages are allocated.
+
+**THE BACKEND DECIDES AFTER THE RENDERER, WHICH IS WHY `start_present` EXISTS.** Allocating the fallback pages in
+`start` would mean every GPU session paying for them first — the exact cost this work removes. `drm_start` probes,
+makes the GBM device and records the mode; `aws_server_create` then makes the renderer; only if that renderer is the
+CPU is a page allocated.
 
 **WHAT IS MEASURED HERE VERSUS WHAT IS CLAIMED.** `AWS_DRM_DRY_RUN=1` takes the device, picks the connector, mode,
-CRTC and plane, allocates both buffers and both framebuffers and the mode blob, and gives master back without
-setting anything: that passes on this machine with `nvidia_drm.modeset=1`. A *committed* modeset has not been
-replayed by this file's author since the HiDPI and virtual-terminal work landed, so the picture on glass is
-unverified — see §6 for the terminal machinery that must be right before anyone tries it on a machine they cannot
-reach over SSH.
+CRTC and plane, creates the GBM device, and — if the CPU route was taken — both pages, both framebuffers and the
+mode blob, then gives master back without setting anything. That passes on this machine with `nvidia_drm.modeset=1`.
+The committed CPU modeset has also been started and stopped here. **The GBM path is not measured to a picture**: this
+machine's NVIDIA GBM fails at `gbm_surface_create` with `Function not implemented`, which is the fallback working as
+intended and not the swapchain working. A Mesa card (AMD/Intel) is what would exercise it.
 
 **Two things it must do that a windowed backend never does**, and both are safety rather than features:
 
@@ -309,10 +322,11 @@ until the flip event has been read off the DRM descriptor, which is on the event
 is spent in the event loop, where the rest of the compositor keeps working — not inside `present`, where nothing
 could. That also paces the compositor to the display's refresh rather than to how fast it can paint.
 
-**THE ATOMIC REPLACEMENT IS NOT YET CONFIRMED ON A SCREEN.** The legacy path was measured
-to be inert on this driver (see below) and has been replaced by `drmModeAtomicCommit`. Everything up to the
-commit is verified by the dry run; **the commit itself has not been run**, because its failure mode is the
-display of the person running it.
+**THE ATOMIC PATH IS VERIFIED UP TO THE COMMIT, AND THE CPU COMMIT HAS BEEN STARTED HERE.** The legacy path was
+measured to be inert on this driver (see below) and has been replaced by `drmModeAtomicCommit`. The dry run proves
+every step before it; the committed CPU modeset has also been run and given back on this machine, without a claim
+about what the panel showed. The GBM commit is the one path this machine cannot prove — its GBM refuses the
+surface (see above).
 
 **AND THE CLAIM BELOW WAS MADE ONCE WITHOUT BEING CHECKED, AND WAS WRONG** — the numbers are what the
 COMPOSITOR did, not evidence that light came out of a monitor, which is a thing only a person looking at the
@@ -321,7 +335,7 @@ screen can say:
 ```
 $ ./build/window-server --backend drm --frames 120 &
 $ WAYLAND_DISPLAY=… libagora-app/build/tests/appkit_window --seconds 4
-window-server: driving /dev/dri/card0 at 1920x1080 (dumb buffer scanout)
+window-server: driving /dev/dri/card0 at 1920x1080 (atomic, 2 pages, async flip: connector 77, crtc 42, plane 36)
 window-server: 120 frame(s) composited
 appkit_window: drew 120 frame(s); frame now 640x422
 server exit=0
@@ -394,33 +408,56 @@ virtual-KMS module on this machine to test against either. So the backend is bui
 **refuses with the reason** — and the paths to making it testable are `nvidia_drm.modeset=1` (a kernel module
 parameter plus an initramfs rebuild and a reboot) or installing `vkms`.
 
-### 5a. A point is 1/72 inch, so the scale comes from the panel
+### 5a. A point is 1/72 inch: the panel decides, and clients draw on the device grid
 
 The output has two sizes: `width x height` is the framebuffer in **device pixels**, and the **logical** screen is
-what clients are told about. The scale is the number between them — device pixels per logical point — and its
-default is not a threshold guess at 1x or 2x. It is derived from the display's own physical size, because a point
-is a physical unit:
+what clients are told about. The scale is the number between them — device pixels per logical point — and a point is
+a physical unit, so the panel's own dots per inch decide it:
 
 ```
     dpi   = pixels_wide * 25.4 / millimetres_wide
     scale = dpi / 72
 ```
 
-A 24" 1080p monitor (1920 px across 531 mm) is 91.8 dpi, so its scale is 1.276; a 13" 4K laptop panel (3840 px
-across 294 mm) is 331.8 dpi, so its scale is 4.61. Both show a menu bar of the same physical height and text of
-the same physical size; the dense panel simply has more pixels to draw it with. The same rule runs the **nested
-X11 backend** against the host screen's millimetres, so a nested session is the physical size it would be natively,
-and the **DRM backend** against the connector's reported active width.
+A 27" 1440p monitor (2560 px across 597 mm) is 108.9 dpi, so its scale is 1.51; a 13" 4K laptop panel (3840 px
+across 294 mm) is 331.8 dpi, so its scale is 4.61; a 32" 1080p panel is 57.97 dpi, so its scale is 0.805. Every one
+of them shows a 23-point button 23/72 inch tall. The same rule runs the **nested X11 backend** against the host
+screen and the **DRM backend** against the connector's active width. The measurement is exact rather than rounded to
+1x or 2x.
 
-**EDID IS NOT BELIEVED BLINDLY.** A connector that reports no millimetres, a width under 50 mm, or a dots-per-inch
-outside 50–400 says nothing usable — a wrong scale resizes every window on the screen — so the answer is "no answer"
-and the scale stays 1. `--scale N` still overrides the derivation entirely, which is the escape hatch for a monitor
-with a corrupt size block.
+**96 DPI IS THE FALLBACK, NOT THE RULE.** A connector that reports no millimetres, a width under 50 mm, or a
+dots-per-inch outside 50–400 says nothing usable — a wrong scale resizes every window on the screen — so the answer
+is "no answer". A display 1080p or lower that says nothing gets 96 dpi, the conventional desktop size; one above
+1080p keeps scale 1 until told otherwise. `--dpi N` and `--scale N` override both branches, and they are the same
+instruction: `--dpi` is the number on the monitor's box, `--scale` is that number divided by 72. They are the escape
+hatch for a corrupt size block and for the one structure that reports two screens' numbers as one.
 
-**AND A CLIENT STILL HEARS AN INTEGER.** `wl_output.scale` is an integer in the protocol, so `aws_output_scale_integer`
-rounds up: a 1.28x output is advertised as 2, the client renders at 2x, and the compositor downsamples 2 -> 1.28.
-That is what makes a fractional scale sharp instead of a magnifying glass. `headless` has no panel to ask, so it
-stays at 1 unless `--scale` says otherwise.
+**A MULTI-HEAD X SCREEN IS THE CASE `--dpi` EXISTS FOR.** Under Xinerama/TwinView there is one X screen whose
+`DisplayWidth` spans every monitor while `DisplayWidthMM` describes a single panel. Two 1080p monitors side by side
+can read as 3840 px across one 531 mm panel — 184 dpi, scale 2.55 — where each panel is really 92 dpi, scale 1.28.
+The measurement cannot know which number is the lie, so the person in front of the screen states the answer:
+`--dpi 92` (or `--scale 1.28`). The startup line says which branch produced the scale, so the choice is visible
+before anything is drawn.
+
+**AND THE CLIENT IS TOLD THE FRACTION, NOT ONLY THE CEILING.** `wl_output.scale` is an integer, so a 1.333 output is
+advertised there as 2 — and a client that renders at 2x is then resampled by the compositor, which is real but soft.
+`agora_output.preferred_scale` (protocol version 9) carries the display's real 1.333 (quantised once to the 1/256
+`wl_fixed` can hold), and `agora_window.set_buffer_scale_fixed` is the client's answer: "my buffer is 1.333 device
+pixels per point". The client sizes that buffer as `round(points * scale)`, rasterises into it with the same
+fractional transform, and the compositor places it **1:1** — no sampler in the path, so a glyph edge is one
+antialiased cover pixel rather than a resampled ramp. That is the difference between resolution independence and a
+magnifying glass.
+
+A client that does not speak the extension still hears the integer ceiling and is composited with the box filter
+(`gl_box_for`, `scaled_block_pixel`), so it keeps working — a little soft on a fractional output, but correct. The
+startup line names both:
+
+```
+window-server: listening on agora, x11 output 1280x720, 1705x959 device pixels (scale 1.33203, 96 dpi)
+```
+
+`--dpi` and `--scale` are mutually exclusive on purpose: giving both would leave the command line silently meaning
+one of two numbers. `headless` has no display to measure, so it stays at 1 unless told otherwise.
 
 The arithmetic and its guards are `src/scale.c`, and `tests/scale.c` asks them directly — no display required.
 

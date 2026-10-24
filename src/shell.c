@@ -203,6 +203,12 @@ static void bind_agora_output(struct wl_client *client, void *data, uint32_t ver
 	/* **AND WHAT COLOUR IT IS**, because the application's menus are drawn in this bar and a menu drawn on a panel
 	 * of its own colour is a seam across what is meant to be one surface. */
 	agora_output_send_menu_bar_area(resource, x, y, width, height, AWS_MENU_BAR_COLOUR & 0xFFFFFFu);
+	/* **AND THE REAL SCALE, RATHER THAN `wl_output.scale`'S CEILING.** A client that renders at this fraction can be
+	 * placed 1:1; one that ignores it keeps using the integer and is merely soft on a fractional output. The value
+	 * is already quantised to 1/256 (see `aws_scale_quantized`), so `wl_fixed_from_double` carries it exactly. */
+	if (version >= 2) {
+		agora_output_send_preferred_scale(resource, wl_fixed_from_double(aws_output_scale(server)));
+	}
 	/* **AN EVENT-ONLY INTERFACE HAS NO IMPLEMENTATION STRUCT**, which is not an inconvenience but the generated
 	 * header telling the truth: the server never RECEIVES anything on this object, so there is no vtable to
 	 * fill and `NULL` is what says so. The user data is the list's wrapper instead, because the work area can
@@ -227,8 +233,11 @@ static void window_destroy(struct wl_client *client, struct wl_resource *resourc
 void aws_shell_place_status_items(struct aws_server *server)
 {
 	struct aws_surface *surface;
-	/* The screen's size is the BACKEND's — `struct aws_output` is only the wl_output resource. */
-	int right = server->backend.width;
+	/* **THE SCREEN'S LOGICAL WIDTH, NOT THE FRAMEBUFFER'S.** A status item's length is in points, so packing it from
+	 * `backend.width` (device pixels) put every item at `width x scale - length`: at 1.332 the clock landed at
+	 * logical x=1644 on a 1280-point screen, entirely off the right edge. MEASURED while chasing the menu bar's
+	 * seam — the window existed, the compositor drew it, and nobody could see it. */
+	int right = aws_output_width(server);
 
 	wl_list_for_each(surface, &server->surfaces, link) {
 		if (surface->status_length <= 0) {
@@ -445,6 +454,21 @@ static void window_set_badge(struct wl_client *client, struct wl_resource *resou
 	aws_shell_window_list_changed(server);
 }
 
+/* **THE BUFFER'S REAL SCALE, WHICH THE PROTOCOL'S INTEGER CANNOT SAY.** See `aws_surface_set_buffer_scale_fixed` and
+ * `aws_scale_quantized`: the client rendered at `round(points * scale)` and this is that fraction, so the
+ * compositor can place the buffer 1:1 instead of resampling an integer supersample. A non-positive fraction is a
+ * client bug rather than a smaller display, and the surface helper refuses it. */
+static void window_set_buffer_scale_fixed(struct wl_client *client, struct wl_resource *resource, wl_fixed_t scale)
+{
+	struct aws_surface *surface = wl_resource_get_user_data(resource);
+
+	(void)client;
+	if (surface == NULL) {
+		return;
+	}
+	aws_surface_set_buffer_scale_fixed(surface, wl_fixed_to_double(scale));
+}
+
 /* **AND THE ONE A DRAG TAKES, WHICH IS A REAL GRAB.** See the protocol's `set_pointer_capture`: while this is
  * set the pointer goes to THIS surface wherever it is, because the window a hand is resizing moves out from under
  * it. One at a time, like the fallback above; destroying the surface, releasing the last button, or asking with
@@ -580,6 +604,7 @@ static const struct agora_window_interface agora_window_implementation = {
 	window_take_focus,
 	window_set_dock_menu,
 	window_set_badge,
+	window_set_buffer_scale_fixed,
 };
 
 static void agora_window_destroy_resource(struct wl_resource *resource)
@@ -1120,5 +1145,9 @@ static void bind_agora_shell(struct wl_client *client, void *data, uint32_t vers
 
 void aws_shell_init(struct aws_server *server)
 {
-	wl_global_create(server->display, &agora_shell_interface, 8, server, bind_agora_shell);
+	/* **THE GLOBAL ADVERTISES ITS OWN INTERFACE'S VERSION, NOT A NUMBER COPIED FROM IT.** The literal was 8 and the
+	 * interface moved to 9 for the fractional scale; the two disagreeing is exactly how a client binds at 8 and
+	 * never sees `preferred_scale`, which is the bug this line used to be. */
+	wl_global_create(server->display, &agora_shell_interface, (int)agora_shell_interface.version, server,
+			 bind_agora_shell);
 }

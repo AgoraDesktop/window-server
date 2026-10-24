@@ -57,6 +57,9 @@
 #include "systemicon.h"
 
 struct aws_server;
+struct gbm_device;
+struct gbm_surface;
+struct gbm_bo;
 
 /* A SURFACE, and the role it has been given. A surface is what a client draws into; the ROLE is what makes it
  * a window rather than a cursor or a popup, and this version knows exactly one role. */
@@ -103,9 +106,14 @@ struct aws_surface {
 	 * would have overflowed its own frame by the factor.
 	 *
 	 * DOUBLE-BUFFERED, as the protocol says: the request takes effect on the NEXT commit, which is why the
-	 * pending copy is here. A client sets the scale and the size together and they must land together. */
-	int buffer_scale;			/* device pixels per logical pixel; 1 until a client says otherwise */
-	int pending_buffer_scale;		/* what the scale becomes on the next commit */
+	 * pending copy is here. A client sets the scale and the size together and they must land together.
+	 *
+	 * **AND IT IS A DOUBLE BECAUSE THE PROTOCOL'S INTEGER IS NOT THE REAL NUMBER.** `agora_window.set_buffer_scale_fixed`
+	 * declares the display's own fraction (1.333, 0.805), which is what lets a client rasterise on the final pixel
+	 * grid and the compositor place it 1:1. `wl_surface.set_buffer_scale` still writes this field, with a whole
+	 * number, for clients that do not speak the extension. */
+	double buffer_scale;			/* device pixels per logical pixel; 1 until a client says otherwise */
+	double pending_buffer_scale;		/* what the scale becomes on the next commit */
 	int level;
 	/* **AND THE ONE KIND OF WINDOW WHOSE PLACEMENT IS NOT THE APPLICATION'S.** `NSStatusItem` has a length and
 	 * no position, so its width is the whole of what its client is asked for and the packing is `shell.c`'s.
@@ -188,9 +196,23 @@ struct aws_backend {
 	unsigned long native_window;		/* X11: Window */
 	unsigned long native_visual;		/* X11: the window's visual id, for choosing an EGL config */
 
+	/* **AND WHERE A GPU DRAWS STRAIGHT TO A SCANNER: GBM.** A DRM backend has no window to hand EGL, so it hands
+	 * the card's device instead. The renderer makes a GBM surface from it, renders into it, and on present asks
+	 * the backend to put the locked front buffer on the plane (`gbm_present`). The surface is the RENDERER's to
+	 * make and destroy; the backend keeps the pointer only because releasing a buffer back to a GBM surface needs
+	 * it, and that release happens on a page-flip event the backend owns. */
+	struct gbm_device *gbm_device;		/* DRM: the GBM device made from the card's fd */
+	struct gbm_surface *gbm_surface;	/* set by the GL renderer once it has made one */
+	/* Show one locked GBM buffer. Nonzero means it could not be shown and the RENDERER gives the buffer back. */
+	int (*gbm_present)(struct aws_server *server, struct gbm_bo *bo);
+
 	/* CALLED ONCE, AFTER THE WAYLAND DISPLAY EXISTS — an X11 backend needs the event loop to add its own
 	 * descriptor to. Returns 0 on success. */
 	int (*start)(struct aws_server *server);
+	/* **THE SECOND HALF OF STARTING, ONCE A RENDERER HAS BEEN CHOSEN.** A GPU backend must not allocate its
+	 * fallback pages before it knows whether the GL renderer took the present; a CPU backend has nothing to
+	 * defer. Returns 0 on success. NULL for a backend whose `start` was the whole story. */
+	int (*start_present)(struct aws_server *server);
 	/* PUT THE FRAMEBUFFER ON THE DISPLAY. Called after every composite, so it must be cheap enough to call
 	 * sixty times a second; a backend with nothing to do (headless) leaves it NULL. */
 	void (*present)(struct aws_server *server);
@@ -686,6 +708,12 @@ struct aws_surface *aws_surface_at(struct aws_server *server, int x, int y);
 
 /* SEND A SURFACE ITS FRAME CALLBACKS, which is how a client learns its frame was taken. */
 void aws_surface_frame_done(struct aws_surface *surface, uint32_t time);
+
+/* **THE FRACTIONAL BUFFER SCALE, FROM `agora_window.set_buffer_scale_fixed`.** Double-buffered exactly like
+ * `wl_surface.set_buffer_scale`: it lands on the next commit, together with the buffer it describes. See
+ * `struct aws_surface`'s `buffer_scale` and `aws_scale_quantized` for why the value is a double and where it came
+ * from. */
+void aws_surface_set_buffer_scale_fixed(struct aws_surface *surface, double scale);
 
 /* **THE POINTER'S ABSOLUTE POSITION, TO THE WINDOW'S OWN CLIENT.** `wl_pointer.motion` reports the pointer RELATIVE
  * to the surface, which a window being MOVED turns into a moving target — so the absolute position is sent

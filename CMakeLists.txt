@@ -53,10 +53,10 @@ option(AWS_WITH_DRM      "build the DRM/KMS output backend (the shipping output)
 option(AWS_WITH_X11      "build the nested X11 backend (development only)"        OFF)
 option(AWS_WITH_LIBINPUT "build the libinput device-input path"                   ON)
 # **AND WHO DRAWS THE SCENE.** The CPU renderer is always built, because every backend can run it. The GL one is
-# optional and, TODAY, only the nested X11 backend can carry it (it needs a native window for an EGL surface; a DRM
-# backend would add GBM under it). So the option is ON but the feature follows AWS_WITH_X11 — asking for a GL
-# renderer in a build that cannot host one would be a configure that lies about what it made.
-option(AWS_WITH_GL       "build the GPU renderer (EGL/GLES2; needs the X11 backend today)" ON)
+# optional and needs a native drawable: an X11 window from the nested backend, or a GBM surface from the DRM one. So
+# the option is ON and the feature follows AWS_WITH_X11 or AWS_WITH_DRM — asking for a GL renderer in a build that
+# cannot host one would be a configure that lies about what it made.
+option(AWS_WITH_GL       "build the GPU renderer (EGL/GLES2; an X11 window or a DRM/GBM scanout)" ON)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WAYLAND_SERVER REQUIRED IMPORTED_TARGET wayland-server)
@@ -73,12 +73,15 @@ if(AWS_WITH_X11)
   # XShm, which is what makes a present a pointer instead of 5.8 MB on the wire.
   pkg_check_modules(XEXT REQUIRED IMPORTED_TARGET xext)
 endif()
-# **AND THE GPU RENDERER'S TWO LIBRARIES.** EGL is the context and the window surface; GLES2 is the drawing. Both
-# are REQUIRED when the option is on AND the build can host the renderer at all — which today means the X11 backend,
-# because an EGL surface needs a native window. A GL build without a way to show the result is not built.
-if(AWS_WITH_GL AND AWS_WITH_X11)
+# **AND THE GPU RENDERER'S LIBRARIES.** EGL is the context, GLES2 the drawing, and GBM the surface a DRM backend
+# gives EGL instead of a window. All of them are REQUIRED when the option is on AND the build can host the renderer —
+# which is now the X11 backend, the DRM backend, or both. A GL build with no way to show the result is not built.
+if(AWS_WITH_GL AND (AWS_WITH_X11 OR AWS_WITH_DRM))
   pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl)
   pkg_check_modules(GLESV2 REQUIRED IMPORTED_TARGET glesv2)
+  if(AWS_WITH_DRM)
+    pkg_check_modules(GBM REQUIRED IMPORTED_TARGET gbm)
+  endif()
 endif()
 if(AWS_WITH_LIBINPUT)
   # LIINPUT'S UDEV PATH IS NOT SEPARABLE HERE, AND THE DEVIATION IS RECORDED RATHER THAN HIDDEN.
@@ -206,15 +209,25 @@ else()
   message(STATUS "window-server: x11 (nested) backend: off (AWS_WITH_X11=OFF)")
 endif()
 
-if(AWS_WITH_GL AND AWS_WITH_X11)
+if(AWS_WITH_GL AND (AWS_WITH_X11 OR AWS_WITH_DRM))
   # `EGL_NO_X11` keeps <EGL/eglplatform.h> from dragging libX11's headers into the renderer: the native handles
   # travel as an opaque pointer and an integer (see `struct aws_backend`), which is the only thing the renderer
-  # needs to know about a windowing system.
+  # needs to know about a windowing system — and for GBM the "window" is a GBM surface, not an X window at all.
   target_compile_definitions(window-server PRIVATE AWS_HAVE_GL EGL_NO_X11)
   target_link_libraries(window-server PRIVATE PkgConfig::EGL PkgConfig::GLESV2)
-  message(STATUS "window-server: gl (EGL/GLES2) renderer: on")
+  if(AWS_WITH_DRM)
+    target_compile_definitions(window-server PRIVATE AWS_HAVE_GBM)
+    target_link_libraries(window-server PRIVATE PkgConfig::GBM)
+  endif()
+  if(AWS_WITH_DRM AND AWS_WITH_X11)
+    message(STATUS "window-server: gl (EGL/GLES2) renderer: on (X11 window and GBM/KMS)")
+  elseif(AWS_WITH_DRM)
+    message(STATUS "window-server: gl (EGL/GLES2) renderer: on (GBM/KMS)")
+  else()
+    message(STATUS "window-server: gl (EGL/GLES2) renderer: on (X11 window)")
+  endif()
 else()
-  message(STATUS "window-server: gl renderer: off (AWS_WITH_GL=OFF or no AWS_WITH_X11)")
+  message(STATUS "window-server: gl renderer: off (AWS_WITH_GL=OFF or no X11/DRM backend)")
 endif()
 
 enable_testing()

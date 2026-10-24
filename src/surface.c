@@ -393,7 +393,20 @@ static void surface_set_buffer_scale(struct wl_client *client, struct wl_resourc
 	/* DOUBLE-BUFFERED, as `wl_surface` says: this takes effect on the next commit, together with the buffer the
 	 * commit attaches. Applying it here would resize a surface that has not yet been given the pixels that scale
 	 * describes, and the compositor would composite a 1x buffer as if it were 2x for one frame. */
-	surface->pending_buffer_scale = (scale > 0) ? scale : 1;
+	surface->pending_buffer_scale = (scale > 0) ? (double)scale : 1.0;
+}
+
+/* **THE FRACTIONAL HALF, WHICH THE PROTOCOL'S INTEGER CANNOT SAY.** `agora_window.set_buffer_scale_fixed` is the
+ * same double-buffered statement as `wl_surface.set_buffer_scale`, with the display's real fraction (1.333, 0.805)
+ * instead of a whole number. Stored in the same pending field, because a surface has ONE scale: the last one set
+ * before a commit is the one that commit lands with. A zero or negative fraction is refused rather than honoured —
+ * it is not a smaller display, it is a client asking the compositor to divide by nothing. */
+void aws_surface_set_buffer_scale_fixed(struct aws_surface *surface, double scale)
+{
+	if (surface == NULL || !(scale > 0.0)) {
+		return;
+	}
+	surface->pending_buffer_scale = scale;
 }
 
 static const struct wl_surface_interface surface_implementation = {
@@ -867,10 +880,13 @@ struct aws_surface *aws_surface_at(struct aws_server *server, int x, int y)
 			 * asks this function — the pointer, a click, the shell's placement — speaks logical pixels, and a 2x
 			 * client's 1280x800 buffer is a 640x400 window. Without the division a scaled window would take clicks
 			 * in a rectangle twice its own size, which is the sort of bug that reads as "the click went to the window
-			 * behind". */
-			if (surface->buffer_scale > 1) {
-				width /= surface->buffer_scale;
-				height /= surface->buffer_scale;
+			 * behind". A fractional scale is divided the same way and ROUNDED, because the logical space is whole
+			 * pixels and the buffer is what the client chose on the device grid. */
+			if (surface->buffer_scale != 1.0) {
+				double bscale = surface->buffer_scale > 0.0 ? surface->buffer_scale : 1.0;
+
+				width = (int)((double)width / bscale + 0.5);
+				height = (int)((double)height / bscale + 0.5);
 			}
 			if (x >= surface->x && x < surface->x + width && y >= surface->y && y < surface->y + height) {
 				return surface;

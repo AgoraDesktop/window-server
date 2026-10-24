@@ -24,6 +24,7 @@
  */
 
 #include "server.h"
+#include "scale.h"
 #include "session-vt.h"
 
 #include <errno.h>
@@ -151,13 +152,20 @@ static void usage(const char *program)
 		"          [--frames N] [--screenshot PATH.ppm] [--system-menu-icon auto|NAME]\n"
 		"          [--list-system-menu-icons] [--dump-os-identity]\n"
 		"  --backend NAME    where the pixels go: %s (default headless)\n"
-		"  --renderer NAME   who draws them: %s (default auto: gl when a backend has a GPU present)\n"
+		"  --renderer NAME   who draws them: %s (default auto: gl when the backend can give it a drawable — an\n"
+		"                    X11 window or a DRM/GBM scanout — and cpu otherwise)\n"
 		"  --input NAME      where input comes from: %s (default libinput)\n"
 		"  --width/--height  the output's size, in points (default 1280x720; the DRM backend uses the\n"
 		"                    display's mode instead)\n"
-		"  --scale N         device pixels per logical point. The default, 0, derives it from the\n"
-		"                    display so that 72 points are 1 inch on any panel; give a number to\n"
-		"                    override it (1.5 and 2 are the usual choices)\n"
+		"  --scale N         device pixels per logical point. The default is the display's own\n"
+		"                    measured dpi (96 is the fallback when it reports no usable size), so\n"
+		"                    that 72 points are 1 inch on any panel; give a number to override it\n"
+		"                    (1.5 and 2 are the usual choices)\n"
+		"  --dpi N           the same override stated as the screen's dots per inch (72, 96, 144).\n"
+		"                    It is only N/72, so 96 dpi is 1.333... device pixels per point; it is\n"
+		"                    the spelling to reach for when the DERIVED value is wrong, which a\n"
+		"                    multi-head X screen makes it: it reports the whole screen's pixels\n"
+		"                    against one panel's millimetres. Give this OR --scale, not both\n"
 		"  --socket NAME     the Wayland socket's name; the default is chosen and printed\n"
 		"  --launcher NAME   where the terminal comes from: existing (default — run it from a text\n"
 		"                    console) or vt (switch to --vt N; needs root, and a display manager may\n"
@@ -188,12 +196,22 @@ int main(int argc, char **argv)
 	const char *renderer = NULL;
 	int width = 1280;
 	/* **THE DEVICE PIXELS PER LOGICAL POINT, AND 0 MEANS "DERIVE IT FROM THE DISPLAY".** A point is 1/72 inch, so
-	 * the backend reads the monitor's pixel width and its millimetres and computes the scale that keeps that true —
-	 * 96 dpi gives 1.333…, a 13" 4K panel about 4.6. `--scale 2` overrides it, which is what makes a HiDPI panel
-	 * usable today: clients keep drawing at the sizes they always did and the compositor presents them twice as
-	 * large, which is the right SIZE and a soft picture. A client that renders at 2x itself (buffer_scale) is then
-	 * 1:1 and sharp — so the two halves are independent, and neither has to wait for the other. */
+	 * a backend measures the display's dots per inch and converts it — 1.333 at 96 dpi, 0.805 at 57.97, about 4.6 on
+	 * a 13" 4K panel. 96 dpi is the fallback only when the display reports no usable size. `--scale 2` overrides it,
+	 * which is what makes a HiDPI panel usable today: clients keep drawing at the sizes they always did and the
+	 * compositor presents them twice as large, which is the right SIZE and a soft picture. A client that renders at 2x
+	 * itself (buffer_scale) is then 1:1 and sharp — so the two halves are independent, and neither has to wait for the
+	 * other. */
 	double scale = 0.0;
+	/* **THE SAME OVERRIDE SPELLED THE WAY A PERSON READS IT OFF THE MONITOR'S BOX.** It exists because the number a
+	 * backend derives is only as good as the display's reported millimetres, and a MULTI-HEAD X SCREEN gets them
+	 * wrong in a way that doubles the answer: `DisplayWidth` spans every monitor while `DisplayWidthMM` describes
+	 * one, so two 1080p panels side by side read as 3840 px on 531 mm — 184 dpi, twice the scale a single panel
+	 * needs. `--dpi 96` says the true number directly, where `--scale 1.333` says the same thing less obviously.
+	 * `dpi_given` is separate from the value so that `--dpi 0` and `--dpi banana` are refused rather than read as
+	 * "nobody said" — a typo must not silently fall back to the wrong derived scale. */
+	double dpi = 0.0;
+	int dpi_given = 0;
 	/* **WHERE THE DISPLAY COMES FROM: THE TERMINAL IT WAS STARTED ON, OR A NEW ONE IT CLAIMS.**
 	 * `existing` is the default and needs no privilege — run it from a text console and that console is the session.
 	 * `vt` asks the kernel for a free terminal, switches to it, and gives it back on exit: the only way a terminal
@@ -232,6 +250,11 @@ int main(int argc, char **argv)
 			 * comfortable size or a laptop that ships at 150%, and `atof` is the whole difference from a session that
 			 * could only be told whole numbers. */
 			scale = atof(argv[++i]);
+		} else if (strcmp(argv[i], "--dpi") == 0 && i + 1 < argc) {
+			/* KEPT AS DOTS PER INCH UNTIL BOTH SPELLINGS ARE KNOWN, so that giving both is a refusal rather than
+			 * whichever argument the loop happened to see last. */
+			dpi = atof(argv[++i]);
+			dpi_given = 1;
 		} else if (strcmp(argv[i], "--vt") == 0 && i + 1 < argc) {
 			vt_number = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--idle-timeout") == 0 && i + 1 < argc) {
@@ -257,6 +280,22 @@ int main(int argc, char **argv)
 			return 0;
 		} else {
 			usage(argv[0]);
+			return 2;
+		}
+	}
+
+	/* **THE TWO SPELLINGS OF ONE OVERRIDE ARE RESOLVED HERE, BEFORE A BACKEND CAN SEE EITHER.** `--dpi` is the
+	 * display's dots per inch and `--scale` is device pixels per logical point; they differ by the 72 in
+	 * `AWS_POINTS_PER_INCH`, so giving both is ambiguous rather than additive. Refusing is what keeps a command
+	 * line from silently meaning one of two numbers, and the message names both so the fix is obvious. */
+	if (dpi_given) {
+		if (scale > 0.0) {
+			fprintf(stderr, "window-server: --dpi and --scale ask for the same thing; give one\n");
+			return 2;
+		}
+		scale = aws_scale_from_dpi(dpi);
+		if (scale <= 0.0) {
+			fprintf(stderr, "window-server: --dpi needs a positive number of dots per inch, not %g\n", dpi);
 			return 2;
 		}
 	}
@@ -360,9 +399,10 @@ int main(int argc, char **argv)
 	fflush(stdout);
 	/* BOTH NUMBERS, because which one a reader wants depends on the question: a person wants the screen they have,
 	 * and a diagnosis of a blurry or half-size frame wants the framebuffer. */
-	fprintf(stderr, "window-server: listening on %s, %s output %dx%d, %dx%d device pixels (scale %g)\n",
+	fprintf(stderr, "window-server: listening on %s, %s output %dx%d, %dx%d device pixels (scale %g, %.0f dpi)\n",
 		socket_name, server->backend.name, aws_output_width(server), aws_output_height(server),
-		server->backend.width, server->backend.height, aws_output_scale(server));
+		server->backend.width, server->backend.height, aws_output_scale(server),
+		aws_output_scale(server) * AWS_POINTS_PER_INCH);
 	fprintf(stderr, "window-server: system menu: %s (source %s, ID=%s)\n",
 		server->system_menu_icon != NULL ? server->system_menu_icon->id : AWS_SYSTEM_MENU_ICON_FALLBACK,
 		server->os_identity.source != NULL ? server->os_identity.source : "(none)",

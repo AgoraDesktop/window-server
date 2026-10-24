@@ -98,6 +98,17 @@ static void x11_present(struct aws_server *server)
 	XFlush(x11->display);
 }
 
+/* **THE HOST WINDOW'S PIXELS ARE NOT THE COMPOSITOR'S POINTS.** This backend's window is `output x scale` DEVICE
+ * pixels, but everything above the backend — the hit test, a surface's origin, the coordinates a client receives —
+ * is LOGICAL. Passing an X motion event through unconverted made every click land at `1/scale` of the distance from
+ * the window's origin: at 1.332 a click in the middle of a control registered two-thirds of the way to it. The
+ * division is the exact inverse of `cpu_device_edge`'s multiplication, and truncating is deliberate — the device
+ * pixel belongs to the logical pixel it starts in, which is what makes adjacent windows tile at a shared edge. */
+static int x11_logical(struct aws_server *server, int device)
+{
+	return aws_logical_from_device(device, server->backend.scale);
+}
+
 /* **THE ONE PLACE THE HOST'S QUEUE IS EMPTIED.** `XPending` does the two things this needs: it flushes what is
  * still buffered for the server, and it reads whatever has arrived off the connection — so the queue it then reports
  * is the real one, and the loop beside it collects even the events Xlib pulled in during a flush or a setup call
@@ -149,10 +160,12 @@ static void x11_drain_events(struct aws_server *server)
 			}
 			break;
 		case MotionNotify:
-			aws_seat_pointer_motion(server, event.xmotion.x, event.xmotion.y);
+			aws_seat_pointer_motion(server, x11_logical(server, event.xmotion.x),
+						x11_logical(server, event.xmotion.y));
 			break;
 		case EnterNotify:
-			aws_seat_pointer_enter(server, event.xcrossing.x, event.xcrossing.y);
+			aws_seat_pointer_enter(server, x11_logical(server, event.xcrossing.x),
+					       x11_logical(server, event.xcrossing.y));
 			break;
 		case LeaveNotify:
 			/* THE POINTER LEFT THE WINDOW, so it left the output: the client under it is told, because a
@@ -187,7 +200,8 @@ static void x11_drain_events(struct aws_server *server)
 					: WL_POINTER_AXIS_VERTICAL_SCROLL;
 				int32_t v120 = (up || left) ? -120 : 120;
 
-				aws_seat_pointer_motion(server, event.xbutton.x, event.xbutton.y);
+				aws_seat_pointer_motion(server, x11_logical(server, event.xbutton.x),
+							x11_logical(server, event.xbutton.y));
 				aws_seat_pointer_axis(server, axis, wl_fixed_from_double(v120 / 8.0),
 						      WL_POINTER_AXIS_SOURCE_WHEEL, v120 / 120, v120);
 				aws_seat_pointer_frame(server);
@@ -201,7 +215,8 @@ static void x11_drain_events(struct aws_server *server)
 			}
 			/* THE POSITION FIRST: a button can arrive without a motion, and focus is decided by where the
 			 * pointer IS, not by where it last moved to. */
-			aws_seat_pointer_motion(server, event.xbutton.x, event.xbutton.y);
+			aws_seat_pointer_motion(server, x11_logical(server, event.xbutton.x),
+						x11_logical(server, event.xbutton.y));
 			aws_seat_pointer_button(server, button, pressed);
 			break;
 		}
@@ -331,11 +346,11 @@ int aws_backend_x11_start(struct aws_server *server)
 		return -1;
 	}
 	x11->screen = DefaultScreen(x11->display);
-	/* **THE HOST'S OWN MILLIMETRES ARE THE HINT A NESTED SESSION NEEDS.** This backend's window sits on
-	 * somebody else's desktop, so "how big is a logical point here" is a question about THAT screen — and X
-	 * answers it from the same two numbers the DRM path reads from a connector: the screen's pixel width and its
-	 * millimetres. The same 72-points-per-inch rule applies, so a nested session is the same physical size on the
-	 * host as a native one would be, at any host resolution. `--scale` still wins over it.
+	/* **THE HOST'S OWN NUMBERS ARE THE HINT A NESTED SESSION NEEDS, WITH ONE POLICY ON TOP.** This backend's
+	 * window sits on somebody else's desktop, so "how big is a logical point here" is a question about THAT
+	 * screen. The answer is `aws_scale_for_display`: a host 1080p or lower is 96 dpi by rule, and above that the
+	 * screen's pixel width and millimetres are measured the same way the DRM path reads a connector. `--dpi` and
+	 * `--scale` still win over either branch.
 	 *
 	 * IT HAS TO HAPPEN HERE AND NOT IN `aws_backend_init`, because the framebuffer of this backend is allocated from
 	 * the request — so the hint has to be known before that. The request is LOGICAL, which is why it is multiplied
@@ -343,15 +358,26 @@ int aws_backend_x11_start(struct aws_server *server)
 	if (server->backend.user_scale == 0) {
 		int mm = DisplayWidthMM(x11->display, x11->screen);
 		int px = DisplayWidth(x11->display, x11->screen);
-		double derived = aws_scale_from_physical_size(px, mm);
+		int py = DisplayHeight(x11->display, x11->screen);
+		double derived = aws_scale_for_display(px, py, mm);
 
 		if (derived > 0.0) {
+			int fallback = aws_scale_from_physical_size(px, mm) <= 0.0;
+
+			derived = aws_scale_quantized(derived);
 			server->backend.scale = derived;
 			server->backend.width = (int)((double)server->requested_width * derived + 0.5);
 			server->backend.height = (int)((double)server->requested_height * derived + 0.5);
-			fprintf(stderr, "window-server: the host display is %d px on %d mm (%.0f dpi), so the output "
-					"scale is %g to keep 72 points an inch (override with --scale)\n",
-				px, mm, (double)px * 25.4 / (double)mm, server->backend.scale);
+			if (fallback) {
+				fprintf(stderr, "window-server: the host display is %dx%d and did not report a usable size, so "
+						"the output scale is %g (%.0f dpi; override with --dpi or --scale)\n",
+					px, py, server->backend.scale, AWS_LOW_RESOLUTION_DPI);
+			} else {
+				fprintf(stderr, "window-server: the host display is %d px on %d mm (%.0f dpi), so the "
+						"output scale is %g to keep 72 points an inch (override with --dpi or "
+						"--scale)\n",
+					px, mm, (double)px * 25.4 / (double)mm, server->backend.scale);
+			}
 		}
 	}
 	count = (size_t)server->backend.width * (size_t)server->backend.height;

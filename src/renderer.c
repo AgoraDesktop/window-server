@@ -6,14 +6,14 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * TWO ANSWERS AND ONE OF THEM IS ALWAYS AVAILABLE. `cpu` composites into the backend's frame buffer and works
- * everywhere, including a machine with no GPU and a headless test run. `gl` draws through EGL and GLES2 and only
- * exists when a backend handed it a native window — which, today, is the nested X11 backend.
+ * everywhere, including a machine with no GPU and a headless test run. `gl` draws through EGL and GLES2 and exists when
+ * a backend hands it a native drawable — an X11 window, or a DRM/GBM surface (the shipping path).
  *
- * **`auto` IS THE DEFAULT, AND IT IS THE ONE THAT MAKES THE NESTED OUTPUT ACCELERATED BY ACCIDENT RATHER THAN BY
- * REQUEST.** A backend that cannot offer a native window (headless, DRM/KMS without GBM) simply falls to the CPU
- * renderer and says nothing, because that is not a failure. But a renderer ASKED FOR BY NAME and impossible is a
- * failure and says so: the same rule the output backends follow — a requested thing whose library is missing stops
- * the configure rather than silently becoming something else.
+ * **`auto` IS THE DEFAULT, AND IT IS THE ONE THAT MAKES EITHER OUTPUT ACCELERATED BY ACCIDENT RATHER THAN BY
+ * REQUEST.** A backend that cannot offer a drawable, or a driver whose GBM cannot make a scanout surface, simply
+ * falls to the CPU renderer and says nothing, because that is not a failure. But a renderer ASKED FOR BY NAME and
+ * impossible is a failure and says so: the same rule the output backends follow — a requested thing whose library is
+ * missing stops the configure rather than silently becoming something else.
  */
 
 #include "server.h"

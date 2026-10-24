@@ -56,6 +56,10 @@
 
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+#include <drm_fourcc.h>
+#ifdef AWS_HAVE_GBM
+#include <gbm.h>
+#endif
 
 /* ONE PAGE. Two of these exist and the compositor always draws into the one that is not being scanned out. */
 struct drm_buffer {
@@ -68,6 +72,8 @@ struct drm_buffer {
 
 struct drm_state {
 	int fd;
+	struct aws_server *server;	/* for the `gbm_surface` a flip handler releases into */
+	const char *path;		/* the device, as it was named to the caller */
 	drmModeRes *resources;
 	uint32_t crtc_id;
 	uint32_t connector_id;
@@ -78,6 +84,23 @@ struct drm_state {
 	int flip_pending;
 	int mode_is_set;
 	struct wl_event_source *source;	/* the DRM descriptor, on the event loop */
+	/* The mode and what the dry-run report wants to say about it — kept here because the modeset that uses them
+	 * now happens in `start_present`, after a renderer has been chosen. */
+	drmModeModeInfo mode;
+	int mode_preferred;
+	unsigned count_modes;
+	uint32_t connector_type;
+#ifdef AWS_HAVE_GBM
+	/* **THE GPU'S PAGES, WHICH ARE NOT MAPPED AND NOT DUMB.** The GBM device is this backend's (made from the
+	 * card's fd); the surface is the GL renderer's, leant back through `server->backend.gbm_surface` so that a
+	 * flip completion can return the buffer it stopped scanning. `scanout_*` is what the plane is showing,
+	 * `pending_*` what it is being flipped to. */
+	struct gbm_device *gbm;
+	struct gbm_bo *scanout_bo;
+	uint32_t scanout_fb;
+	struct gbm_bo *pending_bo;
+	uint32_t pending_fb;
+#endif
 };
 
 /* ---------------------------------------------------------------------------------------------------
@@ -191,7 +214,7 @@ static int drm_set_plane(struct aws_server *server, drmModeAtomicReq *req, uint3
 /* **THE MODESET, AND THE ONLY STEP THAT MAKES LIGHT.** An atomic modeset is a list of (object, property, value)
  * the kernel applies together or not at all: the connector is pointed at the CRTC, the CRTC at the mode blob
  * and told to be ACTIVE, and the plane at a framebuffer. */
-static int drm_atomic_modeset(struct aws_server *server, int on)
+static int drm_atomic_modeset(struct aws_server *server, int on, uint32_t fb_id)
 {
 	struct drm_state *drm = server->backend.data;
 	drmModeAtomicReq *req = drmModeAtomicAlloc();
@@ -205,7 +228,7 @@ static int drm_atomic_modeset(struct aws_server *server, int on)
 			       drm->crtc_id);
 		drm_atomic_set(drm->fd, req, drm->crtc_id, DRM_MODE_OBJECT_CRTC, "MODE_ID", drm->blob_id);
 		drm_atomic_set(drm->fd, req, drm->crtc_id, DRM_MODE_OBJECT_CRTC, "ACTIVE", 1);
-		drm_set_plane(server, req, drm->buffers[0].fb_id);
+		drm_set_plane(server, req, fb_id);
 	} else {
 		/* TURNING IT OFF, AND IN THE REVERSE OF THE ORDER THAT SET IT UP: the plane lets go of the framebuffer
 		 * and the CRTC, then the CRTC goes inactive, then the connector lets go of the CRTC. Clearing ACTIVE
@@ -244,6 +267,25 @@ static void drm_page_flip(int fd, unsigned int sequence, unsigned int tv_sec, un
 
 	(void)fd; (void)sequence; (void)tv_sec; (void)tv_usec;
 	drm->flip_pending = 0;
+#ifdef AWS_HAVE_GBM
+	/* **AND THE BUFFER THAT JUST STOPPED BEING SCANNED GOES BACK TO THE GBM SURFACE.** The flip is the only
+	 * moment the compositor knows the old front is not being read by the display any more, so it is the only
+	 * moment `gbm_surface_release_buffer` is allowed. Its framebuffer goes with it; the new front was created
+	 * when the renderer locked it, before the commit that named it. */
+	if (drm->pending_fb != 0) {
+		if (drm->scanout_fb != 0) {
+			drmModeRmFB(drm->fd, drm->scanout_fb);
+		}
+		if (drm->scanout_bo != NULL && drm->server != NULL &&
+		    drm->server->backend.gbm_surface != NULL) {
+			gbm_surface_release_buffer(drm->server->backend.gbm_surface, drm->scanout_bo);
+		}
+		drm->scanout_bo = drm->pending_bo;
+		drm->scanout_fb = drm->pending_fb;
+		drm->pending_bo = NULL;
+		drm->pending_fb = 0;
+	}
+#endif
 }
 
 /* **THE DRM DESCRIPTOR IS ON THE EVENT LOOP, WHICH IS WHAT REPLACED THE WAIT.** A flip event is read here, and
@@ -300,6 +342,91 @@ static void drm_present(struct aws_server *server)
 	server->backend.pixels = drm->buffers[1 - back].map;
 }
 
+#ifdef AWS_HAVE_GBM
+/* **A GBM BUFFER AS A FRAMEBUFFER THE PLANE CAN SCAN.** The modifier is passed when the driver accepts it, because a
+ * GBM buffer is often tiled and the plane has to be told the layout; a driver that refuses the modifier call gets
+ * the older implicit-linear one, which is right for the drivers that do not tile anyway. */
+static uint32_t drm_gbm_fb_create(struct drm_state *drm, struct gbm_bo *bo)
+{
+	uint32_t fb = 0;
+	uint32_t handles[4] = { 0, 0, 0, 0 };
+	uint32_t pitches[4] = { 0, 0, 0, 0 };
+	uint32_t offsets[4] = { 0, 0, 0, 0 };
+	uint64_t modifiers[4] = { 0, 0, 0, 0 };
+	uint32_t width = gbm_bo_get_width(bo);
+	uint32_t height = gbm_bo_get_height(bo);
+
+	handles[0] = gbm_bo_get_handle(bo).u32;
+	pitches[0] = gbm_bo_get_stride(bo);
+	offsets[0] = gbm_bo_get_offset(bo, 0);
+	modifiers[0] = gbm_bo_get_modifier(bo);
+	if (drmModeAddFB2WithModifiers(drm->fd, width, height, DRM_FORMAT_XRGB8888, handles, pitches, offsets,
+				       modifiers, &fb, DRM_MODE_FB_MODIFIERS) == 0) {
+		return fb;
+	}
+	if (drmModeAddFB2(drm->fd, width, height, DRM_FORMAT_XRGB8888, handles, pitches, offsets, &fb, 0) == 0) {
+		return fb;
+	}
+	fprintf(stderr, "window-server: could not make a framebuffer from a %ux%u GBM buffer: %s\n", width, height,
+		strerror(errno));
+	return 0;
+}
+
+/* **THE GPU PRESENT: A PLANE COMMIT PER FRAME, AND ONE EXTRA MODESET FOR THE FIRST.** A GBM frame arrives here
+ * already drawn and locked; this side only has to name it to the plane. The first one is special because the CRTC
+ * has not been programmed yet — the compositor lit the display with its first frame rather than with a dummy page,
+ * which is why the DRM backend no longer allocates its fallback pages before it knows who is drawing. Every later
+ * one is an async flip whose completion releases the buffer that stopped being scanned. */
+static int drm_gbm_present(struct aws_server *server, struct gbm_bo *bo)
+{
+	struct drm_state *drm = server->backend.data;
+	uint32_t fb;
+	drmModeAtomicReq *req;
+	int ret;
+
+	if (drm == NULL || bo == NULL) {
+		return -1;
+	}
+	if (drm->pending_fb != 0) {
+		/* The render loop's `busy` gate should make this impossible. Refusing is better than overwriting the
+		 * buffer whose flip event still has to release it. */
+		return -1;
+	}
+	fb = drm_gbm_fb_create(drm, bo);
+	if (fb == 0) {
+		return -1;
+	}
+	if (!drm->mode_is_set) {
+		if (drm_atomic_modeset(server, 1, fb) != 0) {
+			drmModeRmFB(drm->fd, fb);
+			return -1;
+		}
+		drm->mode_is_set = 1;
+		drm->scanout_bo = bo;
+		drm->scanout_fb = fb;
+		return 0;
+	}
+	req = drmModeAtomicAlloc();
+	if (req == NULL) {
+		drmModeRmFB(drm->fd, fb);
+		return -1;
+	}
+	drm_set_plane(server, req, fb);
+	drm->flip_pending = 1;
+	ret = drmModeAtomicCommit(drm->fd, req, DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, drm);
+	drmModeAtomicFree(req);
+	if (ret != 0) {
+		fprintf(stderr, "window-server: the GBM page flip was refused: %s\n", strerror(errno));
+		drm->flip_pending = 0;
+		drmModeRmFB(drm->fd, fb);
+		return -1;
+	}
+	drm->pending_bo = bo;
+	drm->pending_fb = fb;
+	return 0;
+}
+#endif /* AWS_HAVE_GBM */
+
 /* ---------------------------------------------------------------------------------------------------
  * start and stop
  * --------------------------------------------------------------------------------------------------- */
@@ -344,9 +471,23 @@ static void drm_pause(struct aws_server *server)
 		drm->source = NULL;
 	}
 	if (drm->mode_is_set) {
-		(void)drm_atomic_modeset(server, 0);
+		(void)drm_atomic_modeset(server, 0, 0);
 		drm->mode_is_set = 0;
 	}
+#ifdef AWS_HAVE_GBM
+	/* **A FLIP IN FLIGHT IS GIVEN UP, NOT WAITED FOR.** The terminal is being taken away; the event that would
+	 * release the pending buffer may never arrive on a device this process no longer owns. The frames are dropped
+	 * and the last COMPLETED one is what a resume re-modesets — which is the frame the screen was showing. */
+	drm->flip_pending = 0;
+	if (drm->pending_fb != 0) {
+		drmModeRmFB(drm->fd, drm->pending_fb);
+		if (drm->pending_bo != NULL && server->backend.gbm_surface != NULL) {
+			gbm_surface_release_buffer(server->backend.gbm_surface, drm->pending_bo);
+		}
+		drm->pending_bo = NULL;
+		drm->pending_fb = 0;
+	}
+#endif
 	if (drm->fd >= 0) {
 		(void)drmDropMaster(drm->fd);
 	}
@@ -371,12 +512,27 @@ static void drm_resume(struct aws_server *server)
 			strerror(errno));
 		return;
 	}
-	if (drm_atomic_modeset(server, 1) != 0) {
-		fprintf(stderr, "window-server: could not re-set the mode after a terminal switch\n");
-		(void)drmDropMaster(drm->fd);
-		return;
+	{
+		/* **THE LAST FRAME THAT ACTUALLY REACHED THE GLASS.** On a GBM output that is the buffer the plane was
+		 * scanning; on the CPU path it is the front page. With neither (a resume before the first present) there is
+		 * nothing to program yet, and the next present's initial modeset is the one that lights it. */
+		uint32_t fb = 0;
+
+#ifdef AWS_HAVE_GBM
+		fb = drm->scanout_fb;
+#endif
+		if (fb == 0) {
+			fb = drm->buffers[drm->front].fb_id;
+		}
+		if (fb != 0) {
+			if (drm_atomic_modeset(server, 1, fb) != 0) {
+				fprintf(stderr, "window-server: could not re-set the mode after a terminal switch\n");
+				(void)drmDropMaster(drm->fd);
+				return;
+			}
+			drm->mode_is_set = 1;
+		}
 	}
-	drm->mode_is_set = 1;
 	if (drm->source == NULL) {
 		drm->source = wl_event_loop_add_fd(server->loop, drm->fd, WL_EVENT_READABLE, drm_dispatch, server);
 	}
@@ -392,7 +548,7 @@ static void drm_stop(struct aws_server *server)
 		return;
 	}
 	if (drm->mode_is_set) {
-		drm_atomic_modeset(server, 0);
+		drm_atomic_modeset(server, 0, 0);
 		drm->mode_is_set = 0;
 	}
 	if (drm->source != NULL) {
@@ -406,6 +562,35 @@ static void drm_stop(struct aws_server *server)
 	for (i = 0; i < 2; i++) {
 		drm_destroy_buffer(drm, &drm->buffers[i]);
 	}
+#ifdef AWS_HAVE_GBM
+	/* **THE GPU'S BUFFERS GO BACK BEFORE THE DEVICE THAT MADE THEM.** A GBM surface is the renderer's and has
+	 * already been destroyed by the time this runs (the server shuts the renderer down first), so the loan is
+	 * checked rather than assumed — releasing into a freed surface is the one thing this must not do. */
+	if (drm->pending_fb != 0) {
+		drmModeRmFB(drm->fd, drm->pending_fb);
+		drm->pending_fb = 0;
+	}
+	if (drm->pending_bo != NULL) {
+		if (server->backend.gbm_surface != NULL) {
+			gbm_surface_release_buffer(server->backend.gbm_surface, drm->pending_bo);
+		}
+		drm->pending_bo = NULL;
+	}
+	if (drm->scanout_fb != 0) {
+		drmModeRmFB(drm->fd, drm->scanout_fb);
+		drm->scanout_fb = 0;
+	}
+	if (drm->scanout_bo != NULL) {
+		if (server->backend.gbm_surface != NULL) {
+			gbm_surface_release_buffer(server->backend.gbm_surface, drm->scanout_bo);
+		}
+		drm->scanout_bo = NULL;
+	}
+	if (drm->gbm != NULL) {
+		gbm_device_destroy(drm->gbm);
+		drm->gbm = NULL;
+	}
+#endif
 	if (drm->fd >= 0) {
 		drmDropMaster(drm->fd);
 	}
@@ -458,6 +643,103 @@ static int drm_create_buffer(struct drm_state *drm, int width, int height, struc
 		fprintf(stderr, "window-server: could not make a framebuffer: %s\n", strerror(errno));
 		return -1;
 	}
+	return 0;
+}
+
+/* **AND THE SECOND HALF: LIGHT THE DISPLAY, BY WHICHEVER ROUTE THE RENDERER CHOSE.** A GL renderer that took the
+ * GBM device draws its first frame before the CRTC is programmed; that frame's present is the initial modeset, so
+ * nothing is allocated here. The CPU renderer is what needs the two dumb pages, and this is the first moment the
+ * backend knows it is the one drawing.
+ *
+ * THE DRY RUN LIVES HERE FOR THE SAME REASON: it can only report what was actually prepared, and which pages (or
+ * swapchain) exist is the question this function answers. It still gives the display back without committing. */
+static int drm_start_present(struct aws_server *server)
+{
+	struct drm_state *drm = server->backend.data;
+	const char *connector_type;
+	int use_gbm = 0;
+	int i;
+
+	if (drm == NULL) {
+		return -1;
+	}
+	connector_type = drmModeGetConnectorTypeName(drm->connector_type) != NULL
+				 ? drmModeGetConnectorTypeName(drm->connector_type) : "?";
+#ifdef AWS_HAVE_GBM
+	use_gbm = drm->gbm != NULL && server->backend.gbm_present != NULL && server->renderer != NULL &&
+		  strcmp(server->renderer->name, "gl") == 0;
+#endif
+	if (use_gbm) {
+		if (getenv("AWS_DRM_DRY_RUN") != NULL) {
+			fprintf(stderr,
+				"window-server: DRY RUN — every step up to the first frame succeeded, and NOTHING was committed:\n"
+				"                device      %s\n"
+				"                connector   %u (%s), %u mode(s)\n"
+				"                mode        %ux%u%s\n"
+				"                crtc        %u\n"
+				"                plane       %u (PRIMARY)\n"
+				"                swapchain   GBM, XRGB8888, scanout-capable %ux%u\n"
+				"                mode blob   %u\n"
+				"                Master was taken and is given back; no pixel moves.\n",
+				drm->path, drm->connector_id, connector_type, drm->count_modes, drm->mode.hdisplay,
+				drm->mode.vdisplay, drm->mode_preferred ? " (PREFERRED)" : "", drm->crtc_id,
+				drm->plane_id, server->backend.width, server->backend.height, drm->blob_id);
+			drm_stop(server);
+			return -1;
+		}
+		fprintf(stderr,
+			"window-server: driving %s at %ux%u (atomic, GBM/GL swapchain, async flip: connector %u, crtc %u, plane %u)\n",
+			drm->path, drm->mode.hdisplay, drm->mode.vdisplay, drm->connector_id, drm->crtc_id,
+			drm->plane_id);
+		return 0;
+	}
+
+	/* **THE CPU ROUTE: THE TWO PAGES IT ALWAYS HAD.** */
+#ifdef AWS_HAVE_GBM
+	/* A GBM DEVICE WHOSE RENDERER DID NOT TAKE IT IS A DEVICE NOBODY WILL USE. It is given back here rather than
+	 * kept until teardown — and `gbm_present` with it, so nothing can hand this backend a buffer later. */
+	if (drm->gbm != NULL) {
+		server->backend.gbm_device = NULL;
+		server->backend.gbm_present = NULL;
+		gbm_device_destroy(drm->gbm);
+		drm->gbm = NULL;
+	}
+#endif
+	for (i = 0; i < 2; i++) {
+		if (drm_create_buffer(drm, (int)drm->mode.hdisplay, (int)drm->mode.vdisplay, &drm->buffers[i]) != 0) {
+			return -1;
+		}
+	}
+	if (getenv("AWS_DRM_DRY_RUN") != NULL) {
+		fprintf(stderr,
+			"window-server: DRY RUN — every step up to the commit succeeded, and NOTHING was committed:\n"
+			"                device      %s\n"
+			"                connector   %u (%s), %u mode(s)\n"
+			"                mode        %ux%u%s\n"
+			"                crtc        %u\n"
+			"                plane       %u (PRIMARY)\n"
+			"                pages       2 x (%ux%u, pitch %u, %llu bytes) at %p and %p\n"
+			"                framebuffers %u and %u, mode blob %u\n"
+			"                Master was taken and is given back; no pixel moves.\n",
+			drm->path, drm->connector_id, connector_type, drm->count_modes, drm->mode.hdisplay,
+			drm->mode.vdisplay, drm->mode_preferred ? " (PREFERRED)" : "", drm->crtc_id, drm->plane_id,
+			drm->mode.hdisplay, drm->mode.vdisplay, drm->buffers[0].pitch,
+			(unsigned long long)drm->buffers[0].size, drm->buffers[0].map, drm->buffers[1].map,
+			drm->buffers[0].fb_id, drm->buffers[1].fb_id, drm->blob_id);
+		drm_stop(server);
+		return -1;
+	}
+	if (drm_atomic_modeset(server, 1, drm->buffers[0].fb_id) != 0) {
+		return -1;
+	}
+	drm->mode_is_set = 1;
+	/* PAGE 0 IS NOW ON THE SCREEN, SO THE COMPOSITOR STARTS ON PAGE 1. */
+	drm->front = 0;
+	server->backend.pixels = drm->buffers[1].map;
+	server->backend.present = drm_present;
+	fprintf(stderr,
+		"window-server: driving %s at %ux%u (atomic, 2 pages, async flip: connector %u, crtc %u, plane %u)\n",
+		drm->path, drm->mode.hdisplay, drm->mode.vdisplay, drm->connector_id, drm->crtc_id, drm->plane_id);
 	return 0;
 }
 
@@ -578,14 +860,6 @@ int aws_backend_drm_start(struct aws_server *server)
 		return -1;
 	}
 
-	/* **TWO PAGES**, because one buffer cannot be both scanned and drawn. */
-	for (i = 0; i < 2; i++) {
-		if (drm_create_buffer(drm, mode.hdisplay, mode.vdisplay, &drm->buffers[i]) != 0) {
-			drmModeFreeConnector(connector);
-			drm_stop(server);
-			return -1;
-		}
-	}
 	/* THE PRIMARY PLANE, WHICH AN ATOMIC REQUEST NAMES AND `drmModeSetCrtc` ONLY IMPLIED. */
 	drm->plane_id = drm_primary_plane(drm->fd, drm->crtc_id, drm->resources->crtcs,
 					  drm->resources->count_crtcs);
@@ -604,23 +878,34 @@ int aws_backend_drm_start(struct aws_server *server)
 	}
 	server->backend.width = (int)mode.hdisplay;
 	server->backend.height = (int)mode.vdisplay;
-	/* **A POINT IS 1/72 INCH, SO THE PANEL'S OWN MILLIMETRES DECIDE THE SCALE.** A connector reports its active
-	 * width in millimetres, so `pixels x 25.4 / mm / 72` is the number of device pixels that make a logical point
-	 * on THIS display. That is what makes a 13" 4K panel and a 24" 1080p panel agree about the size of a menu bar
-	 * and a window control: the dense panel gets a larger scale and more physical detail at the same point size.
+	/* **A POINT IS 1/72 INCH, SO THE PANEL DECIDES THE SCALE.** `aws_scale_for_display` measures the connector's
+	 * active millimetres, so `pixels x 25.4 / mm / 72` is the number of device pixels that make a logical point on
+	 * THIS display. That is what makes a 13" 4K panel and a 27" 1440p panel agree about the size of a menu bar and a
+	 * window control: the dense panel gets a larger scale and more physical detail at the same point size. 96 dpi is
+	 * the fallback only when the display reports no usable size.
 	 *
-	 * The formula is exact rather than rounded to 1x or 2x — a 96-dpi screen really is 1.333… device pixels per
-	 * point — and `aws_scale_from_physical_size` is where the EDID sanity checks live, because a wrong reported
-	 * size must not resize every window. `--scale` still overrides all of it. */
+	 * The measurement is exact rather than rounded to 1x or 2x — a 109-dpi screen really is 1.511… device pixels per
+	 * point — and `aws_scale_from_physical_size` is where the EDID sanity checks live, because a wrong reported size
+	 * must not resize every window. `--dpi` and `--scale` still override both branches. */
 	if (server->backend.user_scale == 0) {
-		double derived = aws_scale_from_physical_size((int)mode.hdisplay, connector->mmWidth);
+		double derived = aws_scale_for_display((int)mode.hdisplay, (int)mode.vdisplay, connector->mmWidth);
 
 		if (derived > 0.0) {
+			int fallback = aws_scale_from_physical_size((int)mode.hdisplay, connector->mmWidth) <= 0.0;
+
+			derived = aws_scale_quantized(derived);
 			server->backend.scale = derived;
-			fprintf(stderr, "window-server: this display is %ux%u on %d mm (%.0f dpi), so the output scale "
-					"is %g to keep 72 points an inch (override with --scale)\n",
-				mode.hdisplay, mode.vdisplay, connector->mmWidth,
-				(double)mode.hdisplay * 25.4 / (double)connector->mmWidth, server->backend.scale);
+			if (fallback) {
+				fprintf(stderr, "window-server: this display is %ux%u and did not report a usable size, so "
+						"the output scale is %g (%.0f dpi; override with --dpi or --scale)\n",
+					mode.hdisplay, mode.vdisplay, server->backend.scale, AWS_LOW_RESOLUTION_DPI);
+			} else {
+				fprintf(stderr, "window-server: this display is %ux%u on %d mm (%.0f dpi), so the "
+						"output scale is %g to keep 72 points an inch (override with --dpi or "
+						"--scale)\n",
+					mode.hdisplay, mode.vdisplay, connector->mmWidth,
+					(double)mode.hdisplay * 25.4 / (double)connector->mmWidth, server->backend.scale);
+			}
 		}
 	}
 	/* **AND THE LOGICAL SCREEN IS THE MODE DIVIDED BY THAT SCALE.** It is kept rather than derived later for the
@@ -640,56 +925,43 @@ int aws_backend_drm_start(struct aws_server *server)
 		}
 	}
 
-	/* **THE DRY RUN: EVERY STEP UP TO THE COMMIT AND NOTHING AFTER IT.** Taking a display away from the session
-	 * using it is the most disruptive thing any backend in this tree can do, so the whole preparation can be
-	 * proven — device, connector, mode, CRTC, plane, both buffers, both framebuffers, the blob — WITHOUT the
-	 * commit that makes light. `AWS_DRM_DRY_RUN=1` asks for it. */
-	if (getenv("AWS_DRM_DRY_RUN") != NULL) {
-		fprintf(stderr,
-			"window-server: DRY RUN — every step up to the commit succeeded, and NOTHING was committed:\n"
-			"                device      %s\n"
-			"                connector   %u (%s), %u mode(s)\n"
-			"                mode        %ux%u%s\n"
-			"                crtc        %u\n"
-			"                plane       %u (PRIMARY)\n"
-			"                pages       2 x (%ux%u, pitch %u, %llu bytes) at %p and %p\n"
-			"                framebuffers %u and %u, mode blob %u\n"
-			"                Master was taken and is given back; no pixel moves.\n",
-			path, drm->connector_id,
-			drmModeGetConnectorTypeName(connector->connector_type) != NULL
-				? drmModeGetConnectorTypeName(connector->connector_type) : "?",
-			connector->count_modes, mode.hdisplay, mode.vdisplay,
-			(mode.type & DRM_MODE_TYPE_PREFERRED) ? " (PREFERRED)" : "", drm->crtc_id, drm->plane_id,
-			mode.hdisplay, mode.vdisplay, drm->buffers[0].pitch,
-			(unsigned long long)drm->buffers[0].size, drm->buffers[0].map, drm->buffers[1].map,
-			drm->buffers[0].fb_id, drm->buffers[1].fb_id, drm->blob_id);
-		drmModeFreeConnector(connector);
-		drm_stop(server);
-		return -1;
+	/* **AND THE GPU'S ROUTE TO THE SCANNER, MADE BEFORE ANY FALLBACK PAGES.** A GBM device costs nothing to make
+	 * and is what lets the GL renderer take the present; the dumb buffers the CPU renderer needs are now allocated
+	 * only if it did not. That ordering is what makes an 8K session possible at all — two dumb pages at 8K are
+	 * 265 MB, and the swapchain that replaces them is already the size the display reads.
+	 *
+	 * A card without GBM is not a failure: the CPU renderer is still a place to put pixels. */
+#ifdef AWS_HAVE_GBM
+	drm->gbm = gbm_create_device(drm->fd);
+	if (drm->gbm != NULL) {
+		server->backend.gbm_device = drm->gbm;
+		server->backend.gbm_present = drm_gbm_present;
+	} else {
+		fprintf(stderr, "window-server: could not make a GBM device on %s; the CPU renderer will be used\n",
+			path);
 	}
+#endif
 
+	/* **WHAT THE MODESET NOW NEEDS LATER.** The mode was the connector's and the connector is about to be freed;
+	 * the modeset itself happens in `start_present`, once a renderer has said whether the display is lit by the
+	 * GPU or by a page this backend owns. */
+	drm->server = server;
+	drm->path = path;
+	drm->mode = mode;
+	drm->mode_preferred = (mode.type & DRM_MODE_TYPE_PREFERRED) != 0;
+	drm->count_modes = connector->count_modes;
+	drm->connector_type = connector->connector_type;
 	drmModeFreeConnector(connector);
 
-	/* **THE COMMIT — THE ONE STEP THAT MAKES LIGHT.** Everything above it was preparation. */
-	if (drm_atomic_modeset(server, 1) != 0) {
-		drm_stop(server);
-		return -1;
-	}
-	drm->mode_is_set = 1;
-	/* PAGE 0 IS NOW ON THE SCREEN, SO THE COMPOSITOR STARTS ON PAGE 1. */
-	drm->front = 0;
-	server->backend.pixels = drm->buffers[1].map;
 	server->backend.name = "drm";
 	server->backend.data = drm;
-	server->backend.present = drm_present;
 	server->backend.pause = drm_pause;
 	server->backend.resume = drm_resume;
 	server->backend.busy = drm_busy;
 	server->backend.stop = drm_stop;
+	server->backend.start_present = drm_start_present;
 	/* AND THE DESCRIPTOR GOES ON THE LOOP, which is where the flip events are read. */
 	drm->source = wl_event_loop_add_fd(server->loop, drm->fd, WL_EVENT_READABLE, drm_dispatch, server);
-	fprintf(stderr, "window-server: driving %s at %ux%u (atomic, 2 pages, async flip: connector %u, crtc %u, plane %u)\n",
-		path, mode.hdisplay, mode.vdisplay, drm->connector_id, drm->crtc_id, drm->plane_id);
 	return 0;
 }
 

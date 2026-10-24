@@ -10,22 +10,22 @@
  * reaches the glass — a GBM surface and an atomic plane commit on DRM/KMS, or `eglSwapBuffers` on a window). The
  * renderer is the expensive, backend-agnostic half, and the nested X11 backend is where it can be watched: it needs
  * no DRM master, no KMS driver, no free virtual terminal and no logind seat, only an X server with a GPU behind it.
- * So this renderer grew up in the nested output, and a DRM backend's accelerated path will be a swapchain added
- * under it rather than a second renderer beside it.
+ * So this renderer grew up in the nested output, and the DRM backend's accelerated path is a GBM swapchain added
+ * under it rather than a second renderer beside it — see `aws_renderer_gl_create` and `gl_present`.
  *
  * IT IS THE SAME PICTURE AS `renderer-cpu.c`, AND THAT IS TESTABLE. Both are walked by `aws_output_walk`, both take
  * the same shadow constants from `server.h`, and both answer `--screenshot`: this one calls `glReadPixels` into
  * `backend->pixels` before it swaps, so `inspect.py` can compare a CPU frame and a GL frame of the same scene. A
  * renderer that looked different would be a bug with a number attached, not a matter of taste.
  *
- * WHAT IT DOES NOT DO YET, recorded rather than left to be found: client buffers are uploaded as textures every
- * frame (`wl_shm` only — there is no dmabuf import here yet), so this makes COMPOSITION cheap and not client
- * painting. The AppKit still draws with the CPU; making its buffers GPU-visible is `zwp_linux_dmabuf_v1` and is a
- * separate piece of work on both sides of the wire.
+ * WHAT IT DOES NOT DO YET, recorded rather than left to be found: client buffers arrive through `wl_shm` or
+ * `zwp_linux_dmabuf_v1`, and the shm ones are uploaded as textures every frame, so this makes COMPOSITION cheap and not
+ * client painting. The AppKit still draws on the CPU.
  */
 
 #include "server.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +36,9 @@
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
+#ifdef AWS_HAVE_GBM
+#include <gbm.h>
+#endif
 
 /* ---------------------------------------------------------------------------------------------------
  * shaders
@@ -75,14 +78,22 @@ static const char *const texture_source =
 	"uniform sampler2D u_tex;\n"
 	"uniform vec4 u_rect;\n"
 	"uniform vec2 u_uv_div;\n"
+	"uniform vec2 u_box;\n"
 	"uniform float u_radius;\n"
 	"uniform vec4 u_round;\n"
 	"uniform float u_opaque;\n"
 	"uniform float u_coverage;\n"
 	"uniform vec4 u_ink;\n"
+	"vec4 sample_box(vec2 uv) {\n"
+	"    if (u_box.x <= 0.0) { return texture2D(u_tex, uv); }\n"
+	"    return 0.25 * (texture2D(u_tex, uv + vec2(-u_box.x, -u_box.y)) +\n"
+	"                   texture2D(u_tex, uv + vec2( u_box.x, -u_box.y)) +\n"
+	"                   texture2D(u_tex, uv + vec2(-u_box.x,  u_box.y)) +\n"
+	"                   texture2D(u_tex, uv + vec2( u_box.x,  u_box.y)));\n"
+	"}\n"
 	"void main() {\n"
 	"    vec2 local = v_pos - u_rect.xy;\n"
-	"    vec4 t = texture2D(u_tex, local / u_uv_div);\n"
+	"    vec4 t = sample_box(local / u_uv_div);\n"
 	"    vec3 rgb;\n"
 	"    float a;\n"
 	"    if (u_coverage > 0.5) {\n"
@@ -145,14 +156,22 @@ static const char *const texture_external_source =
 	"uniform samplerExternalOES u_tex;\n"
 	"uniform vec4 u_rect;\n"
 	"uniform vec2 u_uv_div;\n"
+	"uniform vec2 u_box;\n"
 	"uniform float u_radius;\n"
 	"uniform vec4 u_round;\n"
 	"uniform float u_opaque;\n"
 	"uniform float u_coverage;\n"
 	"uniform vec4 u_ink;\n"
+	"vec4 sample_box(vec2 uv) {\n"
+	"    if (u_box.x <= 0.0) { return texture2D(u_tex, uv); }\n"
+	"    return 0.25 * (texture2D(u_tex, uv + vec2(-u_box.x, -u_box.y)) +\n"
+	"                   texture2D(u_tex, uv + vec2( u_box.x, -u_box.y)) +\n"
+	"                   texture2D(u_tex, uv + vec2(-u_box.x,  u_box.y)) +\n"
+	"                   texture2D(u_tex, uv + vec2( u_box.x,  u_box.y)));\n"
+	"}\n"
 	"void main() {\n"
 	"    vec2 local = v_pos - u_rect.xy;\n"
-	"    vec4 t = texture2D(u_tex, local / u_uv_div);\n"
+	"    vec4 t = sample_box(local / u_uv_div);\n"
 	"    vec3 rgb;\n"
 	"    float a;\n"
 	"    if (u_coverage > 0.5) {\n"
@@ -190,6 +209,7 @@ struct gl_program {
 	GLint u_tex;
 	GLint u_rect;
 	GLint u_uv_div;
+	GLint u_box;
 	GLint u_radius;
 	GLint u_round;
 	GLint u_opaque;
@@ -232,6 +252,18 @@ struct gl_state {
 	int width;
 	int height;
 	int own_pixels;			/* the readback buffer is ours to free */
+
+#ifdef AWS_HAVE_GBM
+	/* **A GBM SURFACE IS THE DRM BACKEND'S "WINDOW".** With no window system, EGL is given the card's GBM device;
+	 * the renderer makes a scanout-capable surface from it, renders into it, and on present hands the locked front
+	 * buffer to the backend to put on the plane. The DEVICE belongs to the backend (it made it from the DRM fd),
+	 * the SURFACE belongs to this renderer — and `server->backend.gbm_surface` is the loan that lets the backend
+	 * release a buffer back once the flip that stopped scanning it has completed. */
+	int gbm;
+	struct gbm_device *gbm_device;
+	struct gbm_surface *gbm_surface;
+	uint32_t gbm_format;
+#endif
 };
 
 /* ---------------------------------------------------------------------------------------------------
@@ -286,6 +318,7 @@ static int link_program(struct gl_program *program, const char *fragment_source)
 	program->u_tex = glGetUniformLocation(program->id, "u_tex");
 	program->u_rect = glGetUniformLocation(program->id, "u_rect");
 	program->u_uv_div = glGetUniformLocation(program->id, "u_uv_div");
+	program->u_box = glGetUniformLocation(program->id, "u_box");
 	program->u_radius = glGetUniformLocation(program->id, "u_radius");
 	program->u_round = glGetUniformLocation(program->id, "u_round");
 	program->u_opaque = glGetUniformLocation(program->id, "u_opaque");
@@ -332,8 +365,29 @@ static void gl_solid(struct gl_state *gl, float x, float y, float w, float h, ui
 	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
+/* **A ROUNDED DEVICE POSITION, HALF AWAY FROM ZERO, WITHOUT PULLING IN LIBM.** The compositor's placement is
+ * `round(logical * scale)`, the same rule `cpu_device_edge` applies, and the two renderers must agree on it. */
+static float gl_round(double value)
+{
+	return (float)(value >= 0.0 ? (long)(value + 0.5) : (long)(value - 0.5));
+}
+
+/* **A DEVICE PIXEL'S FOOTPRINT, AS TEXTURE COORDINATES, OR ZERO WHEN IT IS ONE TEXEL.** `quad_w` is the drawn width in
+ * device pixels and `texture_w` the buffer's width in texels, so a device pixel is `1/quad_w` of the uv span and a
+ * texel is `1/texture_w`. When the texture is larger the draw is a MINIFICATION and the four taps below sit at the
+ * box's quarter points, `0.5/quad_w - 0.5/texture_w` from the centre: exactly zero at 1:1, exactly half a texel at
+ * 2:1 (the four texel centres a box average wants), and an averaged sample at 1.5:1 — which is a 2x client on a
+ * 96-dpi output and the case that used to drop every third texel. */
+static void gl_box_for(float texture_w, float texture_h, float quad_w, float quad_h,
+		       float *box_x, float *box_y)
+{
+	*box_x = (quad_w > 0.0f && texture_w > quad_w) ? (0.5f / quad_w) - (0.5f / texture_w) : 0.0f;
+	*box_y = (quad_h > 0.0f && texture_h > quad_h) ? (0.5f / quad_h) - (0.5f / texture_h) : 0.0f;
+}
+
 static void gl_textured(struct gl_state *gl, struct gl_program *program, GLenum target, GLuint texture,
 			float x, float y, float w, float h, float texture_w, float texture_h,
+			float box_x, float box_y,
 			float radius, float tl, float tr, float bl, float br, int coverage, int opaque,
 			uint32_t ink)
 {
@@ -349,6 +403,7 @@ static void gl_textured(struct gl_state *gl, struct gl_program *program, GLenum 
 	glUniform2f(program->u_size, (float)gl->width, (float)gl->height);
 	glUniform4f(program->u_rect, x, y, w, h);
 	glUniform2f(program->u_uv_div, texture_w, texture_h);
+	glUniform2f(program->u_box, box_x, box_y);
 	glUniform1f(program->u_radius, radius);
 	glUniform4f(program->u_round, tl, tr, bl, br);
 	glUniform1f(program->u_opaque, opaque ? 1.0f : 0.0f);
@@ -455,11 +510,14 @@ static void upload_coverage(struct gl_state *gl, struct aws_system_icon *icon)
  * --------------------------------------------------------------------------------------------------- */
 
 /* **NOTHING BEHIND THE MENU BAR CASTS A SHADOW ONTO IT**, which is the CPU renderer's rule and now one scissor
- * rectangle instead of a per-row test: the shadow may only land in the rows BELOW the strip. */
-static void shadow_clip(struct gl_state *gl, int enable)
+ * rectangle instead of a per-row test: the shadow may only land in the rows BELOW the strip. `bar_rows` is the
+ * strip's height in DEVICE rows — the scissor is device state, and `AWS_MENU_BAR_HEIGHT` is points. Using the point
+ * count here left `round(24 * scale) - 24` rows of the bar (8 at 96 dpi) exposed, which is exactly where a menu's
+ * top shadow painted a dark band under the strip. */
+static void shadow_clip(struct gl_state *gl, int enable, float bar_rows)
 {
 	if (enable) {
-		int below = gl->height - AWS_MENU_BAR_HEIGHT;
+		int below = gl->height - (int)(bar_rows + 0.5f);
 
 		if (below < 0) {
 			below = 0;
@@ -685,7 +743,12 @@ static int gl_dmabuf_import(struct aws_server *server, struct aws_dmabuf_buffer 
 		return -1;
 	}
 	glBindTexture(target, texture);
-	glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	/* **MINIFICATION IS LINEAR SO THE BOX TAPS CAN INTERPOLATE; MAGNIFICATION STAYS NEAREST.** See `gl_box_for`:
+	 * the four taps of a minified draw have to land between texels, and a nearest sample would just repeat the same
+	 * texel four times. At 1:1 the sample sits on a texel centre and linear returns it exactly, and a magnified
+	 * surface — a 1x client on a 2x output, the System menu's mark — keeps its crisp double, which is what the
+	 * screenshots assert. */
+	glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -739,10 +802,17 @@ static void gl_draw_menu_bar(struct aws_server *server)
 	{
 		/* **A FRACTIONAL SCALE IS A REAL SCALE.** 1.5 device pixels per point is a 1080p panel at a comfortable
 		 * size, and truncating it to 1 here would draw the bar two-thirds of its device height — the picture
-		 * disagreeing with the framebuffer rather than merely being soft. */
+		 * disagreeing with the framebuffer rather than merely being soft.
+		 *
+		 * **AND THE STRIP IS A WHOLE NUMBER OF DEVICE ROWS, BECAUSE ITS SHADOW IS MEASURED FROM ITS EDGE.** The
+		 * shadow shader uses the rect's integer half-size, so a 31.97-row strip had its last row counted as outside
+		 * itself: the bar's shadow painted over row 31 everywhere the application's menu window was not, and stopped
+		 * dead at that window's edge — a 1px step along the bottom of the bar. `cpu_device_edge` already rounds the
+		 * strip, so this is also the GL/CPU parity the two renderers promise. */
 		float s = (float)aws_output_scale(server);
+		float bar_h = gl_round((double)AWS_MENU_BAR_HEIGHT * (double)s);
 
-		gl_solid(gl, 0.0f, 0.0f, (float)gl->width, (float)(AWS_MENU_BAR_HEIGHT * s), AWS_MENU_BAR_COLOUR);
+		gl_solid(gl, 0.0f, 0.0f, (float)gl->width, bar_h, AWS_MENU_BAR_COLOUR);
 	upload_coverage(gl, server->system_menu_icon);
 	/* **THE MARK'S QUAD IS SCALED; ITS TEXTURE IS NOT.** The coverage grid is a logical-size image and the sampler
 	 * magnifies it, which is what a mark wants — the alternative is a second grid per scale factor. */
@@ -750,14 +820,15 @@ static void gl_draw_menu_bar(struct aws_server *server)
 		    (float)(AWS_SYSTEM_MENU_LEFT_MARGIN * s), (float)(AWS_SYSTEM_MENU_GLYPH_TOP * s),
 		    (float)(AWS_SYSTEM_MENU_GLYPH_WIDTH * s), (float)(AWS_SYSTEM_MENU_GLYPH_HEIGHT * s),
 		    (float)(AWS_SYSTEM_MENU_GLYPH_WIDTH * s), (float)(AWS_SYSTEM_MENU_GLYPH_HEIGHT * s),
+		    0.0f, 0.0f,
 		    0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1, 0, AWS_SYSTEM_MENU_GLYPH_COLOUR);
 	/* **AND THE BAR'S OWN SHADOW, WHICH FALLS BELOW THE STRIP.** Radius zero: the bar's corners are square, and a
 	 * shadow with a radius under a square bar painted a smudge INSIDE its own corners. MEASURED in the CPU
 	 * renderer, and this is the same number. */
-	shadow_clip(gl, 1);
-	gl_shadow(gl, 0.0f, 0.0f, (float)gl->width, (float)(AWS_MENU_BAR_HEIGHT * s), 0.0f);
+	shadow_clip(gl, 1, bar_h);
+	gl_shadow(gl, 0.0f, 0.0f, (float)gl->width, bar_h, 0.0f);
 	}
-	shadow_clip(gl, 0);
+	shadow_clip(gl, 0, 0.0f);
 }
 
 static void gl_draw_surface(struct aws_server *server, struct aws_surface *surface)
@@ -774,6 +845,8 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 	float quad_x, quad_y, quad_w, quad_h;
 	int from_shm = 0;
 	int width, height, stride = 0;
+	int buffer_width, buffer_height;
+	int draw_w = 0, draw_h = 0;	/* a device-grid draw's extent, after the frame clip */
 	int transparent;
 	int in_bar;
 	int hangs_from_bar;
@@ -798,14 +871,22 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 		transparent = wl_shm_buffer_get_format(shm) == WL_SHM_FORMAT_ARGB8888;
 		from_shm = 1;
 	}
-	/* **THE QUAD IS THE BUFFER DIVIDED BY THE CLIENT'S SCALE, WHICH IS WHAT MAKES THE SAMPLER'S BILINEAR FILTER THE
+	/* **THE QUAD IS THE BUFFER DIVIDED BY THE CLIENT'S SCALE, AND `gl_box_for` IS WHAT MAKES THE SAMPLER THE
 	 * DOWNSCALE.** A 2x client's 1280x800 buffer is a 640x400 window; the texture is the whole 1280x800 and the quad
-	 * is 640x400, so the four device pixels of every logical pixel are filtered into one. This is the same divisor
-	 * the CPU renderer's block average applies, and the two must agree or `--renderer` would be visible in the
-	 * result. See `aws_surface`'s `buffer_scale`. */
-	if (surface->buffer_scale > 1) {
-		width /= surface->buffer_scale;
-		height /= surface->buffer_scale;
+	 * is 640x400, so the four device pixels of every logical pixel are averaged into one — the same box the CPU
+	 * renderer's `scaled_block_pixel` computes, which is what keeps `--renderer gl` and `--renderer cpu` from
+	 * disagreeing at a fractional scale. See `aws_surface`'s `buffer_scale`. */
+	buffer_width = width;
+	buffer_height = height;
+	{
+		double bscale = surface->buffer_scale > 0.0 ? surface->buffer_scale : 1.0;
+
+		if (bscale != 1.0) {
+			/* ROUND, because the logical space is whole pixels and the buffer is what the client chose on the
+			 * device grid: a 0.805x client's 18-pixel buffer still describes a 23-point window. */
+			width = (int)((double)width / bscale + 0.5);
+			height = (int)((double)height / bscale + 0.5);
+		}
 	}
 	/* **AND THE FRAME IS THE WINDOW'S BOUNDS, SO A BIGGER BUFFER IS CLIPPED TO IT** — the CPU renderer's rule,
 	 * and the reason a 320x200 status item does not run down the screen. */
@@ -818,27 +899,52 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 	if (width <= 0 || height <= 0) {
 		return;
 	}
-	/* **`u_uv_div` IS WHAT THE QUAD'S EXTENT IS DIVIDED BY TO GET A TEXTURE COORDINATE, so it is the QUAD's
-	 * extent whenever the texture covers exactly the region being drawn — which is both cases here: the shm
-	 * texture is uploaded from the visible region and an imported buffer is the whole thing mapped over the
-	 * quad. Written as the quad's own numbers rather than as each source's pixel size, because the two agreed
-	 * by accident at scale 1 and stop agreeing the moment a client scales: a 2x buffer mapped with
-	 * `texture_w = buffer width` would sample only the top-left quarter of itself. */
-	uv_w = (float)width;
-	uv_h = (float)height;
-	/* **AND THE QUAD IS PLACED IN DEVICE PIXELS.** `width`/`height` are logical here, so everything below multiplies
-	 * by the output scale on the way to the shader — the corners, the radius and the rect. The uv divisor is the quad's
-	 * own extent, so it is the SCALED one: the fraction the shader computes from it must still be 1.0. */
+	/* **AND WHEN THE CLIENT DREW AT THE OUTPUT'S OWN SCALE, THE QUAD IS THE BUFFER — 1:1, NO SAMPLER.** This is the
+	 * resolution-independent path: the client rasterised at `round(points * scale)` device pixels and declared that
+	 * fraction (`agora_window.set_buffer_scale_fixed`), so the compositor's job is a copy, not a resample. The
+	 * comparison is exact because both numbers were quantised to 1/256 (see `aws_scale_quantized`); the origin is
+	 * rounded, which is the only rounding the placement needs and is what keeps adjacent frames tiling. */
 	{
-		/* **AND THE SCALE IS THE FRACTIONAL ONE, NOT AN INTEGER.** A whole-number cast was invisible at 1x and 2x
-		 * and wrong at every scale between them, which is most panels: 96 dpi is 1.333… device pixels per point. */
-		float out_scale = (float)aws_output_scale(server);
+		double out_scale = aws_output_scale(server);
+		double bscale = surface->buffer_scale > 0.0 ? surface->buffer_scale : 1.0;
+		int device_grid = (bscale > 0.0) && (bscale == out_scale);
 
-		quad_x = (float)surface->x * out_scale;
-		quad_y = (float)surface->y * out_scale;
-		quad_w = (float)width * out_scale;
-		quad_h = (float)height * out_scale;
-		radius *= out_scale;
+		if (device_grid) {
+			/* **THE CLIPPED EXTENT IS THE BUFFER'S, UNLESS THE FRAME IS SMALLER THAN IT.** A status item's
+			 * buffer is 320x200 while its frame is 64x24, and the frame is what the server was told the window
+			 * is — so the drawn region is the clipped logical size on the device grid, and the texture is
+			 * sampled 1:1 from its top-left corner. No clip and no resample in the ordinary case, because
+			 * `round(frame * scale)` is exactly the buffer the client made. */
+			int span_w = (int)gl_round((double)width * out_scale);
+			int span_h = (int)gl_round((double)height * out_scale);
+
+			if (span_w > buffer_width) {
+				span_w = buffer_width;
+			}
+			if (span_h > buffer_height) {
+				span_h = buffer_height;
+			}
+			draw_w = span_w;
+			draw_h = span_h;
+			quad_x = gl_round((double)surface->x * out_scale);
+			quad_y = gl_round((double)surface->y * out_scale);
+			quad_w = (float)span_w;
+			quad_h = (float)span_h;
+			uv_w = (float)span_w;
+			uv_h = (float)span_h;
+		} else {
+			/* **AND THE QUAD IS PLACED IN DEVICE PIXELS.** `width`/`height` are logical here, so everything below
+			 * multiplies by the output scale on the way to the shader — the corners, the radius and the rect. The uv
+			 * divisor is the quad's own extent, so it is the SCALED one: the fraction the shader computes from it
+			 * must still be 1.0. */
+			uv_w = (float)width;
+			uv_h = (float)height;
+			quad_x = (float)surface->x * (float)out_scale;
+			quad_y = (float)surface->y * (float)out_scale;
+			quad_w = (float)width * (float)out_scale;
+			quad_h = (float)height * (float)out_scale;
+		}
+		radius *= (float)out_scale;
 	}
 
 	/* **THE FOUR CORNER DECISIONS, WHICH ARE `shape_coverage`'S AND NOT A SECOND OPINION.** A corner is rounded
@@ -863,31 +969,43 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 
 	/* THE SHADOW FIRST, because it is a shadow on the things behind. */
 	if (!in_bar) {
-		float s = (float)((server->backend.scale > 0) ? server->backend.scale : 1);
+		float s = (float)aws_output_scale(server);
+		/* The bar's height in DEVICE rows, which is what the scissor is measured in — not the 24 points. */
+		float bar_h = gl_round((double)AWS_MENU_BAR_HEIGHT * (double)s);
 
-		shadow_clip(gl, 1);
+		shadow_clip(gl, 1, bar_h);
 		gl_shadow(gl, (float)surface->x * s, (float)surface->y * s, (float)surface->frame_width * s,
 			  (float)surface->frame_height * s, (float)AWS_SHADOW_RADIUS * s);
-		shadow_clip(gl, 0);
+		shadow_clip(gl, 0, 0.0f);
 	}
 
 	if (from_shm) {
 		/* **THE UPLOAD IS THE VISIBLE REGION IN BUFFER PIXELS.** `width`/`height` are logical by now, so a scaled
 		 * client's texture is its buffer's top-left `width x scale` by `height x scale` — which is the region the
 		 * quad will be filled from, and the same clipping rule the CPU renderer applies when the frame is smaller
-		 * than the buffer. */
-		upload_client_buffer(gl, shm, width * (surface->buffer_scale > 0 ? surface->buffer_scale : 1),
-				     height * (surface->buffer_scale > 0 ? surface->buffer_scale : 1), stride);
+		 * than the buffer. A device-grid client uploaded its whole buffer, because its quad is that buffer. */
+		double bscale = surface->buffer_scale > 0.0 ? surface->buffer_scale : 1.0;
+		int device_grid = (bscale == aws_output_scale(server));
+		int texture_w = device_grid ? draw_w : (int)((double)width * bscale + 0.5);
+		int texture_h = device_grid ? draw_h : (int)((double)height * bscale + 0.5);
+		float box_x, box_y;
+
+		upload_client_buffer(gl, shm, texture_w, texture_h, stride);
+		gl_box_for((float)texture_w, (float)texture_h, quad_w, quad_h, &box_x, &box_y);
 		texture = gl->client_texture;
 		gl_textured(gl, &gl->texture, GL_TEXTURE_2D, texture, quad_x, quad_y,
-			    quad_w, quad_h, quad_w, quad_h, radius, tl, tr, bl, br, 0,
+			    quad_w, quad_h, quad_w, quad_h, box_x, box_y, radius, tl, tr, bl, br, 0,
 			    !transparent, 0);
 	} else {
 		struct gl_import *import = dmabuf->render;
+		float box_x, box_y;
 
+		/* THE dma-buf IS THE WHOLE BUFFER, so its own size is the texture's and the quad is the clipped frame:
+		 * a buffer larger than its window is squeezed here exactly as the shm path squeezes it above. */
+		gl_box_for((float)dmabuf->width, (float)dmabuf->height, quad_w, quad_h, &box_x, &box_y);
 		gl_textured(gl, import->external ? &gl->texture_external : &gl->texture,
 			    import->external ? GL_TEXTURE_EXTERNAL_OES : GL_TEXTURE_2D, texture,
-			    quad_x, quad_y, quad_w, quad_h, quad_w, quad_h,
+			    quad_x, quad_y, quad_w, quad_h, quad_w, quad_h, box_x, box_y,
 			    radius, tl, tr, bl, br, 0, !transparent, 0);
 	}
 }
@@ -971,9 +1089,27 @@ static void gl_present(struct aws_server *server)
 {
 	struct gl_state *gl = server->renderer->data;
 
-	if (gl != NULL && gl->surface != EGL_NO_SURFACE) {
-		eglSwapBuffers(gl->display, gl->surface);
+	if (gl == NULL || gl->surface == EGL_NO_SURFACE) {
+		return;
 	}
+	if (!eglSwapBuffers(gl->display, gl->surface)) {
+		/* Nothing was handed to the surface, so there is no front buffer to lock; the frame is dropped and the
+		 * next render pass tries again from the same place. */
+		return;
+	}
+#ifdef AWS_HAVE_GBM
+	/* **THE SWAP IS NOT THE PRESENT ON A SCANNER.** EGL has drawn into the next GBM buffer; locking the front one
+	 * and naming it to the KMS plane is what puts it on the glass. The backend owns the flip and therefore the
+	 * buffer's lifetime — it releases it when the flip that replaced it completes — so the only failure this side
+	 * has to handle is the backend refusing it, and then the buffer comes straight back to the surface. */
+	if (gl->gbm && gl->gbm_surface != NULL && server->backend.gbm_present != NULL) {
+		struct gbm_bo *bo = gbm_surface_lock_front_buffer(gl->gbm_surface);
+
+		if (bo != NULL && server->backend.gbm_present(server, bo) != 0) {
+			gbm_surface_release_buffer(gl->gbm_surface, bo);
+		}
+	}
+#endif
 }
 
 static void gl_stop(struct aws_server *server)
@@ -988,6 +1124,15 @@ static void gl_stop(struct aws_server *server)
 		if (gl->surface != EGL_NO_SURFACE) {
 			eglDestroySurface(gl->display, gl->surface);
 		}
+#ifdef AWS_HAVE_GBM
+		/* **AND THE GBM SURFACE GOES BEFORE THE DEVICE THAT MADE IT.** The backend destroys the device, and the
+		 * loan is withdrawn first so a flip event racing the teardown cannot release into a freed surface. */
+		if (gl->gbm_surface != NULL) {
+			server->backend.gbm_surface = NULL;
+			gbm_surface_destroy(gl->gbm_surface);
+			gl->gbm_surface = NULL;
+		}
+#endif
 		if (gl->context != EGL_NO_CONTEXT) {
 			eglDestroyContext(gl->display, gl->context);
 		}
@@ -1066,6 +1211,47 @@ static int choose_config(struct gl_state *gl, unsigned long visual)
 	return -1;
 }
 
+#ifdef AWS_HAVE_GBM
+/* **THE GBM CONFIG IS CHOSEN BY ITS PIXEL FORMAT, NOT BY A VISUAL ID.** There is no window, so the thing that has to
+ * agree between EGL and the surface is `EGL_NATIVE_VISUAL_ID` — which on the GBM platform is a DRM fourcc — and the
+ * scanout format this compositor knows how to scan: `XRGB8888`, the same format every client sends and the one
+ * `drm_set_plane` is handed. A config whose format differs would build a surface the plane cannot sample. */
+static int choose_gbm_config(struct gl_state *gl)
+{
+	EGLint count = 0, index;
+	EGLConfig *configs;
+
+	if (!eglGetConfigs(gl->display, NULL, 0, &count) || count <= 0) {
+		return -1;
+	}
+	configs = calloc((size_t)count, sizeof *configs);
+	if (configs == NULL) {
+		return -1;
+	}
+	if (!eglGetConfigs(gl->display, configs, count, &count)) {
+		free(configs);
+		return -1;
+	}
+	for (index = 0; index < count; index++) {
+		EGLint native = 0, renderable = 0, surface = 0, caveat = 0;
+
+		eglGetConfigAttrib(gl->display, configs[index], EGL_NATIVE_VISUAL_ID, &native);
+		eglGetConfigAttrib(gl->display, configs[index], EGL_RENDERABLE_TYPE, &renderable);
+		eglGetConfigAttrib(gl->display, configs[index], EGL_SURFACE_TYPE, &surface);
+		eglGetConfigAttrib(gl->display, configs[index], EGL_CONFIG_CAVEAT, &caveat);
+		if ((uint32_t)native == (uint32_t)GBM_FORMAT_XRGB8888 && (surface & EGL_WINDOW_BIT) &&
+		    (renderable & EGL_OPENGL_ES2_BIT) && caveat != EGL_SLOW_CONFIG) {
+			gl->config = configs[index];
+			gl->gbm_format = GBM_FORMAT_XRGB8888;
+			free(configs);
+			return 0;
+		}
+	}
+	free(configs);
+	return -1;
+}
+#endif /* AWS_HAVE_GBM */
+
 static int make_texture(struct gl_state *gl, GLuint *texture)
 {
 	glGenTextures(1, texture);
@@ -1073,7 +1259,9 @@ static int make_texture(struct gl_state *gl, GLuint *texture)
 		return -1;
 	}
 	glBindTexture(GL_TEXTURE_2D, *texture);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	/* MINIFICATION IS LINEAR FOR THE BOX FILTER, MAGNIFICATION NEAREST FOR AN EXACT 1:1 AND A CRISP DOUBLE — the
+	 * same pair the dma-buf import uses, so both buffer paths sample identically. */
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -1086,8 +1274,12 @@ int aws_renderer_gl_create(struct aws_server *server)
 	EGLint major = 0, minor = 0;
 	EGLint context_attributes[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
 	struct aws_renderer *renderer;
+	int use_gbm = 0;
 
-	if (server->backend.native_display == NULL || server->backend.native_window == 0) {
+#ifdef AWS_HAVE_GBM
+	use_gbm = server->backend.gbm_device != NULL;
+#endif
+	if (!use_gbm && (server->backend.native_display == NULL || server->backend.native_window == 0)) {
 		/* NOT AN ERROR AND NOT A WORD: `auto` asks every backend, and the ones that cannot answer are simply
 		 * the ones that cannot. A backend asked for by name that lacks it has already failed above. */
 		return -1;
@@ -1100,10 +1292,36 @@ int aws_renderer_gl_create(struct aws_server *server)
 	gl->height = server->backend.height;
 	gl->surface = EGL_NO_SURFACE;
 	gl->context = EGL_NO_CONTEXT;
-	gl->display = eglGetDisplay((EGLNativeDisplayType)server->backend.native_display);
-	if (gl->display == EGL_NO_DISPLAY) {
-		fprintf(stderr, "window-server: gl: eglGetDisplay failed (0x%x)\n", (unsigned)eglGetError());
-		goto fail;
+#ifdef AWS_HAVE_GBM
+	gl->gbm = use_gbm;
+	gl->gbm_device = server->backend.gbm_device;
+#endif
+	if (use_gbm) {
+#ifdef AWS_HAVE_GBM
+		/* **THE DISPLAY IS THE CARD, NOT A WINDOW SYSTEM.** `EGL_PLATFORM_GBM_KHR` is the platform a KMS
+		 * compositor uses; the EXT entry point is how EGL 1.4 exposed it, and the core one is the 1.5 spelling.
+		 * A driver with neither cannot host this renderer, and saying so lets `auto` fall to the CPU. */
+		PFNEGLGETPLATFORMDISPLAYEXTPROC get_platform =
+			(PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
+
+		if (get_platform != NULL) {
+			gl->display = get_platform(EGL_PLATFORM_GBM_KHR, gl->gbm_device, NULL);
+		} else {
+			gl->display = eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, gl->gbm_device, NULL);
+		}
+		if (gl->display == EGL_NO_DISPLAY) {
+			fprintf(stderr, "window-server: gl: eglGetPlatformDisplay(GBM) failed (0x%x)\n",
+				(unsigned)eglGetError());
+			goto fail;
+		}
+#endif
+	} else {
+		gl->display = eglGetDisplay((EGLNativeDisplayType)server->backend.native_display);
+		if (gl->display == EGL_NO_DISPLAY) {
+			fprintf(stderr, "window-server: gl: eglGetDisplay failed (0x%x)\n",
+				(unsigned)eglGetError());
+			goto fail;
+		}
 	}
 	if (!eglInitialize(gl->display, &major, &minor)) {
 		fprintf(stderr, "window-server: gl: eglInitialize failed (0x%x)\n", (unsigned)eglGetError());
@@ -1115,7 +1333,33 @@ int aws_renderer_gl_create(struct aws_server *server)
 			(unsigned)eglGetError());
 		goto fail;
 	}
-	if (choose_config(gl, server->backend.native_visual) != 0) {
+	if (use_gbm) {
+#ifdef AWS_HAVE_GBM
+		if (choose_gbm_config(gl) != 0) {
+			fprintf(stderr, "window-server: gl: no XRGB8888 EGL config for a GBM scanout on %s\n",
+				gbm_device_get_backend_name(gl->gbm_device));
+			goto fail;
+		}
+		if (!gbm_device_is_format_supported(gl->gbm_device, gl->gbm_format,
+						    GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING)) {
+			fprintf(stderr,
+				"window-server: gl: %s cannot make a scanout XRGB8888 buffer through GBM; the CPU renderer will be used\n",
+				gbm_device_get_backend_name(gl->gbm_device));
+			goto fail;
+		}
+		gl->gbm_surface = gbm_surface_create(gl->gbm_device, (uint32_t)gl->width, (uint32_t)gl->height,
+						     gl->gbm_format,
+						     GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+		if (gl->gbm_surface == NULL) {
+			fprintf(stderr, "window-server: gl: gbm_surface_create(%dx%d) failed on %s: %s\n",
+				gl->width, gl->height, gbm_device_get_backend_name(gl->gbm_device),
+				strerror(errno));
+			goto fail;
+		}
+		/* THE LOAN THAT LETS THE BACKEND RELEASE A BUFFER AFTER A FLIP. Cleared before the surface is destroyed. */
+		server->backend.gbm_surface = gl->gbm_surface;
+#endif
+	} else if (choose_config(gl, server->backend.native_visual) != 0) {
 		fprintf(stderr, "window-server: gl: no EGL config matches the window's visual (0x%lx)\n",
 			server->backend.native_visual);
 		goto fail;
@@ -1125,8 +1369,21 @@ int aws_renderer_gl_create(struct aws_server *server)
 		fprintf(stderr, "window-server: gl: eglCreateContext failed (0x%x)\n", (unsigned)eglGetError());
 		goto fail;
 	}
-	gl->surface = eglCreateWindowSurface(gl->display, gl->config,
-					     (EGLNativeWindowType)server->backend.native_window, NULL);
+	if (use_gbm) {
+		PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC create_platform_window =
+			(PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC)eglGetProcAddress("eglCreatePlatformWindowSurfaceEXT");
+
+		if (create_platform_window != NULL) {
+			gl->surface = create_platform_window(gl->display, gl->config,
+							     (void *)gl->gbm_surface, NULL);
+		} else {
+			gl->surface = eglCreateWindowSurface(gl->display, gl->config,
+							     (EGLNativeWindowType)gl->gbm_surface, NULL);
+		}
+	} else {
+		gl->surface = eglCreateWindowSurface(gl->display, gl->config,
+						     (EGLNativeWindowType)server->backend.native_window, NULL);
+	}
 	if (gl->surface == EGL_NO_SURFACE) {
 		fprintf(stderr, "window-server: gl: eglCreateWindowSurface failed (0x%x)\n",
 			(unsigned)eglGetError());
@@ -1136,7 +1393,10 @@ int aws_renderer_gl_create(struct aws_server *server)
 		fprintf(stderr, "window-server: gl: eglMakeCurrent failed (0x%x)\n", (unsigned)eglGetError());
 		goto fail;
 	}
-	eglSwapInterval(gl->display, 1);
+	/* **THE SWAP INTERVAL IS THE WINDOW'S PACING, NOT THE SCANNER'S.** On a GBM surface the throttle is the page
+	 * flip (`drm_busy`), and asking EGL to wait for a vblank as well would spend two vblanks per frame on a driver
+	 * that implements the wait. The X11 surface has no flip event of ours to pace it, so it keeps interval 1. */
+	eglSwapInterval(gl->display, use_gbm ? 0 : 1);
 
 	/* **AND WHETHER THIS GL CAN SAMPLE AN EXTERNAL IMAGE.** Some drivers refuse `GL_TEXTURE_2D` for a dma-buf
 	 * modifier and offer only `GL_TEXTURE_EXTERNAL_OES`; the shader for that is linked only when the extension is
@@ -1228,6 +1488,13 @@ fail:
 		if (gl->surface != EGL_NO_SURFACE) {
 			eglDestroySurface(gl->display, gl->surface);
 		}
+#ifdef AWS_HAVE_GBM
+		if (gl->gbm_surface != NULL) {
+			server->backend.gbm_surface = NULL;
+			gbm_surface_destroy(gl->gbm_surface);
+			gl->gbm_surface = NULL;
+		}
+#endif
 		if (gl->context != EGL_NO_CONTEXT) {
 			eglDestroyContext(gl->display, gl->context);
 		}

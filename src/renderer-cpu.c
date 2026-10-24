@@ -443,12 +443,16 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 	const uint8_t *base;
 	int buffer_width, buffer_height;
 	int width, height, stride;
-	int scale;			/* the CLIENT's device pixels per logical pixel */
+	double client_scale;		/* the same number, and it does not have to be whole: 1.333, 0.805 */
 	double out_scale;		/* the OUTPUT's — the compositor draws this many device pixels per logical one, and
 					 * it is not necessarily whole: 1.5 is a real configuration */
 	int transparent;
 	int corner;
 	int row, column;
+	int ratio_one;		/* the buffer is on the device grid: a 1:1 copy */
+	int dx0 = 0, dy0 = 0;	/* the surface's DEVICE origin */
+	int copy_w = 0, copy_h = 0;	/* the DEVICE extent to copy, after the frame clip */
+	int copy_corner = 0;		/* the corner radius in DEVICE pixels */
 
 	if (shm == NULL) {
 		return;
@@ -459,10 +463,10 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 	/* **THE SURFACE IS THE BUFFER DIVIDED BY THE CLIENT'S SCALE.** Everything below — the frame clip, the corner
 	 * radius, the destination row — is in LOGICAL pixels, because that is the space the compositor places windows
 	 * in. With the scale at 1 (every client that says nothing) this is the same arithmetic it always was. */
-	scale = surface->buffer_scale > 0 ? surface->buffer_scale : 1;
+	client_scale = surface->buffer_scale > 0.0 ? surface->buffer_scale : 1.0;
 	out_scale = (output->scale > 0.0) ? output->scale : 1.0;
-	width = buffer_width / scale;
-	height = buffer_height / scale;
+	width = (int)((double)buffer_width / client_scale + 0.5);
+	height = (int)((double)buffer_height / client_scale + 0.5);
 	/* **AND THE FRAME IS THE WINDOW'S BOUNDS, SO A BIGGER BUFFER IS CLIPPED TO IT.** MEASURED, not assumed: a
 	 * status item's buffer is 320x200 while the server placed it in a 64x24 box, and without this the item ran
 	 * 200 rows down the screen — a status item taller than the menu bar it is drawn in. The frame is what the
@@ -485,6 +489,37 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 	if (corner > height / 2) {
 		corner = height / 2;
 	}
+	/* **WHETHER THE DRAW IS 1:1, AND WHERE IT LANDS IN DEVICE PIXELS.** A device-grid client's `buffer_scale` equals
+	 * the output's, which makes the ratio exactly one; the copy extent is then the buffer's (clipped to the frame's
+	 * device extent), and the origin is the rounded placement. At 1x all three collapse to the logical numbers. */
+	ratio_one = (client_scale == out_scale);
+	{
+		int span_w = cpu_device_edge(width, out_scale);
+		int span_h = cpu_device_edge(height, out_scale);
+
+		dx0 = cpu_device_edge(surface->x, out_scale);
+		dy0 = cpu_device_edge(surface->y, out_scale);
+		copy_w = width;
+		copy_h = height;
+		copy_corner = corner;
+		if (ratio_one && client_scale != 1.0) {
+			if (span_w > buffer_width) {
+				span_w = buffer_width;
+			}
+			if (span_h > buffer_height) {
+				span_h = buffer_height;
+			}
+			copy_w = span_w;
+			copy_h = span_h;
+			copy_corner = cpu_device_edge(AWS_SHADOW_RADIUS, out_scale);
+			if (copy_corner > copy_w / 2) {
+				copy_corner = copy_w / 2;
+			}
+			if (copy_corner > copy_h / 2) {
+				copy_corner = copy_h / 2;
+			}
+		}
+	}
 
 	wl_shm_buffer_begin_access(shm);
 	base = wl_shm_buffer_get_data(shm);
@@ -492,14 +527,20 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 		wl_shm_buffer_end_access(shm);
 		return;
 	}
-	/* **THE FAST PATH IS ONLY FOR 1:1, AND IT MUST NOT RUN AT ALL OTHERWISE.** It writes at the surface's LOGICAL
-	 * coordinates, which is the same thing as its device ones only when both factors are 1; letting it run and then
-	 * painting over it leaves a window's content twice, once at half size, which is exactly the artifact this
-	 * condition removes. */
-	for (row = 0; out_scale == 1.0 && scale == 1 && row < height; row++) {
-		int oy = surface->y + row;		/* 1:1 means device row == logical row */
+	/* **A 1:1 DRAW IS A COPY, AND THAT IS TRUE AT EVERY SCALE, NOT ONLY AT 1x.** The client that declared the
+	 * output's own scale (`agora_window.set_buffer_scale_fixed`) rasterised on the device grid, so its buffer pixel IS
+	 * the device pixel it belongs at: the right work is a row copy at the surface's DEVICE origin, with the same shape
+	 * blending at the corners. Before this, only the literal 1x/1x pair took the fast loops and every 2x or 1.332x
+	 * device-grid surface fell into the general per-pixel box — a box of exactly one pixel, computed with two
+	 * divisions and a coverage test for every pixel of the window. MEASURED: that is the difference between a 4K
+	 * desktop being composited and being a slideshow.
+	 *
+	 * `copy_w`/`copy_h` are DEVICE extents here, and `dx0`/`dy0` the device origin. For the 1x case they are the
+	 * logical numbers unchanged, which is why this is the same loop it always was when the scale is 1. */
+	for (row = 0; ratio_one && row < copy_h; row++) {
+		int oy = dy0 + row;
 		int first = 0;
-		int last = width;
+		int last = copy_w;
 		const uint32_t *source;
 		uint32_t *destination;
 
@@ -507,24 +548,24 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 			continue;
 		}
 		/* THE ROW'S SPAN, CLIPPED TO THE OUTPUT ONCE rather than tested per pixel. */
-		if (surface->x < 0) {
-			first = -surface->x;
+		if (dx0 < 0) {
+			first = -dx0;
 		}
-		if (surface->x + last > output->width) {
-			last = output->width - surface->x;
+		if (dx0 + last > output->width) {
+			last = output->width - dx0;
 		}
 		if (first >= last) {
 			continue;
 		}
 		source = (const uint32_t *)(const void *)(base + (size_t)row * (size_t)stride);
-		destination = output->pixels + (size_t)oy * (size_t)output->width + (size_t)surface->x;
+		destination = output->pixels + (size_t)oy * (size_t)output->width + (size_t)dx0;
 		/* **A ROW BETWEEN THE CORNERS HAS ONE SHAPE FOR ALL OF ITS PIXELS, AND IT IS A RECTANGLE.** `shape_coverage`
 		 * says so itself: a pixel is rounded only when it is within the radius of a VERTICAL edge AND of a HORIZONTAL
 		 * one, so a row that is clear of both horizontal corner bands has no shape to ask about at all. Asking per
 		 * pixel, and blending per pixel, is what made a full-screen composite cost 20 ms — MEASURED, and the reason a
 		 * click with a wallpaper behind it waited a tenth of a second. THE THREE CASES BELOW ARE THE WHOLE ROW:
 		 * an opaque one is a copy, a transparent one is mostly nothing, and only the corner bands need the shape. */
-		if (out_scale == 1.0 && (corner <= 0 || (row >= corner && row < height - corner))) {
+		if (copy_corner <= 0 || (row >= copy_corner && row < copy_h - copy_corner)) {
 			if (!transparent) {
 				/* AN OPAQUE ROW IS A COPY. The `X` in `XRGB8888` is not alpha and the output's is opaque. */
 				for (column = first; column < last; column++) {
@@ -573,7 +614,7 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 			/* **THE WINDOW'S OWN SHAPE FIRST, WHICH IS A ROUNDED CORNER OR NOTHING AT ALL.** `shape` is the
 			 * corner's coverage: 255 everywhere but the four arcs, where it is the pixel the curve passes
 			 * through, blended below like any other partial alpha. Only the corner bands get here. */
-			shape = shape_coverage(output, surface, width, height, column, row);
+			shape = shape_coverage(output, surface, copy_w, copy_h, column, row);
 			if (shape == 0) {
 				continue;
 			}
@@ -606,9 +647,7 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 	 * 2/1 it is a 2x2 block (a scaled client on an ordinary screen), at 1/2 the box is smaller than a pixel and the
 	 * patch is magnified, and at 2/1.5 it is three quarters of a buffer pixel. One expression covers all four, which
 	 * is why there is no second special case for fractions. */
-	if (out_scale != 1.0 || scale != 1) {
-		int dx0 = cpu_device_edge(surface->x, out_scale);
-		int dy0 = cpu_device_edge(surface->y, out_scale);
+	if (!ratio_one) {
 		int dx1 = cpu_device_edge(surface->x + width, out_scale);
 		int dy1 = cpu_device_edge(surface->y + height, out_scale);
 		int px, py;
@@ -621,8 +660,8 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 			}
 			/* THE BOX IN THE BUFFER: the device row's own span, divided by the ratio. Computed from the DEVICE
 			 * coordinate rather than accumulated, so a fractional ratio cannot drift across a window. */
-			by0 = (double)(py - dy0) * (double)scale / out_scale;
-			by1 = (double)(py - dy0 + 1) * (double)scale / out_scale;
+			by0 = (double)(py - dy0) * client_scale / out_scale;
+			by1 = (double)(py - dy0 + 1) * client_scale / out_scale;
 			for (px = dx0; px < dx1; px++) {
 				double bx0, bx1;
 				uint32_t pixel;
@@ -633,8 +672,8 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 				if (px < 0 || px >= output->width) {
 					continue;
 				}
-				bx0 = (double)(px - dx0) * (double)scale / out_scale;
-				bx1 = (double)(px - dx0 + 1) * (double)scale / out_scale;
+				bx0 = (double)(px - dx0) * client_scale / out_scale;
+				bx1 = (double)(px - dx0 + 1) * client_scale / out_scale;
 				pixel = scaled_block_pixel(base, (size_t)stride, buffer_width, buffer_height, bx0, bx1,
 							   by0, by1, transparent);
 				/* THE SHAPE IS ASKED PER DEVICE PIXEL, AND IN DEVICE UNITS — the box it is asked about is the
