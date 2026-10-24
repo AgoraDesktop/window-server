@@ -59,6 +59,12 @@ int main(void)
 	aws_vt_release(&vt);	/* must be a no-op rather than an ioctl on fd 0 */
 	check(vt.console_fd == -1, "release of an unclaimed session touches nothing");
 
+	/* (2b) A TERMINAL NUMBER IS REQUIRED, AND THIS IS THE FIX FOR A REAL INJURY: "pick a free one" chose a getty's,
+	 * and a person's session went to a login prompt. */
+	why[0] = '\0';
+	check(aws_vt_claim(&vt, 0, why, sizeof why) != 0, "claiming WITHOUT --vt is refused");
+	check(strstr(why, "--vt") != NULL, "and the message names the flag that would have supplied one");
+
 	/* (3) THE PRIVILEGE IS ASKED ABOUT BEFORE ANYTHING IS SWITCHED, and the refusal is named. */
 	{
 		int privileged = 0;
@@ -69,7 +75,10 @@ int main(void)
 			close(fd);
 		}
 		why[0] = '\0';
-		if (aws_vt_claim(&vt, why, sizeof why) == 0) {
+		/* **THE TERMINAL IS NAMED BY THE CALLER, AND THE TEST NAMES A HIGH ONE** — 12 is beyond every getty and
+		 * display-manager allocation on a default Debian install, so a machine that lets this run does not lose a
+		 * login prompt to it. */
+		if (aws_vt_claim(&vt, 12, why, sizeof why) == 0) {
 			/* THE MACHINE LET US HAVE A TERMINAL. Give it straight back, and do not pretend to have tested the
 			 * unprivileged path. */
 			printf("  ok    this machine may claim a terminal (terminal %d, started on %d)\n", vt.number,

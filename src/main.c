@@ -78,6 +78,49 @@ static int on_vt_acquire(int signal_number, void *data)
 	return 0;
 }
 
+/* **A TERMINAL WITH NOTHING ON IT MUST GIVE ITSELF BACK, AND THAT IS A DEADLINE RATHER THAN A POLICY.** `--frames N`
+ * counts COMPOSITED frames, so a compositor with no client composites none and never reaches its own exit condition —
+ * it sits on somebody's screen until it is killed. MEASURED, on this machine, by the person whose session it was: the
+ * screen went to a login prompt, stayed there, and the terminal it had claimed could not be switched away from because
+ * the VT negotiation it had armed was waiting for an answer from a process that had nothing to draw.
+ *
+ * So a claim has a deadline: `--vt-timeout` seconds to produce a frame, after which the terminal is given back and the
+ * process exits with a message. It is disarmed by the first frame, so a working session never sees it. */
+static struct wl_event_source *s_vt_timer;
+static int s_vt_watching;
+
+static int on_vt_timeout(void *data)
+{
+	struct aws_server *server = data;
+
+	fprintf(stderr, "window-server: nothing was composited on terminal %d within the deadline — giving it "
+			"back (a server with no client has nothing to draw; raise --vt-timeout if that is what "
+			"happened)\n", s_vt.number);
+	server->running = 0;
+	return 0;
+}
+
+/* **AND THE NEGOTIATION IS ARMED ONLY ONCE THERE IS SOMETHING TO NEGOTIATE.** `VT_PROCESS` makes every terminal
+ * switch a question the kernel asks THIS process, and an owner that cannot answer — because it is stuck, or because it
+ * was killed and the mode outlived it — leaves the machine's terminals unswitchable. Arming it after the first frame
+ * means a compositor that never gets that far never takes the keyboard's VT switches hostage. */
+static void vt_watch_arm(struct aws_server *server)
+{
+	char why[256];
+
+	if (s_vt.number < 0 || s_vt_watching) {
+		return;
+	}
+	if (aws_vt_watch(&s_vt, "window-server", why, sizeof why) != 0) {
+		fprintf(stderr, "window-server: on terminal %d but not negotiating switches: %s\n", s_vt.number, why);
+		return;
+	}
+	wl_event_loop_add_signal(server->loop, SIGUSR1, on_vt_release, server);
+	wl_event_loop_add_signal(server->loop, SIGUSR2, on_vt_acquire, server);
+	s_vt_watching = 1;
+	fprintf(stderr, "window-server: terminal switches are negotiated (SIGUSR1 release, SIGUSR2 acquire)\n");
+}
+
 static int on_signal(int signal_number, void *data)
 {
 	struct aws_server *server = data;
@@ -103,7 +146,12 @@ static void usage(const char *program)
 		"  --width/--height  the output's size, in pixels (default 1280x720)\n"
 		"  --socket NAME     the Wayland socket's name; the default is chosen and printed\n"
 		"  --launcher NAME   where the terminal comes from: existing (default — run it from a text\n"
-		"                    console) or vt (claim a free terminal and switch to it; needs root)\n"
+		"                    console) or vt (switch to --vt N; needs root, and a display manager may\n"
+		"                    own the terminal you name — see --vt-timeout)\n"
+		"  --vt N            the terminal --launcher vt switches to. REQUIRED, and never chosen for\n"
+		"                    you: a terminal the kernel calls free may be somebody's login prompt\n"
+		"  --vt-timeout N    seconds a claimed terminal may go without a composited frame before it is\n"
+		"                    given back and the server exits (default 10; 0 disables)\n"
 		"  --frames N        composite N frames, then stop (0, the default, runs until killed)\n"
 		"  --screenshot P    write the final output to a PPM file\n"
 		"  --system-menu-icon NAME\n"
@@ -132,6 +180,10 @@ int main(int argc, char **argv)
 	 * `vt` asks the kernel for a free terminal, switches to it, and gives it back on exit: the only way a terminal
 	 * switch can be ANSWERED rather than survived, and the only way it can be started from anywhere. */
 	const char *launcher = "existing";
+	/* **THE TERMINAL IS NAMED, NEVER CHOSEN.** See `aws_vt_claim`: "the first free terminal" is a getty's on a machine
+	 * with a display manager, and taking it moves a person off their session. */
+	int vt_number = 0;
+	int vt_timeout = 10;
 	int height = 720;
 	int frames = 0;
 	const char *socket_name = NULL;
@@ -158,6 +210,10 @@ int main(int argc, char **argv)
 			 * comfortable size or a laptop that ships at 150%, and `atof` is the whole difference from a session that
 			 * could only be told whole numbers. */
 			scale = atof(argv[++i]);
+		} else if (strcmp(argv[i], "--vt") == 0 && i + 1 < argc) {
+			vt_number = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "--vt-timeout") == 0 && i + 1 < argc) {
+			vt_timeout = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--launcher") == 0 && i + 1 < argc) {
 			launcher = argv[++i];
 		} else if (strcmp(argv[i], "--socket") == 0 && i + 1 < argc) {
@@ -228,7 +284,7 @@ int main(int argc, char **argv)
 	if (strcmp(launcher, "vt") == 0) {
 		char why[256];
 
-		if (aws_vt_claim(&s_vt, why, sizeof why) != 0) {
+		if (aws_vt_claim(&s_vt, vt_number, why, sizeof why) != 0) {
 			fprintf(stderr, "window-server: --launcher vt could not take a terminal: %s\n", why);
 			fprintf(stderr, "                (claiming one needs root or CAP_SYS_TTY_CONFIG; the default "
 					"launcher, `existing`, runs on the terminal it was started from and needs neither)\n");
@@ -243,24 +299,33 @@ int main(int argc, char **argv)
 	server = aws_server_create(backend, input, renderer, width, height, scale);
 	if (server == NULL) {
 		fprintf(stderr, "window-server: could not start (backend '%s')\n", backend);
+		/* **A CLAIMED TERMINAL IS GIVEN BACK ON EVERY EXIT PATH, NOT ONLY THE HAPPY ONE.** Leaving it here would
+		 * strand a person on a black screen because a compositor that failed to start still owns the display — the
+		 * failure is loud and the terminal is not the place to report it. */
+		aws_vt_release(&s_vt);
 		return 1;
 	}
 	if (system_menu_icon != NULL && strcmp(system_menu_icon, "auto") != 0) {
 		if (aws_server_set_system_menu_icon(server, system_menu_icon) != 0) {
 			fprintf(stderr, "window-server: unknown system menu icon '%s'\n", system_menu_icon);
 			aws_server_destroy(server);
+			aws_vt_release(&s_vt);
 			return 2;
 		}
 	}
 	if (socket_name != NULL) {
 		if (wl_display_add_socket(server->display, socket_name) < 0) {
 			fprintf(stderr, "window-server: could not listen on %s\n", socket_name);
+			aws_server_destroy(server);
+			aws_vt_release(&s_vt);
 			return 1;
 		}
 	} else {
 		socket_name = wl_display_add_socket_auto(server->display);
 		if (socket_name == NULL) {
 			fprintf(stderr, "window-server: could not create a socket (is XDG_RUNTIME_DIR set?)\n");
+			aws_server_destroy(server);
+			aws_vt_release(&s_vt);
 			return 1;
 		}
 	}
@@ -280,24 +345,11 @@ int main(int argc, char **argv)
 		server->os_identity.id[0] != '\0' ? server->os_identity.id : "(none)");
 
 	if (s_vt.number >= 0) {
-		/* **AND THE KERNEL IS TOLD TO NEGOTIATE SWITCHES ONLY NOW**, once there is a display to give up and a loop to
-		 * answer from. Registered before the first frame, so a Ctrl-Alt-F1 during startup is still a negotiation
-		 * rather than a surprise. */
-		char why[256];
-
-		if (aws_vt_watch(&s_vt, "window-server", why, sizeof why) != 0) {
-			fprintf(stderr, "window-server: on terminal %d but not negotiating switches: %s\n", s_vt.number,
-				why);
-		} else {
-			struct wl_event_source *release_source =
-				wl_event_loop_add_signal(server->loop, SIGUSR1, on_vt_release, server);
-			struct wl_event_source *acquire_source =
-				wl_event_loop_add_signal(server->loop, SIGUSR2, on_vt_acquire, server);
-
-			(void)release_source;
-			(void)acquire_source;
-			fprintf(stderr, "window-server: terminal switches are negotiated (SIGUSR1 release, SIGUSR2 "
-					"acquire)\n");
+		/* **THE DEADLINE STARTS WITH THE CLAIM**, and it is on the event loop so it fires while the loop is blocked
+		 * waiting for a client that may never come. */
+		s_vt_timer = wl_event_loop_add_timer(server->loop, on_vt_timeout, server);
+		if (s_vt_timer != NULL && vt_timeout > 0) {
+			wl_event_source_timer_update(s_vt_timer, vt_timeout * 1000);
 		}
 	}
 	server->running = 1;
@@ -312,6 +364,9 @@ int main(int argc, char **argv)
 	 * are removed below, while the loop is alive, which is the only time Wayland allows it. */
 	struct wl_event_source *sigint_source = wl_event_loop_add_signal(server->loop, SIGINT, on_signal, server);
 	struct wl_event_source *sigterm_source = wl_event_loop_add_signal(server->loop, SIGTERM, on_signal, server);
+	/* **AND A HANGUP, WHICH IS WHAT A TERMINAL GOING AWAY LOOKS LIKE.** A compositor that ignored it would keep a
+	 * claimed terminal after the session that started it had gone. */
+	struct wl_event_source *sighup_source = wl_event_loop_add_signal(server->loop, SIGHUP, on_signal, server);
 	while (server->running) {
 		/* **A RENDER THAT IS DUE DOES NOT WAIT FOR AN EVENT, AND THAT IS THE WHOLE OF A BUG A PERSON SPOTTED.**
 		 * A timeout of -1 means BLOCK UNTIL SOMETHING HAPPENS — and the only things that happen are a client's
@@ -394,6 +449,15 @@ int main(int argc, char **argv)
 			 * composited one frame and then stopped with a connected client. */
 			wl_display_flush_clients(server->display);
 			server->frames++;
+			/* THE FIRST FRAME IS THE PROOF THAT THERE IS A COMPOSITOR HERE, so the deadline goes and the terminal
+			 * negotiation arrives. Both are one-way: a session that later goes quiet keeps its terminal, as a
+			 * session should. */
+			if (s_vt_timer != NULL) {
+				wl_event_source_timer_update(s_vt_timer, 0);
+			}
+			if (server->frames == 1) {
+				vt_watch_arm(server);
+			}
 			s_last_render_ns = aws_monotonic_ns();
 			if (server->max_frames > 0 && server->frames >= server->max_frames) {
 				break;
@@ -408,6 +472,13 @@ int main(int argc, char **argv)
 	}
 	if (sigterm_source != NULL) {
 		wl_event_source_remove(sigterm_source);
+	}
+	if (sighup_source != NULL) {
+		wl_event_source_remove(sighup_source);
+	}
+	if (s_vt_timer != NULL) {
+		wl_event_source_remove(s_vt_timer);
+		s_vt_timer = NULL;
 	}
 
 	fprintf(stderr, "window-server: %d frame(s) composited\n", server->frames);

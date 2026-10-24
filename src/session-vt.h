@@ -24,9 +24,12 @@ struct aws_session_vt {
  * fd 0 and terminal 0, which every `>= 0` test reads as a live claim. */
 void aws_vt_init(struct aws_session_vt *vt);
 
-/* Claim a free terminal, switch to it, and make it the controlling one. 0 on success; on failure `why` says what the
- * kernel or the permission said, because "could not start" is not a diagnosis. */
-int aws_vt_claim(struct aws_session_vt *vt, char *why, size_t why_size);
+/* **CLAIM THE TERMINAL THE CALLER NAMED, AND NEVER ONE IT PICKED ITSELF.** `wanted` must be a terminal number the
+ * person chose (`--vt N`); 0 or less is refused, because "the first free terminal" is a getty's on any machine with a
+ * display manager and taking it moves a person off their session. The terminal currently active is refused too.
+ * 0 on success; on failure `why` says what the kernel or the permission said, because "could not start" is not a
+ * diagnosis. */
+int aws_vt_claim(struct aws_session_vt *vt, int wanted, char *why, size_t why_size);
 
 /* Ask the kernel to negotiate switches (VT_PROCESS). After this, SIGUSR1 means "give the display up" and SIGUSR2 means
  * "it is yours again" — and each has to be answered with `aws_vt_acknowledge` or the switch stalls. */

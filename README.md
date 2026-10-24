@@ -493,3 +493,34 @@ icon needs.
 ## Licence
 
 MIT — see [`LICENSE`](LICENSE).
+
+### 6. Claiming a terminal, and how to undo it
+
+`--launcher vt --vt N` switches to terminal `N` and takes it: `VT_ACTIVATE` + `VT_WAITACTIVE`, then `setsid` +
+`TIOCSCTTY` so that terminal is this process's controlling one, and — once the first frame has been composited —
+`VT_SETMODE(VT_PROCESS)` so that every later switch is a question the kernel asks this process (`SIGUSR1`, answered
+with `VT_RELDISP`).
+
+**THE TERMINAL IS NAMED AND NEVER CHOSEN.** `VT_OPENQRY` is deliberately unused: on a machine with a display manager
+"the first free terminal" is a getty's, and a compositor that takes it moves a person off their session and onto a login
+prompt. That is not a hypothetical — it happened, on the machine this was developed on, and it is why `--vt` is
+required and why `--vt-timeout` exists.
+
+**A CLAIM HAS A DEADLINE.** `--frames N` counts *composited* frames, so a claimed terminal with no client composites
+none and never reaches its own exit condition; `--vt-timeout` (default 10s) gives the terminal back and exits when
+nothing has been drawn by then. The negotiation is armed only after the first frame, so a compositor that never gets
+that far never takes the keyboard's switches hostage.
+
+**IF A TERMINAL IS STRANDED ANYWAY** — a `VT_PROCESS` owner that was killed, stuck, or rebooted mid-session leaves
+**every** terminal on the machine unswitchable, which looks like a dead keyboard. It does not need a reboot:
+
+```sh
+sudo python3 - <<'PY'
+import fcntl, os, struct
+fd = os.open('/dev/tty0', os.O_RDWR)
+fcntl.ioctl(fd, 0x5602, struct.pack('BBhhh', 0, 0, 0, 0, 0))   # VT_SETMODE -> VT_AUTO
+PY
+```
+
+Run from another machine over SSH, or from a shell that still works. `sudo systemctl restart display-manager` afterwards
+if a session was left mid-switch.

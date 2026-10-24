@@ -73,13 +73,24 @@ void aws_vt_init(struct aws_session_vt *vt)
 	vt->previous = -1;
 }
 
-int aws_vt_claim(struct aws_session_vt *vt, char *why, size_t why_size)
+int aws_vt_claim(struct aws_session_vt *vt, int wanted, char *why, size_t why_size)
 {
 	struct vt_stat state;
 	char path[32];
-	int number = -1;
 
 	aws_vt_init(vt);
+	/* **THE CALLER NAMES THE TERMINAL. `VT_OPENQRY` IS NOT USED, AND THAT IS THE FIX FOR A REAL INJURY.**
+	 * "The first terminal the kernel considers free" is not "a terminal nobody wants": on a machine with a display
+	 * manager it is a getty's, and a compositor that takes it pulls a person off their session and onto a login
+	 * prompt they did not ask for. MEASURED, on this very machine, by the person it happened to. A terminal number is
+	 * now an argument, and `--vt` is required to supply one. */
+	if (wanted <= 0) {
+		if (why != NULL && why_size > 0) {
+			snprintf(why, why_size, "no terminal was named — pass --vt N (--launcher vt never picks one "
+					 "for you: a terminal the kernel calls free may be somebody's login prompt)");
+		}
+		return -1;
+	}
 
 	vt->console_fd = open("/dev/tty0", O_RDWR | O_CLOEXEC);
 	if (vt->console_fd < 0) {
@@ -92,12 +103,18 @@ int aws_vt_claim(struct aws_session_vt *vt, char *why, size_t why_size)
 	if (ioctl(vt->console_fd, VT_GETSTATE, &state) == 0) {
 		vt->previous = state.v_active;
 	}
-	if (ioctl(vt->console_fd, VT_OPENQRY, &number) < 0 || number <= 0) {
-		vt_why(why, why_size, "the kernel has no free terminal to give (VT_OPENQRY)");
+	/* **AND NEVER THE TERMINAL IT IS ALREADY ON.** Switching to the active terminal is a no-op the kernel does not
+	 * report, so a compositor would go on to take DRM master believing it had moved — and then "give back" a terminal
+	 * it never left, which is how a session ends up on the wrong one with no way home. */
+	if (state.v_active == wanted) {
+		if (why != NULL && why_size > 0) {
+			snprintf(why, why_size, "terminal %d is the one already active — name a different one with --vt",
+				 wanted);
+		}
 		aws_vt_release(vt);
 		return -1;
 	}
-	vt->number = number;
+	vt->number = wanted;
 
 	/* **SWITCH, THEN WAIT, AND THE ORDER IS THE POINT.** `VT_ACTIVATE` asks; `VT_WAITACTIVE` is what turns the ask into
 	 * a fact — it blocks until the kernel has moved the console. A compositor that skipped the wait would take DRM
