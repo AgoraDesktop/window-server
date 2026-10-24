@@ -162,11 +162,21 @@ struct aws_backend {
 	 * pixel 200. */
 	int width;
 	int height;
-	int scale;			/* device pixels per logical pixel; 1 unless configured or hinted */
+	/* **THE SCREEN THE CLIENT IS TOLD ABOUT, KEPT RATHER THAN DIVIDED BACK OUT.** With a fractional scale
+	 * `width / scale` is not the number the request named (1280 / 1.5 = 853.33, and the session is 853 or 1280
+	 * depending on what it asked for) — so the logical size is its own fact and the framebuffer is derived from it. */
+	int logical_width;
+	int logical_height;
+	/* **DEVICE PIXELS PER LOGICAL PIXEL, AND IT IS NOT NECESSARILY A WHOLE NUMBER.** A 1.5x session is a real
+	 * configuration — a 4K panel at a comfortable size, a laptop that ships at 150% — and the compositor has to draw
+	 * 1.5 device pixels per logical one. What a CLIENT is told is still an integer, because `wl_output.scale` is one:
+	 * `aws_output_scale_integer()` rounds UP, so a client on a 1.5x output renders at 2x and the compositor downsamples
+	 * 2 -> 1.5. That is what makes 1.5 sharp rather than a 1.5-times magnifying glass. */
+	double scale;
 	/* **WHAT THE CALLER ASKED FOR, WHICH IS NOT THE SAME AS WHAT THE OUTPUT ENDED UP AT.** 0 means nobody said, so
 	 * a backend that can INFER a scale from its display may fill `scale` in during its own start; a non-zero value is
 	 * an instruction and no backend may override it. */
-	int user_scale;
+	double user_scale;
 	uint32_t *pixels;			/* XRGB8888, the format every client here sends */
 
 	/* **AND WHERE A GPU COULD PUT THEM, WHEN THIS BACKEND HAS ONE.** A windowed backend that can hand an EGL
@@ -411,7 +421,7 @@ struct aws_server {
 /* `width` and `height` are LOGICAL pixels — the screen a client is told about — and `scale` is the device pixels per
  * logical pixel, where 0 means "whatever the backend can infer" (see `aws_backend_init`). */
 struct aws_server *aws_server_create(const char *backend_name, const char *input_name, const char *renderer_name,
-				     int width, int height, int scale);
+				     int width, int height, double scale);
 void aws_server_destroy(struct aws_server *server);
 void aws_server_schedule_render(struct aws_server *server);
 /* `name` is an icon id, an alias, a distro id, a family, or "auto" to re-resolve from the identity. Returns 0 on
@@ -456,7 +466,7 @@ int aws_dmabuf_format_has_alpha(uint32_t format);
 int aws_dmabuf_format_planes(uint32_t format);
 
 /* backend.c — choosing one, and the two calls the event loop makes */
-int aws_backend_init(struct aws_server *server, const char *name, int width, int height, int scale);
+int aws_backend_init(struct aws_server *server, const char *name, int width, int height, double scale);
 void aws_backend_present(struct aws_server *server);
 
 /* **THE SCREEN THE CLIENT IS TOLD ABOUT, WHICH IS THE LOGICAL ONE.** Every coordinate this server handles above the
@@ -466,8 +476,13 @@ void aws_backend_present(struct aws_server *server);
  * half size and there is no compile error for getting it wrong. */
 int aws_output_width(const struct aws_server *server);
 int aws_output_height(const struct aws_server *server);
-/* The device pixels per logical pixel: what `wl_output.scale` reports and what the renderers blit by. */
-int aws_output_scale(const struct aws_server *server);
+/* The device pixels per logical pixel, as a fraction: what the renderers blit by. */
+double aws_output_scale(const struct aws_server *server);
+/* **AND THE SAME NUMBER AS A CLIENT MAY HEAR IT.** `wl_output.scale` is an integer, so a 1.5x output is advertised as
+ * 2: a client that renders at 2x is composited 2 -> 1.5, which is sharp, while a client that rendered at 1.5 would not
+ * be representable at all. Rounded UP, because rounding down would have the client render at fewer pixels than the
+ * screen has. */
+int aws_output_scale_integer(const struct aws_server *server);
 int aws_backend_busy(struct aws_server *server);
 void aws_backend_shutdown(struct aws_server *server);
 const char *aws_backend_names(void);

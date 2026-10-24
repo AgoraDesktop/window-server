@@ -21,6 +21,7 @@ SHOT="/tmp/agora-output-scale-$$.ppm"
 LOGICAL_W=400
 LOGICAL_H=300
 BAR_H=24
+SCALE="${5:-2}"
 
 cleanup() {
 	[ -n "${SPID:-}" ] && kill "${SPID}" 2>/dev/null
@@ -32,7 +33,7 @@ rm -f "${RUNTIME}/${SOCK}" "${RUNTIME}/${SOCK}.lock" "${SHOT}"
 
 # THE LOGICAL SIZE IS WHAT IS ASKED FOR; the framebuffer is that times the scale.
 "${SERVER}" --backend headless --input none --socket "${SOCK}" \
-	--width "${LOGICAL_W}" --height "${LOGICAL_H}" --scale 2 \
+	--width "${LOGICAL_W}" --height "${LOGICAL_H}" --scale "${SCALE}" \
 	--frames 1000000 --screenshot "${SHOT}" --system-menu-icon hamburger >/dev/null 2>/tmp/agora-outscale.log &
 SPID=$!
 for _ in $(seq 1 50); do
@@ -64,4 +65,4 @@ if [ ! -f "${SHOT}" ]; then
 	exit 1
 fi
 
-"${PYTHON}" "${CHECKER}" "${SHOT}" "${LOGICAL_W}" "${LOGICAL_H}" "${BAR_H}"
+"${PYTHON}" "${CHECKER}" "${SHOT}" "${LOGICAL_W}" "${LOGICAL_H}" "${BAR_H}" "${SCALE}"

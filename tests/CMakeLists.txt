@@ -185,3 +185,12 @@ add_test(NAME window-server-output-scale
   COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-output-scale.sh"
     $<TARGET_FILE:window-server> $<TARGET_FILE:window-server-test-client>
     "${PYTHON3}" "${CMAKE_CURRENT_SOURCE_DIR}/check_output_scale.py")
+
+# **AND A FRACTIONAL SCALE, WHICH IS THE CONFIGURATION MOST HIDPI LAPTOPS ACTUALLY SHIP WITH.** 1.5 is not a ratio
+# either space divides: 24 logical rows of menu bar are 36 device rows, a logical pixel is one and a half device pixels,
+# and a client that renders at 2x (what `wl_output.scale` advertises for a 1.5 output) is composited 2 -> 1.5. The
+# assertions are the same ones the integer case makes, with the arithmetic done in device pixels.
+add_test(NAME window-server-output-scale-1-5
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-output-scale.sh"
+    $<TARGET_FILE:window-server> $<TARGET_FILE:window-server-test-client>
+    "${PYTHON3}" "${CMAKE_CURRENT_SOURCE_DIR}/check_output_scale.py" 1.5)

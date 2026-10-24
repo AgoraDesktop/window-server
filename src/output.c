@@ -219,7 +219,10 @@ static void bind_output(struct wl_client *client, void *data, uint32_t version, 
 	wl_output_send_mode(resource, WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED,
 			    (int32_t)aws_output_width(server), (int32_t)aws_output_height(server), 60000);
 	if (wl_resource_get_version(resource) >= 2) {
-		wl_output_send_scale(resource, aws_output_scale(server));
+		/* **THE INTEGER FORM, WHICH IS THE FORM THE PROTOCOL HAS.** A 1.5x output is advertised as 2: the client
+		 * renders at 2x and the compositor downsamples 2 -> 1.5, which is sharp. Telling it 1.5 is not possible, and
+		 * telling it 1 would be a client rendering at the wrong resolution on purpose. */
+		wl_output_send_scale(resource, aws_output_scale_integer(server));
 		wl_output_send_done(resource);
 	}
 	if (server->output.resource == NULL) {

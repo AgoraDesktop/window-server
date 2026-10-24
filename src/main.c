@@ -97,7 +97,7 @@ int main(int argc, char **argv)
 	 * panel usable today: clients keep drawing at the sizes they always did and the compositor presents them twice
 	 * as large, which is the right SIZE and a soft picture. A client that renders at 2x itself (buffer_scale) is then
 	 * 1:1 and sharp — so the two halves are independent, and neither has to wait for the other. */
-	int scale = 0;
+	double scale = 0.0;
 	int height = 720;
 	int frames = 0;
 	const char *socket_name = NULL;
@@ -120,7 +120,10 @@ int main(int argc, char **argv)
 		} else if (strcmp(argv[i], "--height") == 0 && i + 1 < argc) {
 			height = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--scale") == 0 && i + 1 < argc) {
-			scale = atoi(argv[++i]);
+			/* **A FRACTION IS ACCEPTED HERE BECAUSE 1.5 IS A REAL CONFIGURATION.** `--scale 1.5` is a 4K panel at a
+			 * comfortable size or a laptop that ships at 150%, and `atof` is the whole difference from a session that
+			 * could only be told whole numbers. */
+			scale = atof(argv[++i]);
 		} else if (strcmp(argv[i], "--socket") == 0 && i + 1 < argc) {
 			socket_name = argv[++i];
 		} else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
@@ -212,7 +215,7 @@ int main(int argc, char **argv)
 	fflush(stdout);
 	/* BOTH NUMBERS, because which one a reader wants depends on the question: a person wants the screen they have,
 	 * and a diagnosis of a blurry or half-size frame wants the framebuffer. */
-	fprintf(stderr, "window-server: listening on %s, %s output %dx%d, %dx%d device pixels (scale %d)\n",
+	fprintf(stderr, "window-server: listening on %s, %s output %dx%d, %dx%d device pixels (scale %g)\n",
 		socket_name, server->backend.name, aws_output_width(server), aws_output_height(server),
 		server->backend.width, server->backend.height, aws_output_scale(server));
 	fprintf(stderr, "window-server: system menu: %s (source %s, ID=%s)\n",

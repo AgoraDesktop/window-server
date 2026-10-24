@@ -39,12 +39,21 @@ static void cpu_draw(struct aws_server *server);
  * ink and half bar. That is what keeps a diagonal or a curve from looking like a staircase at 16 pixels. */
 static uint32_t aws_blend_pixel(uint32_t destination, uint32_t source, uint32_t alpha);
 
+/* **A LOGICAL EDGE TO A DEVICE EDGE, AND IT MUST BE THE EDGE THAT ROUNDS.** At a fractional scale there is no whole
+ * number of device pixels in a logical one, so the only stable rule is to round the ABSOLUTE coordinate: two windows
+ * that share a logical edge then share a device edge too, and no seam opens between them. Rounding a WIDTH instead
+ * would put the seam wherever the two windows'"'"' own widths happened to fall. */
+static int cpu_device_edge(int logical, double scale)
+{
+	return (int)((double)logical * scale + 0.5);
+}
+
 /* **THE BAR'S MARK IS DRAWN AT DEVICE RESOLUTION FROM A LOGICAL COVERAGE GRID.** The grid is
  * `AWS_SYSTEM_MENU_GLYPH_WIDTH` square because a mark is designed in logical pixels; at 2x each of its cells covers a
  * 2x2 block of device pixels, so the loop walks DEVICE pixels and asks the grid which cell that pixel belongs to. A
  * mark drawn one grid cell per device pixel would be half size in the corner of its own box, which is exactly the
  * "everything is tiny" this whole change exists to fix. */
-static void aws_output_draw_system_menu(struct aws_backend *backend, struct aws_system_icon *icon, int scale)
+static void aws_output_draw_system_menu(struct aws_backend *backend, struct aws_system_icon *icon, double scale)
 {
 	const uint8_t *coverage;
 	int row, column;
@@ -58,15 +67,28 @@ static void aws_output_draw_system_menu(struct aws_backend *backend, struct aws_
 	if (coverage == NULL) {
 		return;
 	}
-	for (row = 0; row < AWS_SYSTEM_MENU_GLYPH_HEIGHT * scale; row++) {
-		const int y = AWS_SYSTEM_MENU_GLYPH_TOP * scale + row;
+	/* THE MARK'S BOX IS THE LOGICAL BOX SCALED AND ROUNDED, and each device pixel asks the grid which of its cells it
+	 * belongs to — which is the same division a fractional scale makes anywhere else, and the reason a 1.5x mark is
+	 * not a 1.5-cells-per-cell blur but a sampled image. */
+	int glyph_w = cpu_device_edge(AWS_SYSTEM_MENU_GLYPH_WIDTH, scale);
+	int glyph_h = cpu_device_edge(AWS_SYSTEM_MENU_GLYPH_HEIGHT, scale);
+	int glyph_top = cpu_device_edge(AWS_SYSTEM_MENU_GLYPH_TOP, scale);
+	int glyph_left = cpu_device_edge(AWS_SYSTEM_MENU_LEFT_MARGIN, scale);
+
+	for (row = 0; row < glyph_h; row++) {
+		const int y = glyph_top + row;
 
 		if (y < 0 || y >= backend->height) {
 			continue;
 		}
-		for (column = 0; column < AWS_SYSTEM_MENU_GLYPH_WIDTH * scale; column++) {
-			const int x = AWS_SYSTEM_MENU_LEFT_MARGIN * scale + column;
-			const uint8_t alpha = coverage[(row / scale) * AWS_SYSTEM_ICON_PIXELS + (column / scale)];
+		for (column = 0; column < glyph_w; column++) {
+			const int x = glyph_left + column;
+			int gx = (int)((double)column / scale);
+			int gy = (int)((double)row / scale);
+			const uint8_t alpha = coverage[(gy < AWS_SYSTEM_MENU_GLYPH_HEIGHT ? gy : AWS_SYSTEM_MENU_GLYPH_HEIGHT - 1)
+						       * AWS_SYSTEM_ICON_PIXELS
+						       + (gx < AWS_SYSTEM_MENU_GLYPH_WIDTH ? gx
+											: AWS_SYSTEM_MENU_GLYPH_WIDTH - 1)];
 			uint32_t *pixel;
 
 			if (alpha == 0 || x < 0 || x >= backend->width) {
@@ -134,7 +156,8 @@ static void shadow_span(struct aws_backend *output, int row, int from, int to,
 
 	/* **THE BAR'S OWN ROWS ARE DEVICE PIXELS, so the boundary is scaled here.** A shadow must never be painted up
 	 * across the bar, and the bar is `AWS_MENU_BAR_HEIGHT * scale` device rows tall. */
-	if (row < AWS_MENU_BAR_HEIGHT * (output->scale > 0 ? output->scale : 1) || row >= output->height) {
+	if (row < cpu_device_edge(AWS_MENU_BAR_HEIGHT, output->scale > 0 ? output->scale : 1.0)
+	    || row >= output->height) {
 		return;
 	}
 	if (from < 0) {
@@ -200,7 +223,8 @@ static void aws_output_draw_shadow(struct aws_backend *output, int x, int y, int
 		 * would otherwise paint UPWARDS across the strip — a dark band above every open menu, which reads as a dirty
 		 * bar rather than as a shadow under a window. THE BAR'S OWN SHADOW FALLS BELOW THE STRIP and is unaffected by
 		 * this line, because its rectangle begins at the strip's own bottom edge. */
-		if (row < AWS_MENU_BAR_HEIGHT * (output->scale > 0 ? output->scale : 1) || row >= output->height) {
+		if (row < cpu_device_edge(AWS_MENU_BAR_HEIGHT, output->scale > 0 ? output->scale : 1.0)
+	    || row >= output->height) {
 			continue;
 		}
 		/* **THE SHADOW IS A RING, AND A ROW THROUGH THE FRAME PAINTS ONLY ITS TWO SIDES.** Every pixel a shadow can
@@ -251,13 +275,13 @@ static void aws_output_draw_shadow(struct aws_backend *output, int x, int y, int
 static unsigned shape_coverage(const struct aws_backend *output, const struct aws_surface *surface,
 			       int width, int height, int column, int row)
 {
-	int scale = (output->scale > 0) ? output->scale : 1;
-	int radius = AWS_SHADOW_RADIUS * scale;
-	int bar_height = AWS_MENU_BAR_HEIGHT * scale;
-	int sx = surface->x * scale;
-	int sy = surface->y * scale;
-	int sw = surface->frame_width * scale;
-	int sh = surface->frame_height * scale;
+	double scale = (output->scale > 0) ? output->scale : 1.0;
+	int radius = cpu_device_edge(AWS_SHADOW_RADIUS, scale);
+	int bar_height = cpu_device_edge(AWS_MENU_BAR_HEIGHT, scale);
+	int sx = cpu_device_edge(surface->x, scale);
+	int sy = cpu_device_edge(surface->y, scale);
+	int sw = cpu_device_edge(surface->frame_width, scale);
+	int sh = cpu_device_edge(surface->frame_height, scale);
 	int in_bar;
 	int hangs_from_bar;
 	double cx, cy;
@@ -275,7 +299,10 @@ static unsigned shape_coverage(const struct aws_backend *output, const struct aw
 	/* **AND A MENU HANGS FROM THE BAR, SO ITS TOP CORNERS ARE NOT ITS OWN.** A dropdown's top edge IS the bar's
 	 * bottom edge: rounding it would cut two notches out of the seam and, MEASURED, made a menu look pasted under the
 	 * bar rather than hanging from it. Its BOTTOM corners are free and stay round, which is the shape a menu has. */
-	hangs_from_bar = (surface->y >= 0) && (sy == bar_height);
+	/* **EXACT, IN DEVICE TERMS: the surface's top edge IS the bar's bottom edge.** Written as a rounded comparison
+	 * rather than a fuzzy one because a fuzz of half a device pixel already catches a surface that is INSIDE the bar
+	 * — and one row inside the bar is a status item, whose corners are the bar's business and must stay square. */
+	hangs_from_bar = (surface->y >= 0) && (cpu_device_edge(surface->y, scale) == bar_height);
 	if (radius > width / 2) {
 		radius = width / 2;
 	}
@@ -336,40 +363,56 @@ static unsigned shape_coverage(const struct aws_backend *output, const struct aw
 	return cover;
 }
 
-/* **ONE LOGICAL PIXEL OUT OF A SCALED BUFFER'S BLOCK OF THEM.** A 2x client's buffer has four device pixels for every
- * logical pixel the compositor places, and the answer that keeps a glyph's stem as dark as it was drawn is the AVERAGE
- * of the block, not the first pixel of it — nearest-neighbour would drop three of every four pixels and turn text into
- * a broken pattern of stems.
+/* **A DEVICE PIXEL OUT OF HOWEVER MUCH BUFFER IT COVERS.** The factor between the two spaces is
+ * `buffer_scale / output_scale`, and it is not necessarily an integer: a 2x client on a 1.5x output covers its device
+ * pixels with three quarters of a buffer pixel each, and a 1x client on the same output is magnified by 1.5. So the
+ * question is asked the only way that works for every ratio — "which buffer pixels does this device pixel touch" — and
+ * the answer is their AVERAGE, weighted equally.
+ *
+ * THE AVERAGE, NOT THE NEAREST: at any ratio above 1 a nearest-neighbour sample drops buffer pixels, and a glyph stem
+ * that falls between two devices becomes a broken pattern rather than a thin line. The cost is a few reads per device
+ * pixel, which is why the 1:1 case keeps its own loop above.
  *
  * THE AVERAGING IS SAFE ON PREMULTIPLIED PIXELS, which is what a transparent window's buffer holds: averaging
- * premultiplied channels and the alpha together keeps them consistent, and un-premultiplying first would divide by an
- * alpha that may be zero.
+ * premultiplied channels and the alpha together keeps them consistent. `XRGB8888`'s top byte is not alpha, so it is
+ * masked out of the sum and forced back on the way out.
  *
- * `XRGB8888`'s top byte is not alpha, so it is masked out of the sum and forced back on the way out — otherwise a
- * client that leaves junk there would average it into the colour. */
+ * A BOX THAT FALLS PARTLY OUTSIDE THE BUFFER IS CLIPPED, not padded: a surface at the edge of the screen has no pixels
+ * beyond its own edge, and inventing black ones would darken every window that touches the border. */
 static uint32_t scaled_block_pixel(const uint8_t *base, size_t stride, int buffer_width, int buffer_height,
-				   int sx, int sy, int scale, int transparent)
+				   double bx0, double bx1, double by0, double by1, int transparent)
 {
+	int x0 = (int)bx0, x1 = (int)bx1, y0 = (int)by0, y1 = (int)by1;
 	unsigned sum_a = 0, sum_r = 0, sum_g = 0, sum_b = 0;
 	unsigned count = 0;
-	int dy, dx;
+	int y, x;
 
-	for (dy = 0; dy < scale; dy++) {
-		int y = sy + dy;
-		const uint32_t *row;
+	/* A BOX NARROWER THAN A PIXEL STILL COVERS ONE (an upscaled output), and one wider covers all of them. */
+	if (x1 <= x0) {
+		x1 = x0 + 1;
+	}
+	if (y1 <= y0) {
+		y1 = y0 + 1;
+	}
+	if (x0 < 0) {
+		x0 = 0;
+	}
+	if (y0 < 0) {
+		y0 = 0;
+	}
+	if (x1 > buffer_width) {
+		x1 = buffer_width;
+	}
+	if (y1 > buffer_height) {
+		y1 = buffer_height;
+	}
 
-		if (y >= buffer_height) {
-			break;
-		}
-		row = (const uint32_t *)(const void *)(base + (size_t)y * stride);
-		for (dx = 0; dx < scale; dx++) {
-			int x = sx + dx;
-			uint32_t pixel;
+	for (y = y0; y < y1; y++) {
+		const uint32_t *row = (const uint32_t *)(const void *)(base + (size_t)y * stride);
 
-			if (x >= buffer_width) {
-				break;
-			}
-			pixel = row[x];
+		for (x = x0; x < x1; x++) {
+			uint32_t pixel = row[x];
+
 			if (transparent) {
 				sum_a += (pixel >> 24) & 0xFFu;
 			}
@@ -401,7 +444,8 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 	int buffer_width, buffer_height;
 	int width, height, stride;
 	int scale;			/* the CLIENT's device pixels per logical pixel */
-	int out_scale;			/* the OUTPUT's — the compositor draws this many per logical pixel */
+	double out_scale;		/* the OUTPUT's — the compositor draws this many device pixels per logical one, and
+					 * it is not necessarily whole: 1.5 is a real configuration */
 	int transparent;
 	int corner;
 	int row, column;
@@ -416,7 +460,7 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 	 * radius, the destination row — is in LOGICAL pixels, because that is the space the compositor places windows
 	 * in. With the scale at 1 (every client that says nothing) this is the same arithmetic it always was. */
 	scale = surface->buffer_scale > 0 ? surface->buffer_scale : 1;
-	out_scale = (output->scale > 0) ? output->scale : 1;
+	out_scale = (output->scale > 0.0) ? output->scale : 1.0;
 	width = buffer_width / scale;
 	height = buffer_height / scale;
 	/* **AND THE FRAME IS THE WINDOW'S BOUNDS, SO A BIGGER BUFFER IS CLIPPED TO IT.** MEASURED, not assumed: a
@@ -448,7 +492,11 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 		wl_shm_buffer_end_access(shm);
 		return;
 	}
-	for (row = 0; row < height; row++) {
+	/* **THE FAST PATH IS ONLY FOR 1:1, AND IT MUST NOT RUN AT ALL OTHERWISE.** It writes at the surface's LOGICAL
+	 * coordinates, which is the same thing as its device ones only when both factors are 1; letting it run and then
+	 * painting over it leaves a window's content twice, once at half size, which is exactly the artifact this
+	 * condition removes. */
+	for (row = 0; out_scale == 1.0 && scale == 1 && row < height; row++) {
 		int oy = surface->y + row;		/* 1:1 means device row == logical row */
 		int first = 0;
 		int last = width;
@@ -476,7 +524,7 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 		 * pixel, and blending per pixel, is what made a full-screen composite cost 20 ms — MEASURED, and the reason a
 		 * click with a wallpaper behind it waited a tenth of a second. THE THREE CASES BELOW ARE THE WHOLE ROW:
 		 * an opaque one is a copy, a transparent one is mostly nothing, and only the corner bands need the shape. */
-		if (out_scale == 1 && corner <= 0 || (out_scale == 1 && row >= corner && row < height - corner)) {
+		if (out_scale == 1.0 && (corner <= 0 || (row >= corner && row < height - corner))) {
 			if (!transparent) {
 				/* AN OPAQUE ROW IS A COPY. The `X` in `XRGB8888` is not alpha and the output's is opaque. */
 				for (column = first; column < last; column++) {
@@ -544,83 +592,71 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 		}
 	}
 
-	/* **AND ANYTHING THAT IS NOT 1:1 TAKES ONE GENERAL PATH.** The loops above are written in buffer pixels because
-	 * almost every client is 1:1 with a 1x output, and the fast paths there — an opaque row is a copy, four
-	 * transparent pixels are asked at once — are most of what makes a composite cheap. Every one of them assumes
+	/* **AND ANYTHING THAT IS NOT 1:1 TAKES ONE GENERAL PATH, IN DEVICE PIXELS.** The loops above are written in buffer
+	 * pixels because almost every client is 1:1 with a 1x output, and the fast paths there — an opaque row is a copy,
+	 * four transparent pixels are asked at once — are most of what makes a composite cheap. Every one of them assumes
 	 * source and destination advance together, which stops being true the moment either factor is not 1:
 	 *
-	 *   the client says 2  the buffer has 2x2 device pixels per logical pixel, and the answer is their AVERAGE —
-	 *                      nearest-neighbour would drop three of every four and turn a stem into a broken pattern.
-	 *   the output is 2    every logical pixel becomes a 2x2 block of device pixels, filled with that same colour.
+	 *   the client says 2   the buffer has 2x2 device pixels per logical pixel
+	 *   the output is 2     every logical pixel becomes a 2x2 block of device pixels
+	 *   the output is 1.5   a logical pixel is one and a half device pixels, and neither space divides the other
 	 *
-	 * THE TWO COMBINE, and that is the whole table: 2/2 is a 1:1 copy (the crisp HiDPI case), 2/1 is the downsample
-	 * that makes a scaled client fit an unscaled output, 1/2 is the upscale that makes an ordinary client the right
-	 * SIZE on a HiDPI screen. Only the middle of that is a copy, so the loop is written as "one logical pixel, its
-	 * colour, then however many device pixels it covers". */
-	if (out_scale != 1 || scale != 1) {
-		for (row = 0; row < height; row++) {			/* logical */
-			int oy0 = (surface->y + row) * out_scale;
-			int first = 0;
-			int last = width;
-			int dy;
+	 * THE RATIO IS THE WHOLE OF IT: `buffer_scale / output_scale` buffer pixels per device pixel, and the answer for
+	 * each device pixel is the average of what it covers. At 2/2 that average is one pixel (the crisp HiDPI copy), at
+	 * 2/1 it is a 2x2 block (a scaled client on an ordinary screen), at 1/2 the box is smaller than a pixel and the
+	 * patch is magnified, and at 2/1.5 it is three quarters of a buffer pixel. One expression covers all four, which
+	 * is why there is no second special case for fractions. */
+	if (out_scale != 1.0 || scale != 1) {
+		int dx0 = cpu_device_edge(surface->x, out_scale);
+		int dy0 = cpu_device_edge(surface->y, out_scale);
+		int dx1 = cpu_device_edge(surface->x + width, out_scale);
+		int dy1 = cpu_device_edge(surface->y + height, out_scale);
+		int px, py;
 
-			if (oy0 + out_scale <= 0 || oy0 >= output->height) {
+		for (py = dy0; py < dy1; py++) {
+			double by0, by1;
+
+			if (py < 0 || py >= output->height) {
 				continue;
 			}
-			if (surface->x < 0) {
-				first = -surface->x;
-			}
-			/* THE OUTPUT'S LOGICAL WIDTH, which is its device width divided by the same factor: a window clipped
-			 * at the right edge is clipped at the LOGICAL edge, and the conversion to device columns happens per
-			 * pixel below. */
-			if (surface->x + last > output->width / out_scale) {
-				last = output->width / out_scale - surface->x;
-			}
-			for (column = first; column < last; column++) {
-				uint32_t pixel = (scale > 1)
-					? scaled_block_pixel(base, (size_t)stride, buffer_width, buffer_height,
-							     column * scale, row * scale, scale, transparent)
-					: ((const uint32_t *)(const void *)(base + (size_t)(row * scale) * (size_t)stride))[column * scale];
-				int dx0 = (surface->x + column) * out_scale;
-				int dx;
+			/* THE BOX IN THE BUFFER: the device row's own span, divided by the ratio. Computed from the DEVICE
+			 * coordinate rather than accumulated, so a fractional ratio cannot drift across a window. */
+			by0 = (double)(py - dy0) * (double)scale / out_scale;
+			by1 = (double)(py - dy0 + 1) * (double)scale / out_scale;
+			for (px = dx0; px < dx1; px++) {
+				double bx0, bx1;
+				uint32_t pixel;
+				unsigned shape;
+				uint32_t alpha;
+				uint32_t *destination;
 
-				for (dy = 0; dy < out_scale; dy++) {
-					int py = oy0 + dy;
-
-					if (py < 0 || py >= output->height) {
-						continue;
-					}
-					for (dx = 0; dx < out_scale; dx++) {
-						int px = dx0 + dx;
-						unsigned shape;
-						uint32_t alpha;
-						uint32_t *destination;
-
-						if (px < 0 || px >= output->width) {
-							continue;
-						}
-						/* THE SHAPE IS ASKED PER DEVICE PIXEL, in device space — a rounded corner is a curve, and
-						 * sampling it once per logical pixel would give the block a stair-step two physical pixels
-						 * wide. */
-						shape = shape_coverage(output, surface, width * out_scale, height * out_scale,
-								       column * out_scale + dx, row * out_scale + dy);
-						if (shape == 0) {
-							continue;
-						}
-						alpha = transparent ? (pixel >> 24) : 0xFFu;
-						if (shape != 255) {
-							alpha = (alpha * shape + 127u) / 255u;
-						}
-						if (alpha == 0) {
-							continue;
-						}
-						destination = &output->pixels[(size_t)py * (size_t)output->width + (size_t)px];
-						if (alpha != 0xFFu) {
-							*destination = aws_blend_pixel(*destination, pixel, alpha);
-						} else {
-							*destination = pixel | 0xFF000000u;
-						}
-					}
+				if (px < 0 || px >= output->width) {
+					continue;
+				}
+				bx0 = (double)(px - dx0) * (double)scale / out_scale;
+				bx1 = (double)(px - dx0 + 1) * (double)scale / out_scale;
+				pixel = scaled_block_pixel(base, (size_t)stride, buffer_width, buffer_height, bx0, bx1,
+							   by0, by1, transparent);
+				/* THE SHAPE IS ASKED PER DEVICE PIXEL, AND IN DEVICE UNITS — the box it is asked about is the
+				 * window's DEVICE extent, not its logical one. Mixing them is a real trap: at 2x a logical width of
+				 * 80 with a device column of 160 puts every pixel past `width - radius` and into the corner case, so
+				 * the shape answers "outside" for most of the window and nothing is drawn at all. */
+				shape = shape_coverage(output, surface, dx1 - dx0, dy1 - dy0, px - dx0, py - dy0);
+				if (shape == 0) {
+					continue;
+				}
+				alpha = transparent ? (pixel >> 24) : 0xFFu;
+				if (shape != 255) {
+					alpha = (alpha * shape + 127u) / 255u;
+				}
+				if (alpha == 0) {
+					continue;
+				}
+				destination = &output->pixels[(size_t)py * (size_t)output->width + (size_t)px];
+				if (alpha != 0xFFu) {
+					*destination = aws_blend_pixel(*destination, pixel, alpha);
+				} else {
+					*destination = pixel | 0xFF000000u;
 				}
 			}
 		}
@@ -636,8 +672,8 @@ static void aws_output_draw_menu_bar(struct aws_server *server)
 	struct aws_backend *backend = &server->backend;
 	int row, column;
 
-	int scale = aws_output_scale(server);
-	int bar_height = AWS_MENU_BAR_HEIGHT * scale;
+	double scale = aws_output_scale(server);
+	int bar_height = cpu_device_edge(AWS_MENU_BAR_HEIGHT, scale);	/* 24 logical rows are 36 device rows at 1.5 */
 
 	for (row = 0; row < bar_height && row < backend->height; row++) {
 		for (column = 0; column < backend->width; column++) {
@@ -649,7 +685,8 @@ static void aws_output_draw_menu_bar(struct aws_server *server)
 	 * and the falloff computed the same way, and the sides that run off the top, the left and the right are dropped
 	 * by the bounds check — and `aws_output_draw_shadow` stops at the bar's bottom edge, so a pop-down menu's shadow
 	 * is never painted up across the bar. */
-	aws_output_draw_shadow(backend, 0, 0, backend->width, bar_height, 0, AWS_SHADOW_DEPTH * scale);
+	aws_output_draw_shadow(backend, 0, 0, backend->width, bar_height, 0,
+			       cpu_device_edge(AWS_SHADOW_DEPTH, scale));
 }
 
 /* ---------------------------------------------------------------------------------------------------
@@ -676,12 +713,18 @@ static void cpu_emit(struct aws_server *server, struct aws_surface *surface, uin
 		 * rectangle and the reach are multiplied here — once, at the boundary — and everything inside the shadow's
 		 * own loop is device pixels. The bar test is logical too, because a window that lives in the bar is a fact
 		 * about where the client put it, not about how many pixels the screen has. */
-		int scale = aws_output_scale(server);
+		double scale = aws_output_scale(server);
+		int shx = cpu_device_edge(surface->x, scale);
+		int shy = cpu_device_edge(surface->y, scale);
 
 		if (surface->y < 0 || surface->y + surface->frame_height > AWS_MENU_BAR_HEIGHT) {
-			aws_output_draw_shadow(backend, surface->x * scale, surface->y * scale,
-					       surface->frame_width * scale, surface->frame_height * scale,
-					       AWS_SHADOW_RADIUS * scale, AWS_SHADOW_DEPTH * scale);
+			/* THE EDGES ROUND, THE SPAN IS THE DIFFERENCE: the same rule the composite uses, so a window's
+			 * shadow and its pixels agree about where the window is at any scale. */
+			aws_output_draw_shadow(backend, shx, shy,
+					       cpu_device_edge(surface->x + surface->frame_width, scale) - shx,
+					       cpu_device_edge(surface->y + surface->frame_height, scale) - shy,
+					       cpu_device_edge(AWS_SHADOW_RADIUS, scale),
+					       cpu_device_edge(AWS_SHADOW_DEPTH, scale));
 		}
 	}
 	composite_surface(backend, surface);

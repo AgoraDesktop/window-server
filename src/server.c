@@ -12,7 +12,7 @@
 #include <string.h>
 
 struct aws_server *aws_server_create(const char *backend_name, const char *input_name, const char *renderer_name,
-				     int width, int height, int scale)
+				     int width, int height, double scale)
 {
 	struct aws_server *server = calloc(1, sizeof *server);
 
