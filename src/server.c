@@ -12,7 +12,7 @@
 #include <string.h>
 
 struct aws_server *aws_server_create(const char *backend_name, const char *input_name, const char *renderer_name,
-				     int width, int height)
+				     int width, int height, int scale)
 {
 	struct aws_server *server = calloc(1, sizeof *server);
 
@@ -55,7 +55,7 @@ struct aws_server *aws_server_create(const char *backend_name, const char *input
 	aws_shell_init(server);
 	/* THE BACKEND LAST, because an X11 one adds its connection's descriptor to the event loop that has to
 	 * exist first. */
-	if (aws_backend_init(server, backend_name, server->requested_width, server->requested_height) != 0) {
+	if (aws_backend_init(server, backend_name, server->requested_width, server->requested_height, scale) != 0) {
 		wl_display_destroy(server->display);
 		free(server);
 		return NULL;

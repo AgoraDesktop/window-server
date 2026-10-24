@@ -154,8 +154,19 @@ struct aws_frame {
  * `height` and `pixels`, which is what makes an output device a file rather than a change. */
 struct aws_backend {
 	const char *name;
+	/* **THE FRAMEBUFFER, IN DEVICE PIXELS — AND `scale` IS HOW MANY OF THEM MAKE A LOGICAL ONE.** These two are what
+	 * the renderers write and what a backend allocates; every WINDOW, every level, every hit test and everything a
+	 * client is told about the screen is in LOGICAL pixels, which is `aws_output_width()` and not these. Before the
+	 * scale existed the two were the same number, which is why the distinction has to be made at every use rather
+	 * than assumed: a 2x output is 2560 device pixels and 1280 logical ones, and a window at x=100 is at device
+	 * pixel 200. */
 	int width;
 	int height;
+	int scale;			/* device pixels per logical pixel; 1 unless configured or hinted */
+	/* **WHAT THE CALLER ASKED FOR, WHICH IS NOT THE SAME AS WHAT THE OUTPUT ENDED UP AT.** 0 means nobody said, so
+	 * a backend that can INFER a scale from its display may fill `scale` in during its own start; a non-zero value is
+	 * an instruction and no backend may override it. */
+	int user_scale;
 	uint32_t *pixels;			/* XRGB8888, the format every client here sends */
 
 	/* **AND WHERE A GPU COULD PUT THEM, WHEN THIS BACKEND HAS ONE.** A windowed backend that can hand an EGL
@@ -397,8 +408,10 @@ struct aws_server {
 };
 
 /* server.c */
+/* `width` and `height` are LOGICAL pixels — the screen a client is told about — and `scale` is the device pixels per
+ * logical pixel, where 0 means "whatever the backend can infer" (see `aws_backend_init`). */
 struct aws_server *aws_server_create(const char *backend_name, const char *input_name, const char *renderer_name,
-				     int width, int height);
+				     int width, int height, int scale);
 void aws_server_destroy(struct aws_server *server);
 void aws_server_schedule_render(struct aws_server *server);
 /* `name` is an icon id, an alias, a distro id, a family, or "auto" to re-resolve from the identity. Returns 0 on
@@ -443,8 +456,18 @@ int aws_dmabuf_format_has_alpha(uint32_t format);
 int aws_dmabuf_format_planes(uint32_t format);
 
 /* backend.c — choosing one, and the two calls the event loop makes */
-int aws_backend_init(struct aws_server *server, const char *name, int width, int height);
+int aws_backend_init(struct aws_server *server, const char *name, int width, int height, int scale);
 void aws_backend_present(struct aws_server *server);
+
+/* **THE SCREEN THE CLIENT IS TOLD ABOUT, WHICH IS THE LOGICAL ONE.** Every coordinate this server handles above the
+ * backends — a window's frame, a level, a hit test, the work area, the menu bar's height — is in logical pixels, and
+ * these three are the only place the device framebuffer is divided down. Written as functions rather than as
+ * `backend.width / backend.scale` at each use, because a missing division is invisible until something is drawn at
+ * half size and there is no compile error for getting it wrong. */
+int aws_output_width(const struct aws_server *server);
+int aws_output_height(const struct aws_server *server);
+/* The device pixels per logical pixel: what `wl_output.scale` reports and what the renderers blit by. */
+int aws_output_scale(const struct aws_server *server);
 int aws_backend_busy(struct aws_server *server);
 void aws_backend_shutdown(struct aws_server *server);
 const char *aws_backend_names(void);

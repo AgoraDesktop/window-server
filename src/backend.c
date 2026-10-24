@@ -36,13 +36,25 @@ const char *aws_backend_names(void)
 	       ;
 }
 
-int aws_backend_init(struct aws_server *server, const char *name, int width, int height)
+int aws_backend_init(struct aws_server *server, const char *name, int width, int height, int scale)
 {
+	/* **THE SCALE IS RESOLVED BEFORE THE FRAMEBUFFER IS ALLOCATED, AND IT IS A DIVISOR EITHER WAY.** A backend told
+	 * the logical size (x11, headless) allocates `logical x scale`; one that learns the physical size from the
+	 * display (drm) overwrites width/height with its mode and its logical size is that divided by the scale. So the
+	 * framebuffer below is always `width x height`, and `aws_output_width()` is always the number clients are told.
+	 *
+	 * THE ONE FIELD IS WHY THIS IS ONE PLACE: `--scale` wins, a backend's own hint is used when nobody said, and 1
+	 * is the answer for anything that cannot tell. */
+	server->backend.user_scale = (scale > 0) ? scale : 0;
+	if (scale <= 0) {
+		scale = 1;	/* provisional: a backend may replace this from its display during start */
+	}
+	server->backend.scale = scale;
 	/* THE SIZE IS SET HERE RATHER THAN BY EACH BACKEND, so that a backend can only be a PLACE for pixels and
 	 * not a decider of how many — a backend that wanted different dimensions would be asking for a policy
-	 * this does not have. */
-	server->backend.width = width;
-	server->backend.height = height;
+	 * this does not have. The request is LOGICAL, so the pixels are the request times the scale. */
+	server->backend.width = width * scale;
+	server->backend.height = height * scale;
 
 	if (name == NULL || strcmp(name, "headless") == 0) {
 		return aws_backend_headless_start(server);
@@ -91,4 +103,23 @@ void aws_backend_shutdown(struct aws_server *server)
 		server->backend.stop(server);
 	}
 	server->backend.pixels = NULL;
+}
+
+int aws_output_scale(const struct aws_server *server)
+{
+	return (server != NULL && server->backend.scale > 0) ? server->backend.scale : 1;
+}
+
+int aws_output_width(const struct aws_server *server)
+{
+	int scale = aws_output_scale(server);
+
+	return (server != NULL) ? server->backend.width / scale : 0;
+}
+
+int aws_output_height(const struct aws_server *server)
+{
+	int scale = aws_output_scale(server);
+
+	return (server != NULL) ? server->backend.height / scale : 0;
 }

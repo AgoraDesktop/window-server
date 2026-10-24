@@ -87,8 +87,8 @@ static const struct libinput_interface libinput_interface = {
 
 static void pointer_move(struct aws_server *server, struct libinput_state *in)
 {
-	int width = server->backend.width;
-	int height = server->backend.height;
+	int width = aws_output_width(server);
+	int height = aws_output_height(server);
 
 	/* CLAMPED TO THE OUTPUT, which is what a compositor's pointer is: there is nowhere else for it to be. */
 	if (in->x < 0.0) {
@@ -173,8 +173,12 @@ static void handle_event(struct aws_server *server, struct libinput_event *event
 
 		/* AN ABSOLUTE DEVICE REPORTS IN ITS OWN SPACE, and the transformation to the output's is asked for
 		 * rather than computed: libinput knows the tablet's range and this process does not. */
-		in->x = libinput_event_pointer_get_absolute_x_transformed(pointer, (uint32_t)server->backend.width);
-		in->y = libinput_event_pointer_get_absolute_y_transformed(pointer, (uint32_t)server->backend.height);
+		/* **THE TRANSFORM'S RANGE IS THE LOGICAL SCREEN, NOT THE FRAMEBUFFER.** A tablet's absolute position is a
+		 * pointer coordinate, and every pointer coordinate in this server is logical — so a 2x output that mapped
+		 * the tablet across its device pixels would leave the right half of the screen unreachable and the left half
+		 * covering twice the ink. */
+		in->x = libinput_event_pointer_get_absolute_x_transformed(pointer, (uint32_t)aws_output_width(server));
+		in->y = libinput_event_pointer_get_absolute_y_transformed(pointer, (uint32_t)aws_output_height(server));
 		pointer_move(server, in);
 		break;
 	}
@@ -301,8 +305,8 @@ int aws_input_libinput_start(struct aws_server *server)
 	server->input = in;
 	/* THE POINTER STARTS IN THE MIDDLE OF THE OUTPUT, because there is no device that can say where it was
 	 * before this compositor started, and the centre is the one place that is inside every output. */
-	in->x = (double)server->backend.width / 2.0;
-	in->y = (double)server->backend.height / 2.0;
+	in->x = (double)aws_output_width(server) / 2.0;
+	in->y = (double)aws_output_height(server) / 2.0;
 	server->pointer_inside = 1;
 	aws_seat_pointer_enter(server, (int)in->x, (int)in->y);
 	/* AND THE DEVICES THAT ARE ALREADY PLUGGED IN ARE PICKED UP HERE, which needs the drain as well as the

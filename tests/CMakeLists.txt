@@ -177,3 +177,11 @@ add_test(NAME window-server-buffer-scale
   COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-buffer-scale.sh"
     $<TARGET_FILE:window-server> $<TARGET_FILE:window-server-test-client>
     "${PYTHON3}" "${CMAKE_CURRENT_SOURCE_DIR}/check_scale.py")
+
+# **AND A 2x OUTPUT, WHICH IS THE HALF THAT MAKES A HIDPI SCREEN USABLE WITHOUT TOUCHING THE CLIENTS.** An ordinary
+# window is drawn twice as large — the right SIZE, soft pixels — and a client that renders at 2x itself is a 1:1 copy,
+# which is the sharp case. The menu bar is furniture and scales with the output rather than shrinking.
+add_test(NAME window-server-output-scale
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-output-scale.sh"
+    $<TARGET_FILE:window-server> $<TARGET_FILE:window-server-test-client>
+    "${PYTHON3}" "${CMAKE_CURRENT_SOURCE_DIR}/check_output_scale.py")

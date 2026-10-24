@@ -74,8 +74,10 @@ void aws_shell_reserved(struct aws_server *server, int *x, int *y, int *width, i
 	/* THE WORK AREA IS THE OUTPUT MINUS THE FURNITURE, in the output's own coordinates. */
 	*x = left;
 	*y = top;
-	*width = server->backend.width - left - right;
-	*height = server->backend.height - top - bottom;
+	/* THE WORK AREA IS LOGICAL, like every other coordinate above the backends: a reserving Dock says "24 pixels" in
+	 * the same units the windows it is reserving space for are measured in. */
+	*width = aws_output_width(server) - left - right;
+	*height = aws_output_height(server) - top - bottom;
 	if (*width < 0) {
 		*width = 0;
 	}
@@ -133,7 +135,7 @@ void aws_shell_menu_bar_area(struct aws_server *server, int *x, int *y, int *wid
 	 * application title began at x = 31, ten pixels of air in a bar that is one surface. */
 	*x = AWS_SYSTEM_MENU_WIDTH + AWS_SYSTEM_MENU_GAP;
 	*y = 0;
-	*width = server->backend.width - *x;
+	*width = aws_output_width(server) - *x;
 	*height = AWS_MENU_BAR_HEIGHT;
 	if (*width < 0) {
 		*width = 0;

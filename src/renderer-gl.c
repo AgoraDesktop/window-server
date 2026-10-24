@@ -736,18 +736,24 @@ static void gl_draw_menu_bar(struct aws_server *server)
 {
 	struct gl_state *gl = server->renderer->data;
 
-	gl_solid(gl, 0.0f, 0.0f, (float)gl->width, (float)AWS_MENU_BAR_HEIGHT, AWS_MENU_BAR_COLOUR);
+	{
+		int s = (server->backend.scale > 0) ? server->backend.scale : 1;
+
+		gl_solid(gl, 0.0f, 0.0f, (float)gl->width, (float)(AWS_MENU_BAR_HEIGHT * s), AWS_MENU_BAR_COLOUR);
 	upload_coverage(gl, server->system_menu_icon);
-	gl_textured(gl, &gl->texture, GL_TEXTURE_2D, gl->coverage_texture, (float)AWS_SYSTEM_MENU_LEFT_MARGIN,
-		    (float)AWS_SYSTEM_MENU_GLYPH_TOP, (float)AWS_SYSTEM_MENU_GLYPH_WIDTH,
-		    (float)AWS_SYSTEM_MENU_GLYPH_HEIGHT, (float)AWS_SYSTEM_MENU_GLYPH_WIDTH,
-		    (float)AWS_SYSTEM_MENU_GLYPH_HEIGHT, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1, 0,
-		    AWS_SYSTEM_MENU_GLYPH_COLOUR);
+	/* **THE MARK'S QUAD IS SCALED; ITS TEXTURE IS NOT.** The coverage grid is a logical-size image and the sampler
+	 * magnifies it, which is what a mark wants — the alternative is a second grid per scale factor. */
+	gl_textured(gl, &gl->texture, GL_TEXTURE_2D, gl->coverage_texture,
+		    (float)(AWS_SYSTEM_MENU_LEFT_MARGIN * s), (float)(AWS_SYSTEM_MENU_GLYPH_TOP * s),
+		    (float)(AWS_SYSTEM_MENU_GLYPH_WIDTH * s), (float)(AWS_SYSTEM_MENU_GLYPH_HEIGHT * s),
+		    (float)(AWS_SYSTEM_MENU_GLYPH_WIDTH * s), (float)(AWS_SYSTEM_MENU_GLYPH_HEIGHT * s),
+		    0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1, 0, AWS_SYSTEM_MENU_GLYPH_COLOUR);
 	/* **AND THE BAR'S OWN SHADOW, WHICH FALLS BELOW THE STRIP.** Radius zero: the bar's corners are square, and a
 	 * shadow with a radius under a square bar painted a smudge INSIDE its own corners. MEASURED in the CPU
 	 * renderer, and this is the same number. */
 	shadow_clip(gl, 1);
-	gl_shadow(gl, 0.0f, 0.0f, (float)gl->width, (float)AWS_MENU_BAR_HEIGHT, 0.0f);
+	gl_shadow(gl, 0.0f, 0.0f, (float)gl->width, (float)(AWS_MENU_BAR_HEIGHT * s), 0.0f);
+	}
 	shadow_clip(gl, 0);
 }
 
@@ -762,6 +768,7 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 	struct wl_shm_buffer *shm = NULL;
 	GLuint texture = 0;
 	float uv_w, uv_h;
+	float quad_x, quad_y, quad_w, quad_h;
 	int from_shm = 0;
 	int width, height, stride = 0;
 	int transparent;
@@ -816,11 +823,23 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 	 * `texture_w = buffer width` would sample only the top-left quarter of itself. */
 	uv_w = (float)width;
 	uv_h = (float)height;
+	/* **AND THE QUAD IS PLACED IN DEVICE PIXELS.** `width`/`height` are logical here, so everything below multiplies
+	 * by the output scale on the way to the shader — the corners, the radius and the rect. The uv divisor is the quad's
+	 * own extent, so it is the SCALED one: the fraction the shader computes from it must still be 1.0. */
+	{
+		int out_scale = (gl->width > 0 && server->backend.scale > 0) ? server->backend.scale : 1;
+
+		quad_x = (float)(surface->x * out_scale);
+		quad_y = (float)(surface->y * out_scale);
+		quad_w = (float)(width * out_scale);
+		quad_h = (float)(height * out_scale);
+		radius *= (float)out_scale;
+	}
 
 	/* **THE FOUR CORNER DECISIONS, WHICH ARE `shape_coverage`'S AND NOT A SECOND OPINION.** A corner is rounded
 	 * only where the window is free of the output's own edges; a menu hanging from the bar keeps its top corners
 	 * square; a surface entirely inside the bar is a piece of the bar and is square all round. */
-	in_bar = surface->y >= 0 && surface->y + surface->frame_height <= AWS_MENU_BAR_HEIGHT;
+	in_bar = surface->y >= 0 && surface->y + surface->frame_height <= AWS_MENU_BAR_HEIGHT;	/* logical, both sides */
 	hangs_from_bar = surface->y == AWS_MENU_BAR_HEIGHT;
 	radius = (float)AWS_SHADOW_RADIUS;
 	if (radius > (float)width / 2.0f) {
@@ -836,9 +855,11 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 
 	/* THE SHADOW FIRST, because it is a shadow on the things behind. */
 	if (!in_bar) {
+		float s = (float)((server->backend.scale > 0) ? server->backend.scale : 1);
+
 		shadow_clip(gl, 1);
-		gl_shadow(gl, (float)surface->x, (float)surface->y, (float)surface->frame_width,
-			  (float)surface->frame_height, (float)AWS_SHADOW_RADIUS);
+		gl_shadow(gl, (float)surface->x * s, (float)surface->y * s, (float)surface->frame_width * s,
+			  (float)surface->frame_height * s, (float)AWS_SHADOW_RADIUS * s);
 		shadow_clip(gl, 0);
 	}
 
@@ -850,15 +871,15 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 		upload_client_buffer(gl, shm, width * (surface->buffer_scale > 0 ? surface->buffer_scale : 1),
 				     height * (surface->buffer_scale > 0 ? surface->buffer_scale : 1), stride);
 		texture = gl->client_texture;
-		gl_textured(gl, &gl->texture, GL_TEXTURE_2D, texture, (float)surface->x, (float)surface->y,
-			    (float)width, (float)height, uv_w, uv_h, radius, tl, tr, bl, br, 0,
+		gl_textured(gl, &gl->texture, GL_TEXTURE_2D, texture, quad_x, quad_y,
+			    quad_w, quad_h, quad_w, quad_h, radius, tl, tr, bl, br, 0,
 			    !transparent, 0);
 	} else {
 		struct gl_import *import = dmabuf->render;
 
 		gl_textured(gl, import->external ? &gl->texture_external : &gl->texture,
 			    import->external ? GL_TEXTURE_EXTERNAL_OES : GL_TEXTURE_2D, texture,
-			    (float)surface->x, (float)surface->y, (float)width, (float)height, uv_w, uv_h,
+			    quad_x, quad_y, quad_w, quad_h, quad_w, quad_h,
 			    radius, tl, tr, bl, br, 0, !transparent, 0);
 	}
 }

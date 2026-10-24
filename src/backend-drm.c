@@ -544,6 +544,21 @@ int aws_backend_drm_start(struct aws_server *server)
 	}
 	server->backend.width = (int)mode.hdisplay;
 	server->backend.height = (int)mode.vdisplay;
+	/* **THE PANEL'S OWN PHYSICAL SIZE IS THE ONLY HONEST SOURCE, AND IT IS ALLOWED TO BE WRONG.** A connector reports
+	 * its width in millimetres, so `pixels x 25.4 / mm` is the DPI the display actually has — 4K on a 13" panel comes
+	 * out around 340 and 1080p on a 24" around 92. Two thresholds are as far as a compositor should guess: 144 dpi and
+	 * up is a display that wants 2x, and everything below it is 1x. NOT THREE, because a 340-dpi panel is a laptop
+	 * whose owner runs it at 2x in every other desktop too, and because a wrong guess here makes a screen nobody can
+	 * use. `--scale` overrides all of it, which matters: a great many 4K monitors report bogus millimetres. */
+	if (server->backend.user_scale == 0 && connector->mmWidth > 0) {
+		double dpi = (double)mode.hdisplay * 25.4 / (double)connector->mmWidth;
+
+		server->backend.scale = (dpi >= 144.0) ? 2 : 1;
+		if (server->backend.scale != 1) {
+			fprintf(stderr, "window-server: this display is %.0f dpi, so the output scale is %d "
+					"(override with --scale)\n", dpi, server->backend.scale);
+		}
+	}
 
 	/* **THE DRY RUN: EVERY STEP UP TO THE COMMIT AND NOTHING AFTER IT.** Taking a display away from the session
 	 * using it is the most disruptive thing any backend in this tree can do, so the whole preparation can be

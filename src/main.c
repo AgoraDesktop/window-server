@@ -93,6 +93,11 @@ int main(int argc, char **argv)
 	const char *input = NULL;
 	const char *renderer = NULL;
 	int width = 1280;
+	/* **THE DEVICE PIXELS PER LOGICAL PIXEL, AND 0 MEANS "ASK THE BACKEND".** `--scale 2` is what makes a HiDPI
+	 * panel usable today: clients keep drawing at the sizes they always did and the compositor presents them twice
+	 * as large, which is the right SIZE and a soft picture. A client that renders at 2x itself (buffer_scale) is then
+	 * 1:1 and sharp — so the two halves are independent, and neither has to wait for the other. */
+	int scale = 0;
 	int height = 720;
 	int frames = 0;
 	const char *socket_name = NULL;
@@ -114,6 +119,8 @@ int main(int argc, char **argv)
 			width = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--height") == 0 && i + 1 < argc) {
 			height = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "--scale") == 0 && i + 1 < argc) {
+			scale = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--socket") == 0 && i + 1 < argc) {
 			socket_name = argv[++i];
 		} else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
@@ -174,7 +181,7 @@ int main(int argc, char **argv)
 		return 0;
 	}
 
-	server = aws_server_create(backend, input, renderer, width, height);
+	server = aws_server_create(backend, input, renderer, width, height, scale);
 	if (server == NULL) {
 		fprintf(stderr, "window-server: could not start (backend '%s')\n", backend);
 		return 1;
@@ -203,8 +210,11 @@ int main(int argc, char **argv)
 
 	printf("%s\n", socket_name);
 	fflush(stdout);
-	fprintf(stderr, "window-server: listening on %s, %s output %dx%d\n", socket_name, server->backend.name,
-		server->backend.width, server->backend.height);
+	/* BOTH NUMBERS, because which one a reader wants depends on the question: a person wants the screen they have,
+	 * and a diagnosis of a blurry or half-size frame wants the framebuffer. */
+	fprintf(stderr, "window-server: listening on %s, %s output %dx%d, %dx%d device pixels (scale %d)\n",
+		socket_name, server->backend.name, aws_output_width(server), aws_output_height(server),
+		server->backend.width, server->backend.height, aws_output_scale(server));
 	fprintf(stderr, "window-server: system menu: %s (source %s, ID=%s)\n",
 		server->system_menu_icon != NULL ? server->system_menu_icon->id : AWS_SYSTEM_MENU_ICON_FALLBACK,
 		server->os_identity.source != NULL ? server->os_identity.source : "(none)",

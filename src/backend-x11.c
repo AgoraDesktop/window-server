@@ -313,7 +313,7 @@ static void x11_stop(struct aws_server *server)
 int aws_backend_x11_start(struct aws_server *server)
 {
 	struct x11_state *x11;
-	size_t count = (size_t)server->backend.width * (size_t)server->backend.height;
+	size_t count;
 
 	if (getenv("DISPLAY") == NULL) {
 		fprintf(stderr, "window-server: the x11 backend needs DISPLAY set\n");
@@ -330,6 +330,32 @@ int aws_backend_x11_start(struct aws_server *server)
 		return -1;
 	}
 	x11->screen = DefaultScreen(x11->display);
+	/* **THE HOST'S OWN PIXELS-PER-MILLIMETRE IS THE HINT A NESTED SESSION NEEDS.** This backend's window sits on
+	 * somebody else's desktop, so "how big is a logical pixel here" is a question about THAT screen — and X answers it
+	 * from the same two numbers the DRM path reads from a connector: the screen's pixel width and its millimetres. The
+	 * thresholds are deliberately the same ones and are documented there; a HiDPI host therefore gets a 2x nested
+	 * session without anybody passing a flag, and `--scale` still wins over it.
+	 *
+	 * IT HAS TO HAPPEN HERE AND NOT IN `aws_backend_init`, because the framebuffer of this backend is allocated from
+	 * the request — so the hint has to be known before that. The request is LOGICAL, which is why it is multiplied
+	 * rather than divided. */
+	if (server->backend.user_scale == 0) {
+		int mm = DisplayWidthMM(x11->display, x11->screen);
+		int px = DisplayWidth(x11->display, x11->screen);
+
+		if (mm > 0 && px > 0) {
+			double dpi = (double)px * 25.4 / (double)mm;
+
+			server->backend.scale = (dpi >= 144.0) ? 2 : 1;
+			if (server->backend.scale != 1) {
+				server->backend.width = server->requested_width * server->backend.scale;
+				server->backend.height = server->requested_height * server->backend.scale;
+				fprintf(stderr, "window-server: the host display is %.0f dpi, so the output scale "
+						"is %d (override with --scale)\n", dpi, server->backend.scale);
+			}
+		}
+	}
+	count = (size_t)server->backend.width * (size_t)server->backend.height;
 	server->backend.pixels = calloc(count, sizeof(uint32_t));
 	if (server->backend.pixels == NULL) {
 		fprintf(stderr, "window-server: could not allocate a %dx%d output\n", server->backend.width,

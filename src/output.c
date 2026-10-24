@@ -212,10 +212,14 @@ static void bind_output(struct wl_client *client, void *data, uint32_t version, 
 	 * readable, so a client that reads before it will read nothing. */
 	wl_output_send_geometry(resource, 0, 0, 0, 0, WL_OUTPUT_SUBPIXEL_UNKNOWN, "Agora", "headless",
 				WL_OUTPUT_TRANSFORM_NORMAL);
+	/* **THE MODE IS THE LOGICAL SIZE AND THE SCALE IS THE FACTOR BETWEEN IT AND THE FRAMEBUFFER.** A client composes
+	 * for `mode` pixels and reads `scale` to decide whether to render at 2x — which is exactly the pair a HiDPI
+	 * client needs, and the reason the mode is not the framebuffer's size: a 2560-device-pixel output at scale 2 is a
+	 * 1280-pixel screen, and telling the client 2560 would make every window half the size it should be. */
 	wl_output_send_mode(resource, WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED,
-			    server->backend.width, server->backend.height, 60000);
+			    (int32_t)aws_output_width(server), (int32_t)aws_output_height(server), 60000);
 	if (wl_resource_get_version(resource) >= 2) {
-		wl_output_send_scale(resource, 1);
+		wl_output_send_scale(resource, aws_output_scale(server));
 		wl_output_send_done(resource);
 	}
 	if (server->output.resource == NULL) {
