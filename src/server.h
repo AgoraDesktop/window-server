@@ -212,6 +212,14 @@ struct aws_backend {
 	 * backend with no such queue. */
 	void (*drain)(struct aws_server *server);
 
+	/* **GIVE THE DISPLAY UP AND TAKE IT BACK, WHICH IS NOT THE SAME AS STOPPING.** A virtual-terminal switch asks a
+	 * compositor to let go of the screen without forgetting anything: the device stays open, the framebuffers stay
+	 * allocated, the connector and mode stay chosen — only the claim on the device and the drawing stop. `stop` is
+	 * the end of the backend's life and frees all of that; this pair is a pause. NULL for a backend whose display is
+	 * a window somebody else owns, which is every backend but DRM. */
+	void (*pause)(struct aws_server *server);
+	void (*resume)(struct aws_server *server);
+
 	/* GIVE BACK WHATEVER `start` TOOK. */
 	void (*stop)(struct aws_server *server);
 
@@ -415,6 +423,10 @@ struct aws_server {
 	int max_frames;
 	const char *screenshot;
 	int running;
+	/* **WHILE THE DISPLAY IS SOMEBODY ELSE'S.** Set between a VT release and its acquire: the loop stops drawing and
+	 * `present` refuses, so a frame composed during the switch cannot be scanned out onto a terminal this process no
+	 * longer owns. */
+	int suspended;
 };
 
 /* server.c */
@@ -468,6 +480,12 @@ int aws_dmabuf_format_planes(uint32_t format);
 /* backend.c — choosing one, and the two calls the event loop makes */
 int aws_backend_init(struct aws_server *server, const char *name, int width, int height, double scale);
 void aws_backend_present(struct aws_server *server);
+
+/* **THE VT SWITCH'S TWO HALVES, ROUTED TO THE BACKEND THAT HAS THEM.** Called from the compositor's own signal
+ * handlers (registered on the event loop, never from async-signal context) so that a release is answered only once the
+ * display has actually been given up. */
+void aws_server_suspend(struct aws_server *server);
+void aws_server_resume(struct aws_server *server);
 
 /* **THE SCREEN THE CLIENT IS TOLD ABOUT, WHICH IS THE LOGICAL ONE.** Every coordinate this server handles above the
  * backends — a window's frame, a level, a hit test, the work area, the menu bar's height — is in logical pixels, and

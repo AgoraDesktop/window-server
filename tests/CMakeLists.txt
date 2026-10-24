@@ -194,3 +194,12 @@ add_test(NAME window-server-output-scale-1-5
   COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-output-scale.sh"
     $<TARGET_FILE:window-server> $<TARGET_FILE:window-server-test-client>
     "${PYTHON3}" "${CMAKE_CURRENT_SOURCE_DIR}/check_output_scale.py" 1.5)
+
+# **AND THE TERMINAL CLAIM'S CONTRACT, WHICH IS MOSTLY ABOUT WHAT IT REFUSES.** Claiming a virtual terminal needs
+# `/dev/tty0`, so a case that claimed one would switch the console out from under the suite — the module is compiled in
+# as it ships and this pins the parts that hold either way: the "nothing claimed" state is -1 and not zeros,
+# `watch` refuses by name, `release` touches nothing, and an unprivileged claim names the privilege and the capability.
+# On a machine that CAN claim, it claims, gives it back, and says the unprivileged branch went untested.
+add_executable(window-server-session-vt session_vt.c "${CMAKE_CURRENT_SOURCE_DIR}/../src/session-vt.c")
+target_include_directories(window-server-session-vt PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+add_test(NAME window-server-session-vt COMMAND window-server-session-vt)

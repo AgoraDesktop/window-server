@@ -24,6 +24,7 @@
  */
 
 #include "server.h"
+#include "session-vt.h"
 
 #include <errno.h>
 #include <time.h>
@@ -51,6 +52,32 @@ static int64_t aws_monotonic_ns(void)
 static int64_t s_last_render_ns;
 
 
+/* **A VT SWITCH ARRIVES AS A SIGNAL AND IS ANSWERED FROM THE LOOP.** The kernel asks before it takes the terminal
+ * (`VT_PROCESS`), and this is where the compositor lets go: the backend drops DRM master and the CRTC, and only then is
+ * the switch acknowledged — answering first would leave the screen being composited into by a process that has already
+ * given it away. The same in reverse on the way back, with a repaint of every pixel. */
+static struct aws_session_vt s_vt;
+
+static int on_vt_release(int signal_number, void *data)
+{
+	struct aws_server *server = data;
+
+	(void)signal_number;
+	aws_server_suspend(server);
+	aws_vt_ack_release(&s_vt);
+	return 0;
+}
+
+static int on_vt_acquire(int signal_number, void *data)
+{
+	struct aws_server *server = data;
+
+	(void)signal_number;
+	aws_server_resume(server);
+	aws_vt_ack_acquire(&s_vt);
+	return 0;
+}
+
 static int on_signal(int signal_number, void *data)
 {
 	struct aws_server *server = data;
@@ -75,6 +102,8 @@ static void usage(const char *program)
 		"  --input NAME      where input comes from: %s (default libinput)\n"
 		"  --width/--height  the output's size, in pixels (default 1280x720)\n"
 		"  --socket NAME     the Wayland socket's name; the default is chosen and printed\n"
+		"  --launcher NAME   where the terminal comes from: existing (default — run it from a text\n"
+		"                    console) or vt (claim a free terminal and switch to it; needs root)\n"
 		"  --frames N        composite N frames, then stop (0, the default, runs until killed)\n"
 		"  --screenshot P    write the final output to a PPM file\n"
 		"  --system-menu-icon NAME\n"
@@ -98,6 +127,11 @@ int main(int argc, char **argv)
 	 * as large, which is the right SIZE and a soft picture. A client that renders at 2x itself (buffer_scale) is then
 	 * 1:1 and sharp — so the two halves are independent, and neither has to wait for the other. */
 	double scale = 0.0;
+	/* **WHERE THE DISPLAY COMES FROM: THE TERMINAL IT WAS STARTED ON, OR A NEW ONE IT CLAIMS.**
+	 * `existing` is the default and needs no privilege — run it from a text console and that console is the session.
+	 * `vt` asks the kernel for a free terminal, switches to it, and gives it back on exit: the only way a terminal
+	 * switch can be ANSWERED rather than survived, and the only way it can be started from anywhere. */
+	const char *launcher = "existing";
 	int height = 720;
 	int frames = 0;
 	const char *socket_name = NULL;
@@ -124,6 +158,8 @@ int main(int argc, char **argv)
 			 * comfortable size or a laptop that ships at 150%, and `atof` is the whole difference from a session that
 			 * could only be told whole numbers. */
 			scale = atof(argv[++i]);
+		} else if (strcmp(argv[i], "--launcher") == 0 && i + 1 < argc) {
+			launcher = argv[++i];
 		} else if (strcmp(argv[i], "--socket") == 0 && i + 1 < argc) {
 			socket_name = argv[++i];
 		} else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
@@ -184,6 +220,26 @@ int main(int argc, char **argv)
 		return 0;
 	}
 
+	/* **THE TERMINAL IS CLAIMED BEFORE THE DEVICE, AND THE ORDER IS LOAD-BEARING.** A DRM master is the process the
+	 * kernel's terminal bookkeeping names as the owner of the screen; taking the device first and the terminal second
+	 * would claim a display for a session that is not yet the active one — which is exactly the state a compositor
+	 * hangs in when it draws nothing and answers nothing. */
+	aws_vt_init(&s_vt);
+	if (strcmp(launcher, "vt") == 0) {
+		char why[256];
+
+		if (aws_vt_claim(&s_vt, why, sizeof why) != 0) {
+			fprintf(stderr, "window-server: --launcher vt could not take a terminal: %s\n", why);
+			fprintf(stderr, "                (claiming one needs root or CAP_SYS_TTY_CONFIG; the default "
+					"launcher, `existing`, runs on the terminal it was started from and needs neither)\n");
+			return 1;
+		}
+		fprintf(stderr, "window-server: on terminal %d (started on %d)\n", s_vt.number, s_vt.previous);
+	} else if (strcmp(launcher, "existing") != 0) {
+		fprintf(stderr, "window-server: no launcher named '%s' (have: existing, vt)\n", launcher);
+		return 2;
+	}
+
 	server = aws_server_create(backend, input, renderer, width, height, scale);
 	if (server == NULL) {
 		fprintf(stderr, "window-server: could not start (backend '%s')\n", backend);
@@ -223,6 +279,27 @@ int main(int argc, char **argv)
 		server->os_identity.source != NULL ? server->os_identity.source : "(none)",
 		server->os_identity.id[0] != '\0' ? server->os_identity.id : "(none)");
 
+	if (s_vt.number >= 0) {
+		/* **AND THE KERNEL IS TOLD TO NEGOTIATE SWITCHES ONLY NOW**, once there is a display to give up and a loop to
+		 * answer from. Registered before the first frame, so a Ctrl-Alt-F1 during startup is still a negotiation
+		 * rather than a surprise. */
+		char why[256];
+
+		if (aws_vt_watch(&s_vt, "window-server", why, sizeof why) != 0) {
+			fprintf(stderr, "window-server: on terminal %d but not negotiating switches: %s\n", s_vt.number,
+				why);
+		} else {
+			struct wl_event_source *release_source =
+				wl_event_loop_add_signal(server->loop, SIGUSR1, on_vt_release, server);
+			struct wl_event_source *acquire_source =
+				wl_event_loop_add_signal(server->loop, SIGUSR2, on_vt_acquire, server);
+
+			(void)release_source;
+			(void)acquire_source;
+			fprintf(stderr, "window-server: terminal switches are negotiated (SIGUSR1 release, SIGUSR2 "
+					"acquire)\n");
+		}
+	}
 	server->running = 1;
 	/* **A SIGNAL MUST GO THROUGH THE LOOP, NOT AROUND IT.** `SIGINT` and `SIGTERM` end this process, and the
 	 * DRM backend's teardown is what releases the display — so a compositor killed by Ctrl+C without running it
@@ -342,5 +419,9 @@ int main(int argc, char **argv)
 		}
 	}
 	aws_server_destroy(server);
+	/* **THE TERMINAL GOES BACK LAST**, after the display has been released: the compositor's own teardown drops DRM
+	 * master and clears the CRTC, and switching the console away first would hand a person a black screen while this
+	 * process was still believing it owned one. */
+	aws_vt_release(&s_vt);
 	return 0;
 }

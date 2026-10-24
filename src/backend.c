@@ -74,8 +74,39 @@ int aws_backend_init(struct aws_server *server, const char *name, int width, int
 	return -1;
 }
 
+void aws_server_suspend(struct aws_server *server)
+{
+	if (server == NULL || server->suspended) {
+		return;
+	}
+	server->suspended = 1;
+	/* **THE BACKEND IS TOLD FIRST AND THE FLAG SECOND**, because its pause is what actually gives the device up — and
+	 * a frame composed between the two would be presented to a display this process has already released. */
+	if (server->backend.pause != NULL) {
+		server->backend.pause(server);
+	}
+}
+
+void aws_server_resume(struct aws_server *server)
+{
+	if (server == NULL || !server->suspended) {
+		return;
+	}
+	if (server->backend.resume != NULL) {
+		server->backend.resume(server);
+	}
+	server->suspended = 0;
+	/* **AND EVERYTHING IS REPAINTED**, because the terminal came back with whatever the kernel drew on it — a text
+	 * console, another session's leftovers — and every pixel of this compositor's scene is stale. */
+	server->render_pending = 1;
+}
+
 void aws_backend_present(struct aws_server *server)
 {
+	/* A PRESENT WHILE THE DISPLAY IS SOMEBODY ELSE'S IS NOT A MISSED FRAME, IT IS A FRAME THAT MUST NOT HAPPEN. */
+	if (server->suspended) {
+		return;
+	}
 	/* A BACKEND WITH NOTHING TO PRESENT LEAVES THIS NULL, which is what a headless output is: the frame
 	 * buffer IS the screen. */
 	if (server->backend.present != NULL) {

@@ -323,6 +323,65 @@ static void drm_destroy_buffer(struct drm_state *drm, struct drm_buffer *buffer)
 	}
 }
 
+/* **THE SWITCH, HALF OF IT: GIVE THE DISPLAY UP AND KEEP EVERYTHING ELSE.** A VT release is not a shutdown — the
+ * connectors, the mode, the blob and both dumb buffers all stay, because the compositor is coming back in a moment and
+ * re-probing a display costs a modeset nobody needs. What goes is the CLAIM on the device (`drmDropMaster`, or the next
+ * session cannot take it) and the CRTC's content (`drm_atomic_modeset(…, 0)`, so the kernel is not lighting a frame
+ * this process has stopped maintaining while it hands the screen over).
+ *
+ * THE DESCRIPTOR SOURCE GOES TOO, and that is the part a compositor gets wrong: flip events and hotplug arrive on it,
+ * and a paused backend that keeps reading them answers events for a device it does not own. */
+static void drm_pause(struct aws_server *server)
+{
+	struct drm_state *drm = server->backend.data;
+
+	if (drm == NULL) {
+		return;
+	}
+	if (drm->source != NULL) {
+		wl_event_source_remove(drm->source);
+		drm->source = NULL;
+	}
+	if (drm->mode_is_set) {
+		(void)drm_atomic_modeset(server, 0);
+		drm->mode_is_set = 0;
+	}
+	if (drm->fd >= 0) {
+		(void)drmDropMaster(drm->fd);
+	}
+}
+
+/* **AND THE OTHER HALF: TAKE IT BACK AND DRAW AGAIN.** `drmSetMaster` can fail here — another session may have claimed
+ * the device in the window between the two, which is legal and is not this compositor's to fix — so the failure is
+ * named and the backend stays paused rather than pretending. A successful resume re-modesets (the kernel dropped the
+ * CRTC when the terminal changed hands) and marks the scene stale; the loop's next pass repaints every pixel. */
+static void drm_resume(struct aws_server *server)
+{
+	struct drm_state *drm = server->backend.data;
+
+	if (drm == NULL) {
+		return;
+	}
+	if (drm->fd < 0) {
+		return;
+	}
+	if (drmSetMaster(drm->fd) != 0) {
+		fprintf(stderr, "window-server: could not take the display back (%s) — staying paused\n",
+			strerror(errno));
+		return;
+	}
+	if (drm_atomic_modeset(server, 1) != 0) {
+		fprintf(stderr, "window-server: could not re-set the mode after a terminal switch\n");
+		(void)drmDropMaster(drm->fd);
+		return;
+	}
+	drm->mode_is_set = 1;
+	if (drm->source == NULL) {
+		drm->source = wl_event_loop_add_fd(server->loop, drm->fd, WL_EVENT_READABLE, drm_dispatch, server);
+	}
+	server->render_pending = 1;
+}
+
 static void drm_stop(struct aws_server *server)
 {
 	struct drm_state *drm = server->backend.data;
@@ -602,6 +661,8 @@ int aws_backend_drm_start(struct aws_server *server)
 	server->backend.name = "drm";
 	server->backend.data = drm;
 	server->backend.present = drm_present;
+	server->backend.pause = drm_pause;
+	server->backend.resume = drm_resume;
 	server->backend.busy = drm_busy;
 	server->backend.stop = drm_stop;
 	/* AND THE DESCRIPTOR GOES ON THE LOOP, which is where the flip events are read. */
