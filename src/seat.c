@@ -631,6 +631,11 @@ void aws_seat_pointer_button(struct aws_server *server, uint32_t evdev_button, i
 	}
 }
 
+/* **HOW LONG AN AXIS HAS TO BE QUIET BEFORE ITS SCROLL IS OVER.** The protocol names the event and not the number:
+ * 150 ms is the number libweston's own scroll handling settled on, and it is long enough that a finger's pauses
+ * between motions do not read as an ending and short enough that a kinetic animation waiting on it does not stall. */
+#define AWS_AXIS_STOP_MS 150
+
 /* **ONE AXIS OF ONE FRAME, ROUTED LIKE A MOTION AND DELIVERED LIKE A BUTTON.** Three things decide what a client
  * sees here, and each has its own reason for being asked in this order:
  *
@@ -686,6 +691,15 @@ void aws_seat_pointer_axis(struct aws_server *server, uint32_t axis, wl_fixed_t 
 		wl_pointer_send_axis(pointer->resource, time, axis, value);
 	}
 	server->pointer_axis_frame_open = 1;
+	/* **AND THE SEQUENCE RE-ARMS ITS OWN ENDING.** A stop is owed only for the axes a sequence actually moved, and
+	 * only for the sources that have a sequence at all: a wheel's notch is complete when it arrives, so arming a
+	 * timer for one would send a stop after every click of the wheel — a gesture end that never happened. */
+	if (source == WL_POINTER_AXIS_SOURCE_FINGER || source == WL_POINTER_AXIS_SOURCE_CONTINUOUS) {
+		server->axis_used |= 1u << (axis & 31u);
+		if (server->axis_stop_timer != NULL) {
+			wl_event_source_timer_update(server->axis_stop_timer, AWS_AXIS_STOP_MS);
+		}
+	}
 }
 
 void aws_seat_pointer_frame(struct aws_server *server)
@@ -704,6 +718,54 @@ void aws_seat_pointer_frame(struct aws_server *server)
 		}
 	}
 	server->pointer_axis_frame_open = 0;
+}
+
+/* **AN ENDING HAS TO BE MANUFACTURED, BECAUSE NOTHING ANNOUNCES IT.** `axis_stop` tells a client that a scroll
+ * sequence is over — it is what a kinetic animation on a trackpad waits for, and without it a client that scrolls
+ * "with momentum" would run forever. Finger and continuous sources are the ones with a sequence: they emit values for
+ * as long as the fingers move, and then simply stop. A WHEEL has no such thing, because a notch is discrete and its
+ * end is the next notch not arriving.
+ *
+ * THE TIMEOUT IS THIS COMPOSITOR'S NUMBER. The protocol does not define one; what it does say is that the stop
+ * belongs to the axes that were moving, so the set is remembered per sequence rather than assumed to be both. */
+void aws_seat_pointer_axis_stop(struct aws_server *server)
+{
+	struct aws_pointer *pointer;
+	uint32_t time = seat_now_ms();
+	uint32_t used = server->axis_used;
+
+	server->axis_used = 0;
+	if (used == 0) {
+		return;		/* nothing was moving, so no sequence ended */
+	}
+	wl_list_for_each(pointer, &server->pointers, link) {
+		uint32_t version = wl_resource_get_version(pointer->resource);
+
+		if (version < WL_POINTER_AXIS_STOP_SINCE_VERSION) {
+			continue;	/* a client that never heard `axis` in a frame has nothing to end */
+		}
+		if (used & (1u << WL_POINTER_AXIS_VERTICAL_SCROLL)) {
+			wl_pointer_send_axis_stop(pointer->resource, time, WL_POINTER_AXIS_VERTICAL_SCROLL);
+		}
+		if (used & (1u << WL_POINTER_AXIS_HORIZONTAL_SCROLL)) {
+			wl_pointer_send_axis_stop(pointer->resource, time, WL_POINTER_AXIS_HORIZONTAL_SCROLL);
+		}
+		if (version >= WL_POINTER_FRAME_SINCE_VERSION) {
+			/* AND IT GOES IN ITS OWN FRAME, so a client that closes its gesture on `frame` sees the stop as one
+			 * delivery rather than as a stray event inside somebody else's. */
+			wl_pointer_send_frame(pointer->resource);
+		}
+	}
+}
+
+/* THE TIMER'S BODY. Returning zero leaves the source armed-but-not-repeating: `wl_event_source_timer_update` is what
+ * arms it again, and the next axis event does that. */
+static int axis_stop_fired(void *data)
+{
+	struct aws_server *server = data;
+
+	aws_seat_pointer_axis_stop(server);
+	return 0;
 }
 
 void aws_seat_key(struct aws_server *server, uint32_t evdev_keycode, int pressed)
@@ -738,6 +800,10 @@ void aws_seat_init(struct aws_server *server)
 	wl_list_init(&server->pointers);
 	wl_list_init(&server->keyboards);
 	seat_build_keymap(server);
+	/* **THE SEAT'S ONE TIMER, AND IT IS CREATED HERE BECAUSE THE LOOP IS THE SERVER'S.** It is removed in
+	 * `aws_seat_finish`, which runs while the loop is still alive — the same ordering `aws_server_destroy` had to
+	 * learn for the backend and input sources. */
+	server->axis_stop_timer = wl_event_loop_add_timer(server->loop, axis_stop_fired, server);
 	/* **THE SEAT IS ADVERTISED AT 8, WHICH IS WHERE A POINTER LEARNS `axis_value120`.** The seat's own events stop
 	 * at version 2 (`name`); every number above it exists to let a POINTER or a KEYBOARD be bound higher, and a
 	 * child object inherits its parent's bound version — so a seat capped at 5 caps every pointer at 5, and the
@@ -755,6 +821,12 @@ void aws_seat_init(struct aws_server *server)
 
 void aws_seat_finish(struct aws_server *server)
 {
+	/* **AND THE TIMER GOES BEFORE THE LOOP DOES.** `wl_display_destroy` destroys the event loop, and a source
+	 * removed afterwards is the invalid list operation `aws_server_destroy` used to perform. */
+	if (server->axis_stop_timer != NULL) {
+		wl_event_source_remove(server->axis_stop_timer);
+		server->axis_stop_timer = NULL;
+	}
 	if (server->xkb_state != NULL) {
 		xkb_state_unref(server->xkb_state);
 	}

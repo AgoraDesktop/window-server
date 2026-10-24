@@ -367,6 +367,12 @@ struct aws_server {
 	 * once per axis — the protocol asks for it in the frame the axis events belong to, and repeating it for the
 	 * second axis of one gesture would be a lie about how many gestures there were. */
 	int pointer_axis_frame_open;
+	/* **THE SCROLL SEQUENCE'S OWN STATE, WHICH IS WHAT A `stop` IS ABOUT.** `axis_used` is a bit per axis that has
+	 * moved since the last stop was sent; the timer is the thing that decides the sequence has ended, because an
+	 * ending is an ABSENCE and no event announces it. Both belong to the seat and not to a backend: which axes are
+	 * still moving is a fact about the seat's input, whoever fed it. */
+	uint32_t axis_used;
+	struct wl_event_source *axis_stop_timer;
 	struct xkb_context *xkb_context;
 	struct xkb_keymap *xkb_keymap;
 	struct xkb_state *xkb_state;
@@ -548,6 +554,12 @@ void aws_seat_pointer_button(struct aws_server *server, uint32_t evdev_button, i
 void aws_seat_pointer_axis(struct aws_server *server, uint32_t axis, wl_fixed_t value, uint32_t source,
 			   int32_t discrete, int32_t value120);
 void aws_seat_pointer_frame(struct aws_server *server);
+/* **"THE SCROLL HAS ENDED", WHICH THE PROTOCOL CANNOT SAY WITH AN EVENT.** `axis_stop` is how a client learns that a
+ * continuous or finger gesture is over — the thing a kinetic scroll animation waits for. It is sent by the seat's own
+ * timer once the axes have been quiet for `AWS_AXIS_STOP_MS`, and this door is that timer's body, public so a test can
+ * drive it without waiting: `tests/pointer_axis.c` calls it directly. A wheel does not use it (a notch is discrete and
+ * has no sequence to end). */
+void aws_seat_pointer_axis_stop(struct aws_server *server);
 /* **RE-DECIDE WHAT THE POINTER IS OVER, WITHOUT WAITING FOR IT TO MOVE.** What is under the pointer changes when
  * a surface is mapped, unmapped, moved, shown, hidden or restacked — none of which is a motion — so every one of
  * those doors calls this. Without it a surface that appears under a stationary pointer never gets the

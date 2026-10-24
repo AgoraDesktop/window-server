@@ -77,6 +77,7 @@ enum call {
 	CALL_AXIS_DISCRETE,
 	CALL_AXIS_VALUE120,
 	CALL_FRAME,
+	CALL_AXIS_STOP,
 	CALL_OTHER,
 };
 
@@ -105,6 +106,7 @@ static void record(enum call kind, uint32_t axis, int32_t n, wl_fixed_t value)
 #define OP_AXIS			4u
 #define OP_FRAME		5u
 #define OP_AXIS_SOURCE		6u
+#define OP_AXIS_STOP		7u
 #define OP_AXIS_DISCRETE	8u
 #define OP_AXIS_VALUE120	9u
 
@@ -146,6 +148,14 @@ void wl_resource_post_event(struct wl_resource *resource, uint32_t opcode, ...)
 		record(CALL_AXIS_VALUE120, axis, value120, 0);
 		break;
 	}
+	case OP_AXIS_STOP: {
+		uint32_t time = va_arg(ap, uint32_t);
+		uint32_t axis = va_arg(ap, uint32_t);
+
+		(void)time;
+		record(CALL_AXIS_STOP, axis, 0, 0);
+		break;
+	}
 	case OP_FRAME:
 		record(CALL_FRAME, 0, 0, 0);
 		break;
@@ -164,6 +174,7 @@ static const char *call_name(enum call kind)
 	case CALL_AXIS_DISCRETE: return "axis_discrete";
 	case CALL_AXIS_VALUE120: return "axis_value120";
 	case CALL_FRAME: return "frame";
+	case CALL_AXIS_STOP: return "axis_stop";
 	case CALL_OTHER: return "other";
 	}
 	return "?";
@@ -360,6 +371,67 @@ int main(void)
 	two_axis_gesture(&server);
 	check(count_of(CALL_AXIS) == 0, "a scroll over nothing reaches no client");
 	check(count_of(CALL_FRAME) == 0, "and puts no frame on the wire");
+
+	/* ============================================================================================
+	 * 7. **THE END OF A SEQUENCE, WHICH NO EVENT ANNOUNCES.** A finger or continuous gesture is over when its axes
+	 *    go quiet, and `axis_stop` is how a client hears that — the thing a kinetic scroll waits for. The seat's
+	 *    timer calls this; here it is called directly so the wire can be read without waiting.
+	 * ============================================================================================ */
+	bind_at(&server, 8);
+	aws_seat_pointer_axis(&server, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_double(3.5),
+			      WL_POINTER_AXIS_SOURCE_FINGER, 0, 0);
+	aws_seat_pointer_frame(&server);
+	s_call_count = 0;	/* measure the stop alone */
+	aws_seat_pointer_axis_stop(&server);
+	printf("  finger stop: %d call(s)\n", s_call_count);
+	dump();
+	check(count_of(CALL_AXIS_STOP) == 1, "a finger scroll that goes quiet sends ONE axis_stop");
+	check(s_calls[0].axis == WL_POINTER_AXIS_VERTICAL_SCROLL, "naming the axis that was moving");
+	check(count_of(CALL_FRAME) == 1, "and closes it with a frame of its own");
+
+	/* ONLY THE AXES THAT MOVED. A stop for an axis nobody touched would end a gesture that never started. */
+	bind_at(&server, 8);
+	aws_seat_pointer_axis(&server, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_double(1.0),
+			      WL_POINTER_AXIS_SOURCE_FINGER, 0, 0);
+	aws_seat_pointer_frame(&server);
+	s_call_count = 0;
+	aws_seat_pointer_axis_stop(&server);
+	check(count_of(CALL_AXIS_STOP) == 1 && s_calls[0].axis == WL_POINTER_AXIS_VERTICAL_SCROLL,
+	      "and never for the horizontal axis, which nobody moved");
+
+	/* AND ONCE, NOT ON EVERY CALL: the sequence is closed when the stop goes out. */
+	s_call_count = 0;
+	aws_seat_pointer_axis_stop(&server);
+	check(s_call_count == 0, "a second stop with nothing moving sends nothing");
+
+	/* BOTH AXES MOVING IS TWO STOPS IN ONE FRAME. */
+	bind_at(&server, 8);
+	aws_seat_pointer_axis(&server, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_double(1.0),
+			      WL_POINTER_AXIS_SOURCE_CONTINUOUS, 0, 0);
+	aws_seat_pointer_axis(&server, WL_POINTER_AXIS_HORIZONTAL_SCROLL, wl_fixed_from_double(1.0),
+			      WL_POINTER_AXIS_SOURCE_CONTINUOUS, 0, 0);
+	aws_seat_pointer_frame(&server);
+	s_call_count = 0;
+	aws_seat_pointer_axis_stop(&server);
+	check(count_of(CALL_AXIS_STOP) == 2, "a two-axis gesture ends with a stop for EACH axis");
+	check(count_of(CALL_FRAME) == 1, "both in one frame, so a client closes its gesture once");
+
+	/* **AND A WHEEL OWES NO STOP AT ALL.** A notch is complete when it arrives; there is no sequence to end, so a
+	 * stop after one would tell a client a gesture had finished that it never began. */
+	bind_at(&server, 8);
+	two_axis_gesture(&server);	/* wheel source */
+	s_call_count = 0;
+	aws_seat_pointer_axis_stop(&server);
+	check(s_call_count == 0, "a WHEEL notch owes no axis_stop — a click is not a gesture");
+
+	/* AND A CLIENT BELOW v5 HEARS NONE EITHER, because the event does not exist there. */
+	bind_at(&server, 4);
+	aws_seat_pointer_axis(&server, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_double(1.0),
+			      WL_POINTER_AXIS_SOURCE_FINGER, 0, 0);
+	aws_seat_pointer_frame(&server);
+	s_call_count = 0;
+	aws_seat_pointer_axis_stop(&server);
+	check(s_call_count == 0, "and a v4 client is sent nothing, having no axis_stop to receive");
 
 	printf("pointer_axis: %d case(s) failed\n", s_failed);
 	close(fds[1]);
