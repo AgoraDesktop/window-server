@@ -211,6 +211,15 @@ The keycode that went in was the X keycode 38; the client saw evdev **30** and t
 the keymap this compositor sent it. That is the whole chain: X keycode → evdev → compositor → `wl_keyboard` →
 the client's own xkbcommon.
 
+**A WHEEL SPUN WHILE THE CLIENT IS DRAWING IS COALESCED, AND A CLIENT THAT IS NOT READING IS NOT GIVEN MORE.**
+X queues one button event per notch and the old drain emptied the whole queue in one callback; each notch became
+several `wl_pointer` messages, filled libwayland's 4 KiB outgoing buffer, and the server dropped the client with
+"Data too big for buffer" — measured as a gallery that vanished when scrolled during its first layout. The drain
+now spends a bounded budget per callback, turns a batch of notches into one motion and one axis per axis, and
+skips pointer events for a client whose socket is not writable; the next motion carries the latest position and
+the next notch the distance. A debugger changed the timing enough to hide the first version, which is recorded
+here because "it does not reproduce under gdb" is a fact about this class of bug rather than a clean bill.
+
 **THE FOCUS POLICY IS TWO HALVES AND BOTH ARE NEEDED**: a window takes the keyboard when it is MAPPED, so a
 person can type into the first thing that appears, and a CLICK moves it. The first half was missing and it
 showed: keys arrived with the focus nil and went nowhere.

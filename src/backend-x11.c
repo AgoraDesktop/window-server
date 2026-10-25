@@ -114,16 +114,38 @@ static int x11_logical(struct aws_server *server, int device)
  * is the real one, and the loop beside it collects even the events Xlib pulled in during a flush or a setup call
  * rather than only those that made the descriptor readable. It is FINITE: every iteration consumes one event, and a
  * flood from the host simply means this returns with the queue non-empty and the descriptor readable, which is a
- * callback the loop will make. */
+ * callback the loop will make.
+ *
+ * **AND IT HAS A BUDGET, BECAUSE "FINITE" IS NOT ENOUGH WHEN EVERY EVENT BECOMES A WAYLAND MESSAGE.** A flood of host
+ * input — a wheel spun while a client is busy drawing, which is exactly what a slow first layout produces — is
+ * drained in ONE callback. The events are written to each client's outgoing buffer, and libwayland's buffer is 4 KiB:
+ * MEASURED, 200 queued wheel notches made the server log "Data too big for buffer (4096 + 16 > 4096)" and drop the
+ * client's connection, which the client experiences as the compositor vanishing mid-scroll. The flush lives in the
+ * event loop, after this returns, so the budget is what lets it return: one wheel notch becomes pointer motion, an
+ * axis source, a value120, an axis and a frame — nearer 70 bytes than 20 — so 16 notches is about a quarter of one
+ * buffer and safely inside it, and the descriptor is still readable for the next pass. */
+#define AWS_X11_EVENTS_PER_DRAIN 16
+
 static void x11_drain_events(struct aws_server *server)
 {
 	struct x11_state *x11 = server->backend.data;
+	int budget = AWS_X11_EVENTS_PER_DRAIN;
+	int wheel_v120_vertical = 0;
+	int wheel_v120_horizontal = 0;
+	int wheel_x = 0;
+	int wheel_y = 0;
+	int have_wheel = 0;
 
 	if (x11->draining) {
 		return;
 	}
+	/* **WHAT IS ALREADY BUFFERED IS MOVED BEFORE MORE IS ADDED.** The pointer path asks whether a client can take an
+	 * event by polling its socket (see `fn_resource_can_take_event`); a libwayland buffer that has not been flushed
+	 * would make that answer YES while the buffer is the thing that is full. One flush here empties it if it can, so
+	 * the poll that follows is about the same bytes the next event would join. */
+	wl_display_flush_clients(server->display);
 	x11->draining = 1;
-	while (XPending(x11->display) > 0) {
+	while (budget-- > 0 && XPending(x11->display) > 0) {
 		XEvent event;
 
 		XNextEvent(x11->display, &event);
@@ -192,19 +214,22 @@ static void x11_drain_events(struct aws_server *server)
 			 * AND THE SIGNS ARE X'S, NOT WAYLAND'S: button 4 is wheel UP, and the protocol's positive vertical
 			 * distance is DOWN. Flipped once, here, so nothing above this line has to know. */
 			if (event.xbutton.button >= Button4 && event.xbutton.button <= 7) {
-				int up = (event.xbutton.button == Button4);
-				int down = (event.xbutton.button == Button5);
-				int left = (event.xbutton.button == 6);
-				uint32_t axis = (left || event.xbutton.button == 7)
-					? WL_POINTER_AXIS_HORIZONTAL_SCROLL
-					: WL_POINTER_AXIS_VERTICAL_SCROLL;
-				int32_t v120 = (up || left) ? -120 : 120;
+				int wheel_left = (event.xbutton.button == 6);
+				int wheel_up = (event.xbutton.button == Button4);
+				int v120 = (wheel_up || wheel_left) ? -120 : 120;
 
-				aws_seat_pointer_motion(server, x11_logical(server, event.xbutton.x),
-							x11_logical(server, event.xbutton.y));
-				aws_seat_pointer_axis(server, axis, wl_fixed_from_double(v120 / 8.0),
-						      WL_POINTER_AXIS_SOURCE_WHEEL, v120 / 120, v120);
-				aws_seat_pointer_frame(server);
+				/* **ONE NOTCH IS A PRESS AND A RELEASE, AND ONLY THE PRESS MOVES.** X reports both,
+				 * and treating both as scrolls made every notch scroll twice. */
+				if (pressed) {
+					if (wheel_left || event.xbutton.button == 7) {
+						wheel_v120_horizontal += v120;
+					} else {
+						wheel_v120_vertical += v120;
+					}
+					wheel_x = x11_logical(server, event.xbutton.x);
+					wheel_y = x11_logical(server, event.xbutton.y);
+					have_wheel = 1;
+				}
 				break;
 			}
 			switch (event.xbutton.button) {
@@ -234,6 +259,26 @@ static void x11_drain_events(struct aws_server *server)
 		default:
 			break;
 		}
+	}
+	/* **THE NOTCHES ARE COALESCED, NOT SENT ONE BY ONE.** A wheel spun while the client is drawing puts hundreds
+	 * of X button events in this queue; one Wayland message per notch overran the client's 4 KiB event buffer and
+	 * dropped it (see the budget above). One motion and one axis per axis carry the same total distance in a few
+	 * dozen bytes, and the client's scroll handler runs once for the batch instead of hundreds of times. */
+	if (have_wheel) {
+		aws_seat_pointer_motion(server, wheel_x, wheel_y);
+		if (wheel_v120_horizontal != 0) {
+			aws_seat_pointer_axis(server, WL_POINTER_AXIS_HORIZONTAL_SCROLL,
+					      wl_fixed_from_double(wheel_v120_horizontal / 8.0),
+					      WL_POINTER_AXIS_SOURCE_WHEEL, wheel_v120_horizontal / 120,
+					      wheel_v120_horizontal);
+		}
+		if (wheel_v120_vertical != 0) {
+			aws_seat_pointer_axis(server, WL_POINTER_AXIS_VERTICAL_SCROLL,
+					      wl_fixed_from_double(wheel_v120_vertical / 8.0),
+					      WL_POINTER_AXIS_SOURCE_WHEEL, wheel_v120_vertical / 120,
+					      wheel_v120_vertical);
+		}
+		aws_seat_pointer_frame(server);
 	}
 	x11->draining = 0;
 }

@@ -35,6 +35,7 @@
 #include "server.h"
 
 #include <fcntl.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -531,6 +532,36 @@ void aws_seat_pointer_leave(struct aws_server *server)
 	}
 }
 
+/* **A CLIENT THAT IS NOT READING MUST NOT BE GIVEN MORE EVENTS.** libwayland keeps a 4 KiB outgoing buffer per
+ * connection and, when the socket cannot take it, the next event makes it fail with "Data too big for buffer" and the
+ * CLIENT IS DROPPED. That is what a wheel spun while a client is busy drawing produced: a burst of pointer motion and
+ * axis events filled the buffer, the client vanished mid-scroll, and a debugger (which changed the timing) did not
+ * reproduce it. `-flush` moves whatever is already buffered to the socket; `-poll` then says whether the socket can
+ * take more. A pointer event is COALESCABLE — the next motion carries the latest position, the next notch carries the
+ * distance — so skipping it is the right answer, and the client stays connected. */
+static int fn_resource_can_take_event(struct wl_resource *resource)
+{
+	struct wl_client *client;
+	struct pollfd pfd;
+	int fd;
+
+	if (resource == NULL) {
+		return 0;
+	}
+	client = wl_resource_get_client(resource);
+	if (client == NULL) {
+		return 0;
+	}
+	fd = wl_client_get_fd(client);
+	if (fd < 0) {
+		return 0;
+	}
+	pfd.fd = fd;
+	pfd.events = POLLOUT;
+	pfd.revents = 0;
+	return poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLOUT) != 0;
+}
+
 void aws_seat_pointer_motion(struct aws_server *server, int x, int y)
 {
 	struct aws_surface *surface;
@@ -559,11 +590,14 @@ void aws_seat_pointer_motion(struct aws_server *server, int x, int y)
 	/* **AND WHERE THE POINTER REALLY IS, FOR A CLIENT-SIDE DRAG.** The relative `wl_pointer.motion` below is
 	 * relative to THIS surface; the absolute one is what lets a window being moved follow the pointer without
 	 * chasing its own tail. Sent FIRST, so a client that pairs them sees the absolute before the relative. */
-	aws_window_send_pointer_global(surface, x, y);
+	if (fn_resource_can_take_event(surface->resource)) {
+		aws_window_send_pointer_global(surface, x, y);
+	}
 	sx = wl_fixed_from_int(x - surface->x);
 	sy = wl_fixed_from_int(y - surface->y);
 	wl_list_for_each(pointer, &server->pointers, link) {
-		if (same_client(pointer->resource, surface->resource)) {
+		if (same_client(pointer->resource, surface->resource) &&
+		    fn_resource_can_take_event(pointer->resource)) {
 			wl_pointer_send_motion(pointer->resource, seat_now_ms(), sx, sy);
 		}
 	}
@@ -684,7 +718,8 @@ void aws_seat_pointer_axis(struct aws_server *server, uint32_t axis, wl_fixed_t 
 	wl_list_for_each(pointer, &server->pointers, link) {
 		uint32_t version;
 
-		if (!same_client(pointer->resource, surface->resource)) {
+		if (!same_client(pointer->resource, surface->resource) ||
+		    !fn_resource_can_take_event(pointer->resource)) {
 			continue;
 		}
 		version = wl_resource_get_version(pointer->resource);
@@ -728,7 +763,8 @@ void aws_seat_pointer_frame(struct aws_server *server)
 		return;
 	}
 	wl_list_for_each(pointer, &server->pointers, link) {
-		if (wl_resource_get_version(pointer->resource) >= WL_POINTER_FRAME_SINCE_VERSION) {
+		if (wl_resource_get_version(pointer->resource) >= WL_POINTER_FRAME_SINCE_VERSION &&
+		    fn_resource_can_take_event(pointer->resource)) {
 			wl_pointer_send_frame(pointer->resource);
 		}
 	}
