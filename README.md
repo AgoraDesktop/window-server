@@ -162,7 +162,13 @@ once through shared memory and once through a dma-buf and fails on a single diff
 machine with no display or no render node.
 
 **AND WHAT IT DOES NOT FIX.** It removes the compositor's upload. It does not make the AppKit paint on the GPU — that
-is the client half, and until it exists dmabuf buys the server side only.
+is the client half, and until it exists dmabuf buys the server side only. **AND A CLIENT THAT DRAWS WITH THE CPU IS
+PENALISED BY IT RATHER THAN HELPED**, because the mapping it draws through is the CPU's uncached view of device
+memory: MEASURED in the nested demo, blending into one costs about 2.4 us a pixel against about 2 ns in shared memory,
+so the same window that repaints in 21 ms in shm takes 150-215 ms in a dma-buf. That trade is only worth taking for a
+client whose frames are UPLOADED, so AppKit's seam asks for shared memory by default and the GPU buffer is opt-in
+(`AG_WINDOW_DMABUF=1`; see `AGWindowBeginFrame` in `libagora-app/platform/AGWindowServer.h`). The compositor side is
+unchanged and this test still covers it: its client is the test client, not the AppKit.
 
 ### 2c. When a buffer is released, and why it is not a per-frame question
 
