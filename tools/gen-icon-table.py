@@ -261,7 +261,11 @@ def emit_table_c(
     lines.append("const size_t aws_family_entry_count =")
     lines.append("\tsizeof(aws_family_entries) / sizeof(aws_family_entries[0]);")
     lines.append("")
-    lines.append("/* THE MARK OBJECTS. THE COVERAGE GRID IS FILLED LAZILY BY `aws_system_icon_coverage`. */")
+    lines.append(
+        "/* THE MARK OBJECTS. THE COVERAGE GRIDS ARE FILLED LAZILY: THE LOGICAL ONE BY "
+        "`aws_system_icon_coverage` AND ONE PER"
+    )
+    lines.append(" * DEVICE SIZE BY `aws_system_icon_coverage_at`. */")
     lines.append("struct aws_system_icon aws_icon_objects[] = {")
     for icon_id in ordered:
         icon = icons.get(icon_id)

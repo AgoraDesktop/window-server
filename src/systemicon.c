@@ -9,9 +9,10 @@
  * hamburger. The tables are generated from `assets/system-menu-icons/`; this file contains the order and nothing
  * about any particular distro, so adding a distro is a TSV row and adding an icon is a generated entry.
  *
- * THE RASTERIZER IS THE OTHER HALF. A mark's paths are filled even-odd or nonzero into a 16×16 coverage grid,
- * once, on first use. The grid is what the compositor blends; it never asks what the mark means, and it never
- * rasterizes a frame. The hamburger and the exact OS marks all use the same path format.
+ * THE RASTERIZER IS THE OTHER HALF. A mark's paths are filled even-odd or nonzero into a coverage grid, once per
+ * size, on first use: the 16×16 logical grid for 1x and a device grid for every scale an output asks for. The grid
+ * is what the compositor blends; it never asks what the mark means, and it never rasterizes a frame. The hamburger
+ * and the exact OS marks all use the same path format.
  */
 
 #include "systemicon.h"
@@ -31,6 +32,8 @@ static struct aws_system_icon s_fallback = {
 	sizeof(aws_icon_hamburger_paths) / sizeof(aws_icon_hamburger_paths[0]),
 	AWS_ICON_FILL_EVEN_ODD,
 	{ 0 },
+	0,
+	NULL,
 	0,
 };
 
@@ -330,6 +333,12 @@ struct aws_system_icon *aws_system_icon_at(size_t index)
  * size the simple answer is exact enough and much easier to keep correct when the twelve marks
  * arrive.
  *
+ * **AND THE SAME CODE ANSWERS EVERY DEVICE SIZE, WHICH IS WHY IT TAKES ONE.** The supersample
+ * count is per PIXEL, so a 32×32 grid is a genuine raster at that resolution — the bars of the
+ * hamburger land on exact device rows at 2x and gain nothing but sharpness — instead of a 16×16
+ * grid enlarged four times, which is what the mark used to be at every scale. The edges are built
+ * once per call because flattening a path is the expensive half and the size does not change them.
+ *
  * EVEN-ODD IS THE FILL RULE. It makes holes in a mark a later subpath rather than a winding
  * convention, which is what the OS marks — eyes, swirl gaps, blowfish spots — need.
  * ============================================================================================ */
@@ -386,20 +395,20 @@ static int point_inside(const struct aws_icon_edge *edges, size_t count, double 
 	return winding != 0;
 }
 
-static void rasterize_icon(struct aws_system_icon *icon)
+/* **THE EDGES OF A MARK, FLATTENED FROM ITS CURVES — ONCE PER RASTER, NOT PER PIXEL.** Curves become line segments
+ * here and the fill below only does algebra, so a 32×32 grid costs the same edge walk a 16×16 one does. The caller
+ * frees the answer; NULL means the mark has no paths, which both callers treat as an empty grid. */
+static struct aws_icon_edge *build_edges(const struct aws_system_icon *icon, size_t *count_out)
 {
 	size_t command_count = 0;
 	size_t capacity;
 	size_t path_index;
 	struct aws_icon_edge *edges;
 	size_t edge_count = 0;
-	const unsigned samples = AWS_ICON_SUPERSAMPLE * AWS_ICON_SUPERSAMPLE;
-	int row, column;
 
-	memset(icon->coverage, 0, sizeof icon->coverage);
-	if (icon->paths == NULL || icon->path_count == 0) {
-		icon->coverage_ready = 1;
-		return;
+	*count_out = 0;
+	if (icon == NULL || icon->paths == NULL || icon->path_count == 0) {
+		return NULL;
 	}
 	for (path_index = 0; path_index < icon->path_count; path_index++) {
 		command_count += icon->paths[path_index].command_count;
@@ -408,9 +417,7 @@ static void rasterize_icon(struct aws_system_icon *icon)
 	capacity = command_count * AWS_ICON_CUBIC_SEGMENTS + icon->path_count * 2 + 1;
 	edges = malloc(capacity * sizeof *edges);
 	if (edges == NULL) {
-		/* A zero grid is a mark that does not appear, which is better than a compositor that fails to start. */
-		icon->coverage_ready = 1;
-		return;
+		return NULL;
 	}
 
 	for (path_index = 0; path_index < icon->path_count; path_index++) {
@@ -496,34 +503,60 @@ static void rasterize_icon(struct aws_system_icon *icon)
 			append_edge(edges, capacity, &edge_count, current_x, current_y, start_x, start_y);
 		}
 	}
+	*count_out = edge_count;
+	return edges;
+}
 
-	for (row = 0; row < AWS_SYSTEM_ICON_PIXELS; row++) {
-		for (column = 0; column < AWS_SYSTEM_ICON_PIXELS; column++) {
+/* **THE FILL, AT WHATEVER SIZE THE CALLER ASKED FOR.** `pixels` is the box's side in DEVICE pixels, and the sample
+ * positions are fractions of the box, so 16, 21 and 32 are the same paths rasterized at three resolutions rather
+ * than three views of one 16×16 image. `grid` is `pixels * pixels` bytes and is overwritten, not blended into. */
+static void fill_grid(const struct aws_icon_edge *edges, size_t edge_count, uint8_t *grid, int pixels,
+		      enum aws_icon_fill fill)
+{
+	const unsigned samples = AWS_ICON_SUPERSAMPLE * AWS_ICON_SUPERSAMPLE;
+	int row, column;
+
+	for (row = 0; row < pixels; row++) {
+		for (column = 0; column < pixels; column++) {
 			unsigned hits = 0;
 			int sample_y;
 
 			for (sample_y = 0; sample_y < AWS_ICON_SUPERSAMPLE; sample_y++) {
 				double y = ((double)row +
 					   ((double)sample_y + 0.5) / AWS_ICON_SUPERSAMPLE) /
-					   AWS_SYSTEM_ICON_PIXELS;
+					   (double)pixels;
 				int sample_x;
 
 				for (sample_x = 0; sample_x < AWS_ICON_SUPERSAMPLE; sample_x++) {
 					double x = ((double)column +
 						   ((double)sample_x + 0.5) / AWS_ICON_SUPERSAMPLE) /
-						   AWS_SYSTEM_ICON_PIXELS;
+						   (double)pixels;
 
-					if (point_inside(edges, edge_count, x, y, icon->fill)) {
+					if (point_inside(edges, edge_count, x, y, fill)) {
 						hits++;
 					}
 				}
 			}
-			icon->coverage[row * AWS_SYSTEM_ICON_PIXELS + column] =
-				(uint8_t)((hits * 255u + samples / 2u) / samples);
+			grid[row * pixels + column] = (uint8_t)((hits * 255u + samples / 2u) / samples);
 		}
 	}
-	free(edges);
+}
+
+/* THE LOGICAL GRID, FILLED LAZILY. `coverage_ready` is set even when nothing could be filled, because a mark that
+ * does not appear is better than one that rasterizes again on every frame. */
+static void rasterize_icon(struct aws_system_icon *icon)
+{
+	struct aws_icon_edge *edges;
+	size_t edge_count = 0;
+
+	memset(icon->coverage, 0, sizeof icon->coverage);
 	icon->coverage_ready = 1;
+	edges = build_edges(icon, &edge_count);
+	if (edges == NULL) {
+		return;
+	}
+	fill_grid(edges, edge_count, icon->coverage, AWS_SYSTEM_ICON_PIXELS, icon->fill);
+	free(edges);
 }
 
 const uint8_t *aws_system_icon_coverage(struct aws_system_icon *icon)
@@ -535,4 +568,47 @@ const uint8_t *aws_system_icon_coverage(struct aws_system_icon *icon)
 		rasterize_icon(icon);
 	}
 	return icon->coverage;
+}
+
+const uint8_t *aws_system_icon_coverage_at(struct aws_system_icon *icon, int pixels)
+{
+	struct aws_icon_grid *grown;
+	struct aws_icon_edge *edges;
+	size_t edge_count = 0;
+	uint8_t *grid;
+	size_t index;
+
+	if (icon == NULL || pixels < 1 || pixels > AWS_SYSTEM_ICON_MAX_PIXELS) {
+		return NULL;
+	}
+	/* THE 1x ANSWER ALREADY EXISTS, and it is the inline grid every diagnostic reads. */
+	if (pixels == AWS_SYSTEM_ICON_PIXELS) {
+		return aws_system_icon_coverage(icon);
+	}
+	for (index = 0; index < icon->grid_count; index++) {
+		if (icon->grids[index].pixels == pixels) {
+			return icon->grids[index].coverage;
+		}
+	}
+	/* **THE SLOT BEFORE THE GRID**, so a failed allocation leaves the icon exactly as it was rather than with an
+	 * entry pointing at nothing. The number of sizes is the number of distinct output scales a session has, which a
+	 * fixed panel makes one — there is no eviction because there is nothing to evict. */
+	grown = realloc(icon->grids, (icon->grid_count + 1) * sizeof *grown);
+	if (grown == NULL) {
+		return NULL;
+	}
+	icon->grids = grown;
+	grid = calloc((size_t)pixels * (size_t)pixels, 1);
+	if (grid == NULL) {
+		return NULL;
+	}
+	edges = build_edges(icon, &edge_count);
+	if (edges != NULL) {
+		fill_grid(edges, edge_count, grid, pixels, icon->fill);
+		free(edges);
+	}
+	icon->grids[icon->grid_count].pixels = pixels;
+	icon->grids[icon->grid_count].coverage = grid;
+	icon->grid_count++;
+	return grid;
 }

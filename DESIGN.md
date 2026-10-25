@@ -30,10 +30,13 @@ menu titles are that application's; the System menu is about the SYSTEM rather t
 server draws it, the server decides how wide it is, and everything else in the bar is placed to the right of it.
 
 That is also why it is the first thing this compositor DRAWS rather than fills. The mark is vector data — subpaths
-in a 16×16 box, filled even-odd — rasterized once into a coverage grid and blended with one ink colour. The
-hamburger is still three horizontal bars, but it is now the same kind of path the OS marks will be, which is what
-keeps the rasterizer from becoming a special case for every logo. `libagora-text` is what the server will reach for
-when it has to draw something whose SHAPE it does not already know.
+in a 16×16 box, filled even-odd — rasterized into a coverage grid and blended with one ink colour. **The grid is the
+size the mark is drawn at**, not a 16×16 image scaled: the box is 16 points, so a 2x output wants 32 pixels of mark
+and the 96 dpi of a 1080p panel wants 21, which is the same thing a text run does and for the same reason — a
+magnified grid reads as a blocky mark beside crisp text. The hamburger is still three horizontal bars, but it is now
+the same kind of path the OS marks will be, which is what keeps the rasterizer from becoming a special case for every
+logo. `libagora-text` is what the server will reach for when it has to draw something whose SHAPE it does not already
+know.
 
 
 **Apple's own headers say so, in the window server's vocabulary rather than AppKit's.** From `NSWindow.h` in the

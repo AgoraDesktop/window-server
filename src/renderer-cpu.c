@@ -48,11 +48,18 @@ static int cpu_device_edge(int logical, double scale)
 	return (int)((double)logical * scale + 0.5);
 }
 
-/* **THE BAR'S MARK IS DRAWN AT DEVICE RESOLUTION FROM A LOGICAL COVERAGE GRID.** The grid is
- * `AWS_SYSTEM_MENU_GLYPH_WIDTH` square because a mark is designed in logical pixels; at 2x each of its cells covers a
- * 2x2 block of device pixels, so the loop walks DEVICE pixels and asks the grid which cell that pixel belongs to. A
- * mark drawn one grid cell per device pixel would be half size in the corner of its own box, which is exactly the
- * "everything is tiny" this whole change exists to fix. */
+/* **THE BAR'S MARK, RASTERIZED AT THE SCALE IT IS DRAWN AT.** The box is a 16-point square of the bar, so a scaled
+ * output asks for `round(16 * scale)` device pixels of mark — 16 at 1x, 21 at the 96 dpi of a 1080p panel, 32 at 2x
+ * — and the grid answered is that big, because a mark that magnified a 16×16 image next to device-resolution text is
+ * visibly blocky: its strokes come out one or two pixels wide with no pattern. The mark gains detail at a higher
+ * scale for the same reason a text run does, and the loop below is a straight 1:1 copy of device pixels.
+ *
+ * **THE MARK IS SQUARE, SO ONE SIDE IS THE BOX.** `AWS_SYSTEM_MENU_GLYPH_WIDTH` and `_HEIGHT` are the same number and
+ * the raster is square; asking for two sides that could differ would be a grid that cannot exist. The assert keeps a
+ * future edit from making it a lie. */
+_Static_assert(AWS_SYSTEM_MENU_GLYPH_WIDTH == AWS_SYSTEM_MENU_GLYPH_HEIGHT,
+	       "the System menu's mark is a square box, and its coverage grid is square too");
+
 static void aws_output_draw_system_menu(struct aws_backend *backend, struct aws_system_icon *icon, double scale)
 {
 	const uint8_t *coverage;
@@ -63,32 +70,35 @@ static void aws_output_draw_system_menu(struct aws_backend *backend, struct aws_
 	if (icon == NULL || icon->paths == NULL || icon->path_count == 0) {
 		icon = aws_system_icon_by_id(AWS_SYSTEM_MENU_ICON_FALLBACK);
 	}
-	coverage = aws_system_icon_coverage(icon);
+	/* THE MARK'S BOX IS THE LOGICAL BOX SCALED AND ROUNDED — the rule every other device edge here uses, so the mark
+	 * and the bar's own rows round together at a fractional scale. */
+	int glyph = cpu_device_edge(AWS_SYSTEM_MENU_GLYPH_WIDTH, scale);
+	int glyph_top = cpu_device_edge(AWS_SYSTEM_MENU_GLYPH_TOP, scale);
+	int glyph_left = cpu_device_edge(AWS_SYSTEM_MENU_LEFT_MARGIN, scale);
+	int grid;
+
+	if (glyph < 1) {
+		return;
+	}
+	/* AND THE GRID IS THE BOX, UP TO THE CEILING A SCALE IS ALLOWED TO ASK FOR. Past it the mark is asked for at the
+	 * ceiling and mapped onto the box — a soft mark at a scale no panel has, rather than a quarter megabyte per icon
+	 * per nonsense. */
+	grid = glyph < AWS_SYSTEM_ICON_MAX_PIXELS ? glyph : AWS_SYSTEM_ICON_MAX_PIXELS;
+	coverage = aws_system_icon_coverage_at(icon, grid);
 	if (coverage == NULL) {
 		return;
 	}
-	/* THE MARK'S BOX IS THE LOGICAL BOX SCALED AND ROUNDED, and each device pixel asks the grid which of its cells it
-	 * belongs to — which is the same division a fractional scale makes anywhere else, and the reason a 1.5x mark is
-	 * not a 1.5-cells-per-cell blur but a sampled image. */
-	int glyph_w = cpu_device_edge(AWS_SYSTEM_MENU_GLYPH_WIDTH, scale);
-	int glyph_h = cpu_device_edge(AWS_SYSTEM_MENU_GLYPH_HEIGHT, scale);
-	int glyph_top = cpu_device_edge(AWS_SYSTEM_MENU_GLYPH_TOP, scale);
-	int glyph_left = cpu_device_edge(AWS_SYSTEM_MENU_LEFT_MARGIN, scale);
-
-	for (row = 0; row < glyph_h; row++) {
+	for (row = 0; row < glyph; row++) {
 		const int y = glyph_top + row;
+		const int gy = row * grid / glyph;	/* identity whenever the grid is the box, which is every real scale */
 
 		if (y < 0 || y >= backend->height) {
 			continue;
 		}
-		for (column = 0; column < glyph_w; column++) {
+		for (column = 0; column < glyph; column++) {
 			const int x = glyph_left + column;
-			int gx = (int)((double)column / scale);
-			int gy = (int)((double)row / scale);
-			const uint8_t alpha = coverage[(gy < AWS_SYSTEM_MENU_GLYPH_HEIGHT ? gy : AWS_SYSTEM_MENU_GLYPH_HEIGHT - 1)
-						       * AWS_SYSTEM_ICON_PIXELS
-						       + (gx < AWS_SYSTEM_MENU_GLYPH_WIDTH ? gx
-											: AWS_SYSTEM_MENU_GLYPH_WIDTH - 1)];
+			const int gx = column * grid / glyph;
+			const uint8_t alpha = coverage[gy * grid + gx];
 			uint32_t *pixel;
 
 			if (alpha == 0 || x < 0 || x >= backend->width) {

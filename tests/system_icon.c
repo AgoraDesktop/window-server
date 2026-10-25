@@ -15,6 +15,7 @@
 #include "systemicon.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int s_failed;
@@ -285,6 +286,106 @@ static void test_coverage(void)
 	check(aws_system_icon_coverage(NULL) == NULL, "a NULL icon answers NULL");
 }
 
+/* **THE MARK AT A DEVICE SIZE, WHICH IS WHAT A SCALED OUTPUT ASKS FOR.** The hamburger is the mark to ask with
+ * because its bars are straight and land on exact device rows at 2x: 6 rows of 32 pixels each, three times over, is
+ * 576 solid device pixels and not one partial one. A magnified 16×16 grid would have inked 768 and left a two-pixel
+ * step at every bar's edge, which is the blockiness a person sees beside device-resolution text. */
+static void test_device_coverage(void)
+{
+	struct aws_system_icon blank;
+	struct aws_system_icon *hamburger = aws_system_icon_by_id("hamburger");
+	const uint8_t *logical;
+	const uint8_t *large;
+	const uint8_t *fractional;
+	unsigned solid = 0;
+	unsigned partial = 0;
+	int row, column;
+	int all_zero = 1;
+
+	printf("device coverage\n");
+	check(hamburger != NULL, "the hamburger has an icon object");
+	logical = aws_system_icon_coverage(hamburger);
+	large = aws_system_icon_coverage_at(hamburger, 32);
+	check(large != NULL, "an icon answers a 32×32 grid for a 2x output");
+	if (large == NULL) {
+		return;
+	}
+	check(aws_system_icon_coverage_at(hamburger, AWS_SYSTEM_ICON_PIXELS) == logical,
+	      "the 1x size is the logical grid itself, so the two doors agree at 1x");
+	check(aws_system_icon_coverage_at(hamburger, 32) == large, "a device grid is cached by its size");
+
+	for (row = 0; row < 32; row++) {
+		for (column = 0; column < 32; column++) {
+			const uint8_t alpha = large[row * 32 + column];
+
+			if (alpha == 255u) {
+				solid++;
+			} else if (alpha != 0u) {
+				partial++;
+			}
+		}
+	}
+	check(solid == 576, "a 2x hamburger is 576 solid device pixels, not the 384 a magnified grid gives");
+	check(partial == 0, "and its bars land on exact device rows, so nothing is half-covered");
+	for (row = 0; row < 6; row++) {
+		char label[96];
+
+		snprintf(label, sizeof label, "2x box row %d is inside the first bar", row + 1);
+		check(large[(row + 1) * 32 + 16] == 255, label);
+	}
+	check(large[0] == 0 && large[7 * 32 + 16] == 0, "and the rows either side of it are empty");
+
+	/* **AND THE SIZE NO INTEGER SCALE CAN EXPRESS, WHICH IS THE ONE THIS MACHINE'S PANEL ASKS FOR.** 96 dpi is
+	 * 1.332 device pixels per point, so the mark's box is 21 pixels and its grid must be 21 — not 16 sampled up,
+	 * which is what put a blocky mark beside crisp text. The shape's ink mass is scale-invariant, so the answer is
+	 * checked against the 16×16 grid's own mass rather than against a golden number. */
+	fractional = aws_system_icon_coverage_at(hamburger, 21);
+	check(fractional != NULL, "an icon answers a 21×21 grid for a 1.332x output");
+	if (fractional != NULL) {
+		double small = 0.0, big = 0.0;
+
+		for (row = 0; row < 16; row++) {
+			for (column = 0; column < 16; column++) {
+				small += logical[row * 16 + column];
+			}
+		}
+		for (row = 0; row < 21; row++) {
+			for (column = 0; column < 21; column++) {
+				big += fractional[row * 21 + column];
+			}
+		}
+		/* 21/16 squared is 1.72; the masses agree within AA's own half pixel of slack. */
+		check(big / small > 1.55 && big / small < 1.90,
+		      "and its ink mass scales with the area, so it is the same mark and not a crop");
+	}
+
+	check(aws_system_icon_coverage_at(hamburger, 0) == NULL, "a zero-sized grid is refused");
+	check(aws_system_icon_coverage_at(hamburger, -3) == NULL, "a negative size is refused");
+	check(aws_system_icon_coverage_at(hamburger, AWS_SYSTEM_ICON_MAX_PIXELS + 1) == NULL,
+	      "a size past the ceiling is refused rather than allocating whatever a scale says");
+	check(aws_system_icon_coverage_at(hamburger, AWS_SYSTEM_ICON_MAX_PIXELS) != NULL,
+	      "the ceiling itself is a size a renderer may ask for");
+	check(aws_system_icon_coverage_at(NULL, 32) == NULL, "a NULL icon answers NULL at any size");
+
+	memset(&blank, 0, sizeof blank);
+	blank.id = "blank";
+	blank.fill = AWS_ICON_FILL_EVEN_ODD;
+	large = aws_system_icon_coverage_at(&blank, 24);
+	check(large != NULL, "an icon with no paths answers a device grid too");
+	for (row = 0; large != NULL && row < 24 * 24; row++) {
+		if (large[row] != 0) {
+			all_zero = 0;
+		}
+	}
+	check(all_zero, "and that grid is empty, not a crash");
+	/* THE ICON OWNS WHAT IT CACHED, and the server's marks are static objects that outlive the process. This one is a
+	 * local, so the test gives the grid back rather than leaving the ownership rule unstated. */
+	if (blank.grids != NULL) {
+		free(blank.grids[0].coverage);
+		free(blank.grids);
+	}
+}
+
 struct icon_golden {
 	const char *id;
 	uint64_t hash;
@@ -370,6 +471,7 @@ int main(void)
 	test_names();
 	test_table();
 	test_coverage();
+	test_device_coverage();
 	test_mark_coverage();
 	test_host();
 

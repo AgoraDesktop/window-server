@@ -266,7 +266,10 @@ struct gl_state {
 	 * scale, not about the frame, so it is uploaded once per scale rather than sixty times a second. */
 	GLuint cursor_texture;
 	double cursor_scale;		/* the scale in `cursor_texture`; 0 when nothing has been uploaded */
-	GLuint coverage_texture;	/* the System menu's mark, re-uploaded per bar draw */
+	GLuint coverage_texture;	/* the System menu's mark, uploaded when the mark or its size changes */
+	int coverage_ready;		/* whether `coverage_texture` holds anything yet */
+	int coverage_pixels;		/* the uploaded grid's side, in device pixels */
+	struct aws_system_icon *coverage_icon;	/* which mark is in the texture */
 	unsigned char *scratch;		/* rows repacked when a shm stride is not w * 4 */
 	size_t scratch_size;
 
@@ -507,23 +510,34 @@ static void upload_client_buffer(struct gl_state *gl, struct wl_shm_buffer *shm,
 
 /* THE SYSTEM MENU'S MARK, WHICH IS COVERAGE AND NOT COLOUR. `GL_LUMINANCE` is core GLES2 and copies the eight-bit
  * coverage into all three channels plus one alpha, so the shader reads the coverage out of `.r` and takes the ink
- * from a uniform — the same division the CPU renderer makes between `aws_system_icon_coverage` and
- * `AWS_SYSTEM_MENU_GLYPH_COLOUR`. */
-static void upload_coverage(struct gl_state *gl, struct aws_system_icon *icon)
+ * from a uniform — the same division the CPU renderer makes between `aws_system_icon_coverage_at` and
+ * `AWS_SYSTEM_MENU_GLYPH_COLOUR`.
+ *
+ * **AND IT IS UPLOADED AT THE SIZE IT IS DRAWN, WHICH IS WHAT MAKES IT CRISP.** The frame is drawn every frame and the
+ * mark almost never changes, so the upload is keyed on (mark, size): a magnified 16×16 texture against a 21-pixel box
+ * was the GL half of the mark being blurry while the bar's text was not, and the sampler's `GL_NEAREST` magnification
+ * only made it blocky instead. With the grid at the box's own size the sampler is 1:1 and the texture is uploaded
+ * once per scale rather than once per frame. */
+static void upload_coverage(struct gl_state *gl, struct aws_system_icon *icon, int pixels)
 {
 	const uint8_t *coverage;
 
 	if (icon == NULL || icon->paths == NULL || icon->path_count == 0) {
 		icon = aws_system_icon_by_id(AWS_SYSTEM_MENU_ICON_FALLBACK);
 	}
-	coverage = aws_system_icon_coverage(icon);
+	if (gl->coverage_ready && gl->coverage_icon == icon && gl->coverage_pixels == pixels) {
+		return;
+	}
+	coverage = aws_system_icon_coverage_at(icon, pixels);
 	if (coverage == NULL) {
 		return;
 	}
 	glBindTexture(GL_TEXTURE_2D, gl->coverage_texture);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, AWS_SYSTEM_MENU_GLYPH_WIDTH,
-		     AWS_SYSTEM_MENU_GLYPH_HEIGHT, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, coverage);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, pixels, pixels, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, coverage);
+	gl->coverage_icon = icon;
+	gl->coverage_pixels = pixels;
+	gl->coverage_ready = 1;
 }
 
 /* ---------------------------------------------------------------------------------------------------
@@ -832,15 +846,23 @@ static void gl_draw_menu_bar(struct aws_server *server)
 		 * strip, so this is also the GL/CPU parity the two renderers promise. */
 		float s = (float)aws_output_scale(server);
 		float bar_h = gl_round((double)AWS_MENU_BAR_HEIGHT * (double)s);
+		/* **AND THE MARK'S BOX IS ROUNDED THE SAME WAY, AND ITS GRID IS THE BOX'S SIZE.** The two numbers are the same
+		 * arithmetic the CPU renderer applies, so a screenshot from either one puts the mark in the same pixels: a
+		 * 16-point mark at 96 dpi is 21 device pixels at (13,5), not a 16-pixel image stretched to 21. */
+		float glyph = gl_round((double)AWS_SYSTEM_MENU_GLYPH_WIDTH * (double)s);
+		int grid = (glyph < (float)AWS_SYSTEM_ICON_MAX_PIXELS) ? (int)glyph
+								      : AWS_SYSTEM_ICON_MAX_PIXELS;
+		float glyph_left = gl_round((double)AWS_SYSTEM_MENU_LEFT_MARGIN * (double)s);
+		float glyph_top = gl_round((double)AWS_SYSTEM_MENU_GLYPH_TOP * (double)s);
 
 		gl_solid(gl, 0.0f, 0.0f, (float)gl->width, bar_h, AWS_MENU_BAR_COLOUR);
-	upload_coverage(gl, server->system_menu_icon);
-	/* **THE MARK'S QUAD IS SCALED; ITS TEXTURE IS NOT.** The coverage grid is a logical-size image and the sampler
-	 * magnifies it, which is what a mark wants — the alternative is a second grid per scale factor. */
+	upload_coverage(gl, server->system_menu_icon, grid);
+	/* **THE MARK'S QUAD AND ITS TEXTURE ARE THE SAME SIZE, SO THE SAMPLER NEVER MAGNIFIES.** A mark is a 16-point
+	 * design and a 21-pixel box needs a 21-pixel raster, which the icon keeps for that size; the uv divisor is the
+	 * grid and not the box so a mark asked for at the ceiling is still mapped across its box. */
 	gl_textured(gl, &gl->texture, GL_TEXTURE_2D, gl->coverage_texture,
-		    (float)(AWS_SYSTEM_MENU_LEFT_MARGIN * s), (float)(AWS_SYSTEM_MENU_GLYPH_TOP * s),
-		    (float)(AWS_SYSTEM_MENU_GLYPH_WIDTH * s), (float)(AWS_SYSTEM_MENU_GLYPH_HEIGHT * s),
-		    (float)(AWS_SYSTEM_MENU_GLYPH_WIDTH * s), (float)(AWS_SYSTEM_MENU_GLYPH_HEIGHT * s),
+		    glyph_left, glyph_top, glyph, glyph,
+		    (float)grid, (float)grid,
 		    0.0f, 0.0f,
 		    0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1, 0, AWS_SYSTEM_MENU_GLYPH_COLOUR);
 	/* **AND THE BAR'S OWN SHADOW, WHICH FALLS BELOW THE STRIP.** Radius zero: the bar's corners are square, and a

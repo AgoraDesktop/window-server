@@ -236,7 +236,8 @@ const struct aws_family_entry aws_family_entries[] = {
 const size_t aws_family_entry_count =
 	sizeof(aws_family_entries) / sizeof(aws_family_entries[0]);
 
-/* THE MARK OBJECTS. THE COVERAGE GRID IS FILLED LAZILY BY `aws_system_icon_coverage`. */
+/* THE MARK OBJECTS. THE COVERAGE GRIDS ARE FILLED LAZILY: THE LOGICAL ONE BY `aws_system_icon_coverage` AND ONE PER
+ * DEVICE SIZE BY `aws_system_icon_coverage_at`. */
 struct aws_system_icon aws_icon_objects[] = {
 	{
 		"alpinelinux",

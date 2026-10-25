@@ -14,9 +14,11 @@ mark for now**; there is no separate DragonFly artwork in this set. A derivative
 `ID_LIKE` family's mark (Kali gets Debian, Rocky gets Red Hat, Manjaro gets Arch); anything unmatched gets the
 hamburger.
 
-The marks are monochrome vector paths, rasterized once into a 16×16 coverage grid and blended by the compositor. The
-hamburger is original and CC0 1.0; the exact OS marks come from Simple Icons and remain the trademarks of their
-projects. See `assets/system-menu-icons/PROVENANCE.md`.
+The marks are monochrome vector paths, **rasterized at the size they are drawn**: a 16-point design, so 1x is a
+16×16 coverage grid, 96 dpi is 21×21 and 2x is 32×32, cached per size and blended by the compositor. A mark at a
+higher scale gains detail exactly where a text run does — it is not a 16×16 image magnified into a bigger box, which
+reads as a blocky mark beside crisp text. The hamburger is original and CC0 1.0; the exact OS marks come from Simple
+Icons and remain the trademarks of their projects. See `assets/system-menu-icons/PROVENANCE.md`.
 
 ```
 $ ./build/window-server --dump-os-identity
