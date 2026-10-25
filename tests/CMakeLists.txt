@@ -109,6 +109,13 @@ add_test(NAME window-server-scale COMMAND window-server-scale)
 add_test(NAME window-server-dpi-override
   COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-dpi-override.sh" "$<TARGET_FILE:window-server>")
 
+# **AND THE USER'S COMFORT FACTOR, WHICH MULTIPLIES THE OVERRIDE RATHER THAN REPLACING IT.** The unit test proves the
+# arithmetic; this proves the two doors onto it — `--ui-scale` and `AGORA_UI_SCALE` — reach the framebuffer as a
+# product (`--scale 2 --ui-scale 1.25` is 2.5, so 100x50 points are 250x125 pixels), that 1.0 leaves the startup line
+# byte-identical, and that a factor no session can be sized with is refused while naming where it came from.
+add_test(NAME window-server-ui-scale
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-ui-scale.sh" "$<TARGET_FILE:window-server>")
+
 # **THE DIAGNOSTIC DOORS ARE TESTED WITHOUT A DISPLAY**, which is the property that makes them useful on a machine
 # whose compositor will not start. `--dump-os-identity` and `--list-system-menu-icons` return before the backend is
 # created; an unknown override is rejected by the same path.

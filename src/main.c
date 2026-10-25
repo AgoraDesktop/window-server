@@ -166,6 +166,12 @@ static void usage(const char *program)
 		"                    the spelling to reach for when the DERIVED value is wrong, which a\n"
 		"                    multi-head X screen makes it: it reports the whole screen's pixels\n"
 		"                    against one panel's millimetres. Give this OR --scale, not both\n"
+		"  --ui-scale N      the user's own comfort factor, multiplied onto whatever the display\n"
+		"                    (or --scale/--dpi) decided, and 1.0 — the default — changes nothing.\n"
+		"                    1.25 is a quarter larger than the panel's honest answer and 0.8 a fifth\n"
+		"                    smaller; the point is unchanged, the UI is simply drawn bigger or\n"
+		"                    smaller. AGORA_UI_SCALE states the same number from the environment,\n"
+		"                    and this option wins over it\n"
 		"  --socket NAME     the Wayland socket's name; the default is chosen and printed\n"
 		"  --launcher NAME   where the terminal comes from: existing (default — run it from a text\n"
 		"                    console) or vt (switch to --vt N; needs root, and a display manager may\n"
@@ -212,6 +218,18 @@ int main(int argc, char **argv)
 	 * "nobody said" — a typo must not silently fall back to the wrong derived scale. */
 	double dpi = 0.0;
 	int dpi_given = 0;
+	/* **AND WHAT THE PERSON IN FRONT OF THE SCREEN SAYS ABOUT THEIR OWN COMFORT, WHICH IS NOT A STATEMENT ABOUT THE
+	 * PANEL AT ALL.** It is a multiplier applied after everything above — after the measurement, after `--scale`,
+	 * after `--dpi` — so 1.25 means "everything a quarter larger than this display's honest answer", whatever that
+	 * answer was. 1.0 is the default and changes nothing, which is why every existing session is unaffected. It has
+	 * a second door, `AGORA_UI_SCALE`, because a comfort factor is the kind of thing a login sets once rather than
+	 * a command line says every time; the flag wins over the environment.
+	 *
+	 * `ui_scale_given` is separate from the value for the same reason as `dpi_given`: `--ui-scale 0` is a mistake to
+	 * refuse, not "nobody said", and a multiplier of zero would size the whole screen out of existence. */
+	double ui_scale = AWS_DEFAULT_UI_SCALE;
+	int ui_scale_given = 0;
+	const char *ui_scale_door = "--ui-scale";
 	/* **WHERE THE DISPLAY COMES FROM: THE TERMINAL IT WAS STARTED ON, OR A NEW ONE IT CLAIMS.**
 	 * `existing` is the default and needs no privilege — run it from a text console and that console is the session.
 	 * `vt` asks the kernel for a free terminal, switches to it, and gives it back on exit: the only way a terminal
@@ -255,6 +273,9 @@ int main(int argc, char **argv)
 			 * whichever argument the loop happened to see last. */
 			dpi = atof(argv[++i]);
 			dpi_given = 1;
+		} else if (strcmp(argv[i], "--ui-scale") == 0 && i + 1 < argc) {
+			ui_scale = atof(argv[++i]);
+			ui_scale_given = 1;
 		} else if (strcmp(argv[i], "--vt") == 0 && i + 1 < argc) {
 			vt_number = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--idle-timeout") == 0 && i + 1 < argc) {
@@ -339,6 +360,31 @@ int main(int argc, char **argv)
 		return 0;
 	}
 
+	/* **AND THE COMFORT FACTOR, FROM THE ENVIRONMENT WHEN THE COMMAND LINE DID NOT SAY.** `AGORA_UI_SCALE` is the door
+	 * a login uses — set once for the person, inherited by every session they start — and `--ui-scale` overrides it,
+	 * so a single run can be made bigger without editing anything permanent. It is read HERE rather than in
+	 * `aws_backend_init` so that a value nobody can use is REFUSED with a message that names it, instead of being
+	 * quietly ignored: a comfort setting that silently did nothing would look like a compositor bug. And it is read
+	 * AFTER the diagnostic doors on purpose — `--dump-os-identity` has to answer on a machine whose session will not
+	 * start, and a stale comfort factor inherited from a login is exactly the kind of thing that stops one. */
+	if (!ui_scale_given) {
+		const char *environment = getenv("AGORA_UI_SCALE");
+
+		if (environment != NULL && environment[0] != '\0') {
+			ui_scale = atof(environment);
+			ui_scale_door = "AGORA_UI_SCALE";
+		}
+	}
+	if (!aws_ui_scale_is_plausible(ui_scale)) {
+		/* THE MESSAGE NAMES THE DOOR THE NUMBER CAME THROUGH, because a bad factor inherited from a login's
+		 * environment is otherwise a compositor that will not start for a reason nothing on screen mentions. */
+		fprintf(stderr, "window-server: the UI scale factor (%s) must be greater than 0 and at most %g, not %g\n",
+			ui_scale_door, AWS_MAX_UI_SCALE, ui_scale);
+		fprintf(stderr, "                (it multiplies the display's own scale: 1.25 is a quarter larger and 1,\n"
+				"                the default, changes nothing — `--ui-scale N` or AGORA_UI_SCALE sets it)\n");
+		return 2;
+	}
+
 	/* **THE TERMINAL IS CLAIMED BEFORE THE DEVICE, AND THE ORDER IS LOAD-BEARING.** A DRM master is the process the
 	 * kernel's terminal bookkeeping names as the owner of the screen; taking the device first and the terminal second
 	 * would claim a display for a session that is not yet the active one — which is exactly the state a compositor
@@ -359,7 +405,7 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
-	server = aws_server_create(backend, input, renderer, width, height, scale);
+	server = aws_server_create(backend, input, renderer, width, height, scale, ui_scale);
 	if (server == NULL) {
 		fprintf(stderr, "window-server: could not start (backend '%s')\n", backend);
 		/* **A CLAIMED TERMINAL IS GIVEN BACK ON EVERY EXIT PATH, NOT ONLY THE HAPPY ONE.** Leaving it here would
@@ -398,11 +444,26 @@ int main(int argc, char **argv)
 	printf("%s\n", socket_name);
 	fflush(stdout);
 	/* BOTH NUMBERS, because which one a reader wants depends on the question: a person wants the screen they have,
-	 * and a diagnosis of a blurry or half-size frame wants the framebuffer. */
-	fprintf(stderr, "window-server: listening on %s, %s output %dx%d, %dx%d device pixels (scale %g, %.0f dpi)\n",
-		socket_name, server->backend.name, aws_output_width(server), aws_output_height(server),
-		server->backend.width, server->backend.height, aws_output_scale(server),
-		aws_output_scale(server) * AWS_POINTS_PER_INCH);
+	 * and a diagnosis of a blurry or half-size frame wants the framebuffer. BOTH SCALES TOO when a comfort factor
+	 * moved the second: 1.664 of its own accord is a dense panel and 1.664 because somebody asked for it is a
+	 * different report, so the product is spelled out as a product rather than left to be inferred. */
+	{
+		double out_scale = aws_output_scale(server);
+		double ui = aws_output_ui_scale(server);
+		double base = aws_output_base_scale(server);
+		char note[160];
+
+		if (ui == AWS_DEFAULT_UI_SCALE) {
+			snprintf(note, sizeof note, "scale %g, %.0f dpi", out_scale,
+				 out_scale * AWS_POINTS_PER_INCH);
+		} else {
+			snprintf(note, sizeof note, "scale %g = %g x %g UI, %.0f dpi", out_scale, base, ui,
+				 base * AWS_POINTS_PER_INCH);
+		}
+		fprintf(stderr, "window-server: listening on %s, %s output %dx%d, %dx%d device pixels (%s)\n", socket_name,
+			server->backend.name, aws_output_width(server), aws_output_height(server), server->backend.width,
+			server->backend.height, note);
+	}
 	fprintf(stderr, "window-server: system menu: %s (source %s, ID=%s)\n",
 		server->system_menu_icon != NULL ? server->system_menu_icon->id : AWS_SYSTEM_MENU_ICON_FALLBACK,
 		server->os_identity.source != NULL ? server->os_identity.source : "(none)",

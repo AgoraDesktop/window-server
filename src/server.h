@@ -189,8 +189,21 @@ struct aws_backend {
 	double scale;
 	/* **WHAT THE CALLER ASKED FOR, WHICH IS NOT THE SAME AS WHAT THE OUTPUT ENDED UP AT.** 0 means nobody said, so
 	 * a backend that can INFER a scale from its display may fill `scale` in during its own start; a non-zero value is
-	 * an instruction and no backend may override it. */
+	 * an instruction and no backend may override it. It is the DISPLAY's instruction only — `--scale` or `--dpi`, as
+	 * quantised — and never `ui_scale` below, because a backend reads this field to decide whether to measure its
+	 * panel. */
 	double user_scale;
+	/* **THE USER'S COMFORT FACTOR, APPLIED LAST AND 1.0 BY DEFAULT.** `user_scale` and the panel's measurement are
+	 * both statements about the HARDWARE; this one is a statement about the person sitting in front of it. So a
+	 * backend that measures its display multiplies its answer by this (`aws_scale_with_ui`) rather than having it
+	 * folded into either number above — which is what makes 1.0 a no-op and keeps "1.25" meaning "a quarter larger
+	 * than this panel's own honest answer" whatever produced that answer. */
+	double ui_scale;
+	/* **AND THE SCALE BEFORE THAT FACTOR, KEPT SO THE STARTUP LINE CAN SHOW THE MULTIPLICATION.** It is the display's
+	 * own answer (or the override), quantised; `scale` above is that times `ui_scale`, quantised again. A reader
+	 * asking "why is this screen 1.664" gets both numbers rather than a product with the display's truth lost in
+	 * it. */
+	double base_scale;
 	uint32_t *pixels;			/* XRGB8888, the format every client here sends */
 
 	/* **AND WHERE A GPU COULD PUT THEM, WHEN THIS BACKEND HAS ONE.** A windowed backend that can hand an EGL
@@ -477,10 +490,12 @@ struct aws_server {
 };
 
 /* server.c */
-/* `width` and `height` are LOGICAL pixels — the screen a client is told about — and `scale` is the device pixels per
- * logical pixel, where 0 means "whatever the backend can infer" (see `aws_backend_init`). */
+/* `width` and `height` are LOGICAL pixels — the screen a client is told about — `scale` is the device pixels per
+ * logical pixel the DISPLAY asked for, where 0 means "whatever the backend can infer" (see `aws_backend_init`), and
+ * `ui_scale` is the USER's comfort factor, applied after that inference and after the override; 0 means "nobody
+ * said" and becomes 1, which is the whole of the default behaviour. */
 struct aws_server *aws_server_create(const char *backend_name, const char *input_name, const char *renderer_name,
-				     int width, int height, double scale);
+				     int width, int height, double scale, double ui_scale);
 void aws_server_destroy(struct aws_server *server);
 void aws_server_schedule_render(struct aws_server *server);
 /* `name` is an icon id, an alias, a distro id, a family, or "auto" to re-resolve from the identity. Returns 0 on
@@ -525,7 +540,8 @@ int aws_dmabuf_format_has_alpha(uint32_t format);
 int aws_dmabuf_format_planes(uint32_t format);
 
 /* backend.c — choosing one, and the two calls the event loop makes */
-int aws_backend_init(struct aws_server *server, const char *name, int width, int height, double scale);
+int aws_backend_init(struct aws_server *server, const char *name, int width, int height, double scale,
+		     double ui_scale);
 void aws_backend_present(struct aws_server *server);
 
 /* **THE VT SWITCH'S TWO HALVES, ROUTED TO THE BACKEND THAT HAS THEM.** Called from the compositor's own signal
@@ -543,6 +559,11 @@ int aws_output_width(const struct aws_server *server);
 int aws_output_height(const struct aws_server *server);
 /* The device pixels per logical pixel, as a fraction: what the renderers blit by. */
 double aws_output_scale(const struct aws_server *server);
+/* **AND THE TWO NUMBERS THAT PRODUCT IS MADE OF, because one number cannot explain itself.** `aws_output_scale` is
+ * the display's answer times the user's comfort factor; a diagnostic that prints only the product cannot say whether
+ * a 1.664 screen is dense or simply a quarter larger on request. Both are 1 when nobody asked for anything. */
+double aws_output_ui_scale(const struct aws_server *server);
+double aws_output_base_scale(const struct aws_server *server);
 /* **AND THE SAME NUMBER AS A CLIENT MAY HEAR IT.** `wl_output.scale` is an integer, so a 1.5x output is advertised as
  * 2: a client that renders at 2x is composited 2 -> 1.5, which is sharp, while a client that rendered at 1.5 would not
  * be representable at all. Rounded UP, because rounding down would have the client render at fewer pixels than the

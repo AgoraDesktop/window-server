@@ -438,10 +438,13 @@ of them shows a 23-point button 23/72 inch tall. The same rule runs the **nested
 screen and the **DRM backend** against the connector's active width. The measurement is exact rather than rounded to
 1x or 2x.
 
-**96 DPI IS THE FALLBACK, NOT THE RULE.** A connector that reports no millimetres, a width under 50 mm, or a
-dots-per-inch outside 50–400 says nothing usable — a wrong scale resizes every window on the screen — so the answer
-is "no answer". A display 1080p or lower that says nothing gets 96 dpi, the conventional desktop size; one above
-1080p keeps scale 1 until told otherwise. `--dpi N` and `--scale N` override both branches, and they are the same
+**96 DPI IS THE FALLBACK, NOT THE RULE, AND IT IS NOT A RESOLUTION POLICY.** A connector that reports no
+millimetres, a width under 50 mm, or a dots-per-inch outside 50–400 says nothing usable — a wrong scale resizes every
+window on the screen — so the answer is "no answer" from the measurement, and then the conventional 96 dpi, at
+**every** resolution. A 720p projector and a 4K television that cannot describe themselves are the same problem and
+get the same answer; a resolution is a pixel count and not a physical size, so the mode's height is not consulted at
+all (it is not even a parameter of `aws_scale_for_display`). A display that does report its size is believed at every
+resolution. `--dpi N` and `--scale N` override the measurement and the fallback alike, and they are the same
 instruction: `--dpi` is the number on the monitor's box, `--scale` is that number divided by 72. They are the escape
 hatch for a corrupt size block and for the one structure that reports two screens' numbers as one.
 
@@ -471,6 +474,41 @@ window-server: listening on agora, x11 output 1280x720, 1705x959 device pixels (
 
 `--dpi` and `--scale` are mutually exclusive on purpose: giving both would leave the command line silently meaning
 one of two numbers. `headless` has no display to measure, so it stays at 1 unless told otherwise.
+
+**AND THEN THERE IS THE PERSON, WHO IS NOT A PANEL: `--ui-scale N` AND `AGORA_UI_SCALE`.** Everything above answers
+"how many device pixels make a point on THIS display", which is a fact about hardware. A person who finds a
+physically honest desktop too small or too large is saying something about their eyes and their distance from the
+screen, so the answer is a **multiplier applied after every other factor** — after the measurement, after the 96-dpi
+fallback, after `--dpi`/`--scale`:
+
+```
+final scale = (the display's own scale, or the override) x ui scale factor
+```
+
+`1.0` is the default and changes nothing, which is why every session that predates the factor is untouched;
+`1.25` is "everything a quarter larger than this panel's honest answer"; `0.8` is a fifth smaller. The factor is
+refused unless it is greater than 0 and at most 16 — a bound on the framebuffer arithmetic, not on taste — and a bad
+number is refused by name (`--ui-scale` or `AGORA_UI_SCALE`) rather than quietly read as 1, because a comfort setting
+that silently did nothing would look like a compositor bug. `AGORA_UI_SCALE` exists because a login sets this once
+for a person and every session it starts inherits it; `--ui-scale` overrides it for one run.
+
+The startup line shows the product as a product when the factor is not 1, so a 1.664 output says which half is the
+panel and which half is comfort:
+
+```
+window-server: listening on agora, x11 output 1024x576, 1704x959 device pixels (scale 1.66406 = 1.33203 x 1.25 UI, 96 dpi)
+```
+
+The dpi in that line stays the DISPLAY's, because that is what it is: the panel is still 96 dpi and the extra quarter
+of a scale is the person's request, not a measurement.
+
+**NOTHING ON THE CLIENT SIDE KNOWS THIS EXISTS, WHICH IS THE POINT.** The client is told the composed number through
+`agora_output.preferred_scale`, sizes its buffer as `round(points * that)`, and is composited 1:1 — so a comfort
+factor is a compositor decision rather than a second scaling system in the toolkit. `libagora-app`'s
+`tests/run-appkit-hidpi.sh` proves it with a server at `--scale 2 --ui-scale 0.75`: the client is told 1.5, draws
+its 20-point square 30 device pixels wide, and the compositor places it exactly there. It applies at START: it is a
+property of the output, like the scale itself, so changing it begins a new session rather than renegotiating with
+every client that is already drawing.
 
 The arithmetic and its guards are `src/scale.c`, and `tests/scale.c` asks them directly — no display required.
 

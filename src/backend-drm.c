@@ -890,29 +890,35 @@ int aws_backend_drm_start(struct aws_server *server)
 	 * active millimetres, so `pixels x 25.4 / mm / 72` is the number of device pixels that make a logical point on
 	 * THIS display. That is what makes a 13" 4K panel and a 27" 1440p panel agree about the size of a menu bar and a
 	 * window control: the dense panel gets a larger scale and more physical detail at the same point size. 96 dpi is
-	 * the fallback only when the display reports no usable size.
+	 * the fallback only when the display reports no usable size, and at every resolution: the mode's height is not
+	 * an input to this function, because a resolution is a pixel count and not a physical size.
 	 *
 	 * The measurement is exact rather than rounded to 1x or 2x — a 109-dpi screen really is 1.511… device pixels per
 	 * point — and `aws_scale_from_physical_size` is where the EDID sanity checks live, because a wrong reported size
-	 * must not resize every window. `--dpi` and `--scale` still override both branches. */
+	 * must not resize every window. `--dpi` and `--scale` still override the measurement and the fallback alike. */
 	if (server->backend.user_scale == 0) {
-		double derived = aws_scale_for_display((int)mode.hdisplay, (int)mode.vdisplay, connector->mmWidth);
+		double derived = aws_scale_for_display((int)mode.hdisplay, connector->mmWidth);
 
 		if (derived > 0.0) {
 			int fallback = aws_scale_from_physical_size((int)mode.hdisplay, connector->mmWidth) <= 0.0;
+			/* **THE PANEL'S ANSWER FIRST, THEN THE USER'S COMFORT FACTOR.** `base` is what the connector said and
+			 * is what the message below quotes; `derived` is the product, quantised at 1/256, and it is what the
+			 * framebuffer, the logical screen and every client are built from. */
+			double base;
 
-			derived = aws_scale_quantized(derived);
+			base = aws_scale_quantized(derived);
+			derived = aws_scale_with_ui(base, server->backend.ui_scale);
+			server->backend.base_scale = base;
 			server->backend.scale = derived;
 			if (fallback) {
 				fprintf(stderr, "window-server: this display is %ux%u and did not report a usable size, so "
-						"the output scale is %g (%.0f dpi; override with --dpi or --scale)\n",
-					mode.hdisplay, mode.vdisplay, server->backend.scale, AWS_LOW_RESOLUTION_DPI);
+						"its scale is %g (%.0f dpi; override with --dpi or --scale)\n",
+					mode.hdisplay, mode.vdisplay, base, AWS_FALLBACK_DPI);
 			} else {
-				fprintf(stderr, "window-server: this display is %ux%u on %d mm (%.0f dpi), so the "
-						"output scale is %g to keep 72 points an inch (override with --dpi or "
-						"--scale)\n",
+				fprintf(stderr, "window-server: this display is %ux%u on %d mm (%.0f dpi), so its "
+						"scale is %g (override with --dpi or --scale)\n",
 					mode.hdisplay, mode.vdisplay, connector->mmWidth,
-					(double)mode.hdisplay * 25.4 / (double)connector->mmWidth, server->backend.scale);
+					(double)mode.hdisplay * 25.4 / (double)connector->mmWidth, base);
 			}
 		}
 	}

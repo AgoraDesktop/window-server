@@ -40,25 +40,13 @@ static void check_dpi(double dpi, double want, const char *what)
 	}
 }
 
-static void check_display(int pixels_wide, int pixels_high, int millimetres, double want, const char *what)
+static void check_display(int pixels_wide, int millimetres, double want, const char *what)
 {
-	double got = aws_scale_for_display(pixels_wide, pixels_high, millimetres);
+	double got = aws_scale_for_display(pixels_wide, millimetres);
 	int ok = fabs(got - want) < 1e-9;
 
-	printf("%s %-62s %dx%d on %d mm -> %.6f (want %.6f)\n", ok ? "  ok  " : "  FAIL", what, pixels_wide,
-	       pixels_high, millimetres, got, want);
-	if (!ok) {
-		failures++;
-	}
-}
-
-static void check_low_resolution(int pixels_high, int want, const char *what)
-{
-	int got = aws_display_is_low_resolution(pixels_high);
-	int ok = got == want;
-
-	printf("%s %-62s height %d -> %s\n", ok ? "  ok  " : "  FAIL", what, pixels_high,
-	       got ? "low-resolution" : "measured");
+	printf("%s %-62s %d px on %d mm -> %.6f (want %.6f)\n", ok ? "  ok  " : "  FAIL", what, pixels_wide,
+	       millimetres, got, want);
 	if (!ok) {
 		failures++;
 	}
@@ -70,6 +58,39 @@ static void check_quantized(double scale, double want, const char *what)
 	int ok = fabs(got - want) < 1e-12;
 
 	printf("%s %-62s %g -> %.9f (want %.9f)\n", ok ? "  ok  " : "  FAIL", what, scale, got, want);
+	if (!ok) {
+		failures++;
+	}
+}
+
+static void check_normalized(double ui, double want, const char *what)
+{
+	double got = aws_ui_scale_normalized(ui);
+	int ok = fabs(got - want) < 1e-12;
+
+	printf("%s %-62s %g -> %.9f (want %.9f)\n", ok ? "  ok  " : "  FAIL", what, ui, got, want);
+	if (!ok) {
+		failures++;
+	}
+}
+
+static void check_plausible(double ui, int want, const char *what)
+{
+	int got = aws_ui_scale_is_plausible(ui);
+	int ok = got == want;
+
+	printf("%s %-62s %g -> %s\n", ok ? "  ok  " : "  FAIL", what, ui, got ? "accepted" : "refused");
+	if (!ok) {
+		failures++;
+	}
+}
+
+static void check_with_ui(double scale, double ui, double want, const char *what)
+{
+	double got = aws_scale_with_ui(scale, ui);
+	int ok = fabs(got - want) < 1e-12;
+
+	printf("%s %-62s %g x %g -> %.9f (want %.9f)\n", ok ? "  ok  " : "  FAIL", what, scale, ui, got, want);
 	if (!ok) {
 		failures++;
 	}
@@ -126,35 +147,32 @@ int main(void)
 	check_dpi(1.0e9, 0.0, "an absurd dpi does not become a framebuffer");
 	check_dpi(NAN, 0.0, "a NaN dpi is not an override");
 
-	/* **THE 1080p RULE IS THE FALLBACK, NOT THE POLICY.** A 1920x1080 panel that reports 531 mm is believed: it is
-	 * 91.8 dpi, so a point is 1.276 device pixels and 23 points are 23/72 inch. The 96-dpi answer below is only for
-	 * a display whose EDID gives no usable size. */
-	check_display(1920, 1080, 531, 1920.0 * 25.4 / 531.0 / AWS_POINTS_PER_INCH,
+	/* **THE 96-DPI FALLBACK IS NOT A RESOLUTION POLICY.** A 1920x1080 panel that reports 531 mm is believed: it is
+	 * 91.8 dpi, so a point is 1.276 device pixels and 23 points are 23/72 inch. The 96-dpi answer is only for a
+	 * display whose EDID gives no usable size, and the mode is not asked about it — the resolution is not even a
+	 * parameter, so a small display and a large one get the same conventional answer. */
+	check_display(1920, 531, 1920.0 * 25.4 / 531.0 / AWS_POINTS_PER_INCH,
 		      "1080p with a size is measured: 91.8 dpi, not 96");
-	check_display(1280, 720, 0, AWS_LOW_RESOLUTION_DPI / AWS_POINTS_PER_INCH,
-		      "720p with no EDID falls back to 96 dpi");
-	check_display(3840, 1080, 1016, AWS_LOW_RESOLUTION_DPI / AWS_POINTS_PER_INCH,
+	check_display(1280, 0, AWS_FALLBACK_DPI / AWS_POINTS_PER_INCH, "720p with no EDID falls back to 96 dpi");
+	check_display(3840, 1016, AWS_FALLBACK_DPI / AWS_POINTS_PER_INCH,
 		      "a twin-head 1080p X screen measures 96 dpi and keeps it");
-	check_display(1920, 1080, 40, AWS_LOW_RESOLUTION_DPI / AWS_POINTS_PER_INCH,
+	check_display(1920, 40, AWS_FALLBACK_DPI / AWS_POINTS_PER_INCH,
 		      "a corrupt EDID on a 1080p screen falls back to 96 dpi");
 
-	/* **ABOVE 1080p THE PANEL IS STILL MEASURED**, because that is where a dense laptop panel and a desktop monitor
-	 * genuinely differ. 1081 is deliberately the first height on the measured side of the threshold. */
-	check_display(2560, 1440, 597, 2560.0 * 25.4 / 597.0 / AWS_POINTS_PER_INCH,
-		      "1440p is measured: 1.51 device pixels per point");
-	check_display(3840, 2160, 294, 3840.0 * 25.4 / 294.0 / AWS_POINTS_PER_INCH,
-		      "4K is still measured: 4.61 device pixels per point");
-	check_display(1920, 1081, 531, 1920.0 * 25.4 / 531.0 / AWS_POINTS_PER_INCH,
-		      "one line above 1080p is measured again");
-	check_display(1920, 0, 531, 1920.0 * 25.4 / 531.0 / AWS_POINTS_PER_INCH,
-		      "no mode is not 1080p: it falls through to the measurement");
+	/* **AND A DISPLAY THAT SAYS NOTHING GETS THE SAME ANSWER WHATEVER ITS MODE IS**, because a resolution is a pixel
+	 * count and not a physical size: a 4K television that cannot describe itself is not told to draw its desktop at
+	 * a quarter of the size, and nothing about 1080p is special. */
+	check_display(3840, 0, AWS_FALLBACK_DPI / AWS_POINTS_PER_INCH,
+		      "4K with no EDID gets 96 dpi, not scale 1");
+	check_display(3840, 160, AWS_FALLBACK_DPI / AWS_POINTS_PER_INCH,
+		      "4K with a corrupt EDID gets the same fallback");
 
-	check_low_resolution(1080, 1, "1080 is the last low-resolution height");
-	check_low_resolution(720, 1, "720p is low-resolution");
-	check_low_resolution(1081, 0, "1081 is measured");
-	check_low_resolution(2160, 0, "2160 is measured");
-	check_low_resolution(0, 0, "a missing mode is not low-resolution");
-	check_low_resolution(-1, 0, "a negative mode is not low-resolution");
+	/* **THE PANEL IS STILL MEASURED WHERE A DENSE LAPTOP AND A DESKTOP MONITOR GENUINELY DIFFER.** */
+	check_display(2560, 597, 2560.0 * 25.4 / 597.0 / AWS_POINTS_PER_INCH,
+		      "1440p is measured: 1.51 device pixels per point");
+	check_display(3840, 294, 3840.0 * 25.4 / 294.0 / AWS_POINTS_PER_INCH,
+		      "4K is measured: 4.61 device pixels per point");
+	check_display(0, 531, 0.0, "a zero-width mode is not a display, so not a 96 dpi one either");
 
 	/* **AND THE NUMBER THE WIRE CARRIES IS THE NUMBER BOTH ENDS USE.** 1/256 is `wl_fixed`; quantising once is what
 	 * keeps a client's `round(points * scale)` and the compositor's placement in agreement, so the blit is 1:1. */
@@ -164,6 +182,44 @@ int main(void)
 	check_quantized(57.97 / AWS_POINTS_PER_INCH, 206.0 / 256.0, "57.97 dpi quantises to 206/256");
 	check_quantized(0.0, 0.0, "no scale stays no scale");
 	check_quantized(-1.0, 0.0, "a negative scale is not a scale");
+
+	/* **AND THE USER'S COMFORT FACTOR, WHICH MULTIPLIES WHATEVER THE DISPLAY SAID AND NOTHING ELSE.** The rule this
+	 * block exists to pin down is that 1.0 is a NO-OP — not "approximately", exactly — because every session that
+	 * existed before the factor did is a session at 1.0. Then: 2 x 1.25 is 2.5, a 96-dpi panel (1.33203125 after
+	 * quantisation) x 1.25 is 1.6640625, and a factor BELOW 1 shrinks. The product is quantised once at the end, so
+	 * the number here is the number a client is told and the compositor blits 1:1. */
+	check_with_ui(2.0, AWS_DEFAULT_UI_SCALE, 2.0, "a factor of 1 changes nothing at 2x");
+	check_with_ui(1.33203125, AWS_DEFAULT_UI_SCALE, 1.33203125, "a factor of 1 changes nothing at 1.332");
+	check_with_ui(96.0 / AWS_POINTS_PER_INCH, AWS_DEFAULT_UI_SCALE, 341.0 / 256.0,
+		      "a factor of 1 on a 96-dpi panel is the same 341/256");
+	check_with_ui(2.0, 1.25, 2.5, "a quarter more than 2x is 2.5x");
+	check_with_ui(1.33203125, 1.25, 426.0 / 256.0, "96 dpi at 1.25 is 426/256, not a rounded 1.664");
+	check_with_ui(2.0, 0.75, 1.5, "three quarters of 2x is 1.5x");
+	check_with_ui(1.0, 1.5, 1.5, "a headless output at 1x times 1.5 is a 1.5x screen");
+	check_with_ui(4.611111, 2.0, 9.21875, "a dense panel may be made larger still");
+	check_with_ui(0.0, 2.0, 0.0, "no display scale stays no display scale, whatever the comfort factor");
+	/* An unusable factor is the DEFAULT here rather than a product: this is the path a framebuffer is sized on, and
+	 * `--ui-scale 0` is refused before it ever reaches this function. */
+	check_with_ui(2.0, 0.0, 2.0, "a factor of zero falls back to 1, not to nothing");
+	check_with_ui(2.0, -1.0, 2.0, "a negative factor falls back to 1");
+	check_with_ui(2.0, NAN, 2.0, "a NaN factor falls back to 1");
+	check_with_ui(2.0, 1.0e9, 2.0, "a factor past the ceiling falls back to 1");
+
+	/* AND WHAT THE COMMAND LINE REFUSES, SO THAT THE FALLBACK ABOVE IS NOT HOW A TYPO IS HANDLED: only a positive
+	 * number up to the ceiling is an instruction. 1.25 and 2 are ordinary requests; 0 is not a multiplier. */
+	check_normalized(1.25, 1.25, "a quarter larger is itself");
+	check_normalized(1.0, 1.0, "the default is itself");
+	check_normalized(0.0, 1.0, "zero reads as no instruction here");
+	check_normalized(-2.0, 1.0, "a negative reads as no instruction here");
+	check_normalized(NAN, 1.0, "a NaN reads as no instruction here");
+	check_plausible(1.0, 1, "1 is an instruction");
+	check_plausible(1.25, 1, "1.25 is an instruction");
+	check_plausible(0.5, 1, "half size is an unfriendly but legal request");
+	check_plausible(AWS_MAX_UI_SCALE, 1, "the ceiling itself is legal");
+	check_plausible(0.0, 0, "zero is refused rather than read as the default");
+	check_plausible(-1.25, 0, "a negative factor is refused");
+	check_plausible(NAN, 0, "a NaN factor is refused");
+	check_plausible(AWS_MAX_UI_SCALE * 2.0, 0, "past the ceiling is refused, because the framebuffer arithmetic");
 
 	/* **AND THE INVERSE, WHICH IS WHAT MAKES A CLICK LAND WHERE THE POINTER IS.** A host window reports device pixels;
 	 * every coordinate above the backend is logical, and these are the two points the probe in `backend-x11.c`

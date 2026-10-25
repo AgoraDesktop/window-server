@@ -37,7 +37,7 @@ const char *aws_backend_names(void)
 	       ;
 }
 
-int aws_backend_init(struct aws_server *server, const char *name, int width, int height, double scale)
+int aws_backend_init(struct aws_server *server, const char *name, int width, int height, double scale, double ui_scale)
 {
 	/* **THE SCALE IS RESOLVED BEFORE THE FRAMEBUFFER IS ALLOCATED, AND IT IS A DIVISOR EITHER WAY.** A backend told
 	 * the logical size (x11, headless) allocates `logical x scale`; one that learns the physical size from the
@@ -54,6 +54,14 @@ int aws_backend_init(struct aws_server *server, const char *name, int width, int
 	if (scale <= 0.0) {
 		scale = 1.0;	/* provisional: a backend may replace this from its display during start */
 	}
+	/* **AND THE USER'S COMFORT FACTOR IS APPLIED HERE, WHICH IS THE LAST WORD FOR THIS PATH AND NO WORDS AT ALL FOR
+	 * THE OTHER ONE.** A session given `--scale`/`--dpi` has its scale now; a session that measures its display gets
+	 * a provisional 1 x ui here and the backend replaces it from the panel during its own start, applying the same
+	 * factor there. Either way `ui_scale` is 1.0 by default, and `aws_scale_with_ui` with 1.0 is exactly the
+	 * quantisation this line did before the factor existed. */
+	server->backend.ui_scale = aws_ui_scale_normalized(ui_scale);
+	server->backend.base_scale = scale;
+	scale = aws_scale_with_ui(scale, server->backend.ui_scale);
 	server->backend.scale = scale;
 	/* THE SIZE IS SET HERE RATHER THAN BY EACH BACKEND, so that a backend can only be a PLACE for pixels and
 	 * not a decider of how many — a backend that wanted different dimensions would be asking for a policy
@@ -149,6 +157,25 @@ void aws_backend_shutdown(struct aws_server *server)
 double aws_output_scale(const struct aws_server *server)
 {
 	return (server != NULL && server->backend.scale > 0.0) ? server->backend.scale : 1.0;
+}
+
+/* **THE TWO HALVES OF THAT NUMBER.** `ui_scale` is 1 unless somebody asked for comfort; `base_scale` is what the
+ * display said before that factor was applied (or, for a headless output nobody measured, the 1 the factor
+ * multiplied). Neither is a diagnostic-only field: they are how a reader is told which of the two moved. */
+double aws_output_ui_scale(const struct aws_server *server)
+{
+	if (server == NULL) {
+		return 1.0;
+	}
+	return aws_ui_scale_normalized(server->backend.ui_scale);
+}
+
+double aws_output_base_scale(const struct aws_server *server)
+{
+	if (server == NULL || !(server->backend.base_scale > 0.0)) {
+		return 1.0;
+	}
+	return server->backend.base_scale;
 }
 
 int aws_output_scale_integer(const struct aws_server *server)

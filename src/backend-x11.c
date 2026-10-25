@@ -348,9 +348,10 @@ int aws_backend_x11_start(struct aws_server *server)
 	x11->screen = DefaultScreen(x11->display);
 	/* **THE HOST'S OWN NUMBERS ARE THE HINT A NESTED SESSION NEEDS, WITH ONE POLICY ON TOP.** This backend's
 	 * window sits on somebody else's desktop, so "how big is a logical point here" is a question about THAT
-	 * screen. The answer is `aws_scale_for_display`: a host 1080p or lower is 96 dpi by rule, and above that the
-	 * screen's pixel width and millimetres are measured the same way the DRM path reads a connector. `--dpi` and
-	 * `--scale` still win over either branch.
+	 * screen. The answer is `aws_scale_for_display`: the host screen's pixel width and millimetres are measured the
+	 * same way the DRM path reads a connector, and 96 dpi answers only when they say nothing usable. The mode's
+	 * HEIGHT is not consulted — a resolution is not a physical size, and a host 1080p or lower is measured (or
+	 * given the same conventional fallback) exactly like a larger one. `--dpi` and `--scale` still win.
 	 *
 	 * IT HAS TO HAPPEN HERE AND NOT IN `aws_backend_init`, because the framebuffer of this backend is allocated from
 	 * the request — so the hint has to be known before that. The request is LOGICAL, which is why it is multiplied
@@ -359,24 +360,30 @@ int aws_backend_x11_start(struct aws_server *server)
 		int mm = DisplayWidthMM(x11->display, x11->screen);
 		int px = DisplayWidth(x11->display, x11->screen);
 		int py = DisplayHeight(x11->display, x11->screen);
-		double derived = aws_scale_for_display(px, py, mm);
+		double derived = aws_scale_for_display(px, mm);
 
 		if (derived > 0.0) {
 			int fallback = aws_scale_from_physical_size(px, mm) <= 0.0;
+			/* **THE DISPLAY'S ANSWER FIRST, THEN THE USER'S COMFORT FACTOR**, because the two are different
+			 * statements: the host screen says how many device pixels make a point, and the person in front of
+			 * it may say that points are too small. `base` is what the screen said (and what the message below
+			 * quotes); `derived` is the number the framebuffer and the wire get, quantised once at 1/256. */
+			double base;
 
-			derived = aws_scale_quantized(derived);
+			base = aws_scale_quantized(derived);
+			derived = aws_scale_with_ui(base, server->backend.ui_scale);
+			server->backend.base_scale = base;
 			server->backend.scale = derived;
 			server->backend.width = (int)((double)server->requested_width * derived + 0.5);
 			server->backend.height = (int)((double)server->requested_height * derived + 0.5);
 			if (fallback) {
 				fprintf(stderr, "window-server: the host display is %dx%d and did not report a usable size, so "
-						"the output scale is %g (%.0f dpi; override with --dpi or --scale)\n",
-					px, py, server->backend.scale, AWS_LOW_RESOLUTION_DPI);
+						"its scale is %g (%.0f dpi; override with --dpi or --scale)\n",
+					px, py, base, AWS_FALLBACK_DPI);
 			} else {
-				fprintf(stderr, "window-server: the host display is %d px on %d mm (%.0f dpi), so the "
-						"output scale is %g to keep 72 points an inch (override with --dpi or "
-						"--scale)\n",
-					px, mm, (double)px * 25.4 / (double)mm, server->backend.scale);
+				fprintf(stderr, "window-server: the host display is %d px on %d mm (%.0f dpi), so its "
+						"scale is %g (override with --dpi or --scale)\n",
+					px, mm, (double)px * 25.4 / (double)mm, base);
 			}
 		}
 	}

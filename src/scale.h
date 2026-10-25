@@ -39,12 +39,50 @@ double aws_scale_from_physical_size(int pixels_wide, int millimetres_wide);
  * choose. */
 double aws_scale_from_dpi(double dpi);
 
-/* **THE LOW-RESOLUTION FALLBACK: 96 DPI WHEN THE DISPLAY CANNOT SAY.** This is NOT a 1080p rule — a measured
- * display is always believed, because a point is a physical unit and 96 dpi is only the conventional size a
- * screen falls back to when its EDID is unusable. `aws_scale_for_display` measures first and uses this answer
- * only when the measurement returned zero; an explicit `--dpi` or `--scale` still overrides everything. */
-#define AWS_LOW_RESOLUTION_MAX_HEIGHT 1080
-#define AWS_LOW_RESOLUTION_DPI 96.0
+/* **THE FALLBACK: 96 DPI WHEN THE DISPLAY CANNOT SAY, AND AT EVERY RESOLUTION — THERE IS NO 1080p RULE.** A
+ * measured display is always believed, because a point is a physical unit; this number is only the conventional
+ * size a screen falls back to when its EDID is unusable, and a 720p projector that says nothing is no more
+ * entitled to it than a 4K television that says nothing. A resolution is a pixel count, not a physical size, so
+ * it is not an input to this decision at all — `aws_scale_for_display` is not even handed one. An explicit
+ * `--dpi` or `--scale` still overrides everything. */
+#define AWS_FALLBACK_DPI 96.0
+
+/* **THE USER'S OWN COMFORT FACTOR, AND IT IS A MULTIPLIER APPLIED LAST — 1.0 IS "SHOW ME THE TRUTH".** Everything
+ * above answers "how many device pixels make a point on THIS panel", which is a fact about the hardware. A person
+ * who finds a physically honest desktop too small or too large is saying something about their eyes and their
+ * distance from the screen, not about the panel — so the answer is a factor that multiplies whatever the display
+ * produced, never a second opinion about the display.
+ *
+ * IT IS APPLIED AFTER THE `--dpi`/`--scale` OVERRIDE TOO, because that override is also a statement about the
+ * DISPLAY ("the reported millimetres are wrong"). So the order is: measure or override, then comfort. 1.25 is
+ * "everything a quarter larger than the panel's own answer"; 1.0, the default, changes nothing at all. */
+#define AWS_DEFAULT_UI_SCALE 1.0
+
+/* **AND AS FAR AS A REFUSAL GOES, 16 IS THE CEILING.** This is not the EDID plausibility range: a factor outside it
+ * is not a corrupt size block, it is a person's instruction, and 2 or 3 on a dense laptop panel is an ordinary
+ * request. The bound exists only because the factor multiplies a framebuffer size, and a number large enough to
+ * overflow that arithmetic is a typo rather than a preference. Zero, negative and NaN are refused for the same
+ * reason `--dpi 0` is: "no multiplier" and "a multiplier of nothing" must not be the same answer. */
+#define AWS_MAX_UI_SCALE 16.0
+
+/* **THE FACTOR AS THE REST OF THIS FILE MAY USE IT: 1 WHEN NOBODY SAID, AND THE NUMBER WHEN THEY DID.** A zero, a
+ * negative, a NaN or an infinity all mean "no instruction" here rather than "multiply by that", because this
+ * function is called on the path that sizes a framebuffer — the one place a silently unusable number is worse than
+ * a default. Whether the caller should have refused the value beforehand is a separate question, answered by
+ * `aws_ui_scale_is_plausible`. */
+double aws_ui_scale_normalized(double ui_scale);
+
+/* Whether a factor is one a session can be started with: positive, finite, and at most `AWS_MAX_UI_SCALE`. This is
+ * what the command line asks before it hands a number over, so `--ui-scale 0` is refused loudly instead of being
+ * quietly read as 1. */
+int aws_ui_scale_is_plausible(double ui_scale);
+
+/* **THE MULTIPLICATION ITSELF, AND THE ONE PLACE THE UI FACTOR MEETS THE WIRE.** `aws_scale_with_ui` quantises its
+ * input first (so passing an already-quantised scale is exact, not approximate), multiplies, and quantises the
+ * product — ONE rounding at the end, which is what a client is told and what the compositor blits 1:1. With a
+ * factor of 1 the answer is exactly `aws_scale_quantized(scale)`, which is what makes the default a no-op rather
+ * than a nearly-no-op. A scale of zero stays zero ("not a display"). */
+double aws_scale_with_ui(double scale, double ui_scale);
 
 /* **AND THE SCALE THE WIRE CAN CARRY EXACTLY: 1/256, WHICH IS `wl_fixed`.** A fractional output scale is only
  * resolution independence if the client and the compositor agree on it to the last bit: the client sizes its buffer
@@ -61,13 +99,11 @@ double aws_scale_quantized(double scale);
  * windows tile at their shared edge instead of one pixel overlapping the other. */
 int aws_logical_from_device(int device, double scale);
 
-/* Whether a display's vertical mode is at or below the fallback threshold. Named rather than written out at
- * each backend, because the diagnostics and the policy must agree about which branch produced the scale. */
-int aws_display_is_low_resolution(int pixels_high);
-
-/* **THE SCALE A DISPLAY GETS WHEN NOBODY OVERRODE IT: ITS OWN MEASUREMENT, BECAUSE A POINT IS 1/72 INCH.** Above
- * and below every resolution the panel's millimetres decide; the 96 dpi answer is used only when the measurement
- * says nothing AND the mode is 1080p or lower. Zero means the caller keeps its default. */
-double aws_scale_for_display(int pixels_wide, int pixels_high, int millimetres_wide);
+/* **THE SCALE A DISPLAY GETS WHEN NOBODY OVERRODE IT: ITS OWN MEASUREMENT, BECAUSE A POINT IS 1/72 INCH.** The
+ * panel's millimetres decide, at every resolution; `AWS_FALLBACK_DPI` answers only when the measurement says
+ * nothing. `pixels_high` is deliberately NOT a parameter: it used to be one, because the fallback was keyed on the
+ * mode's height, and dropping it is what keeps a resolution from becoming part of the decision again. Zero means the
+ * mode is not a display at all, and the caller keeps its own default. */
+double aws_scale_for_display(int pixels_wide, int millimetres_wide);
 
 #endif /* AGORA_WINDOW_SERVER_SCALE_H */
