@@ -33,7 +33,10 @@
  * `aws_surface_at` is the compositor's hit test over its own stacking order — a whole surface   *
  * model away from the rule under test, and its answer is an INPUT here rather than a fact to be  *
  * discovered. `aws_window_send_pointer_global` writes to a client's socket, and a test with no  *
- * client has nothing to write to. Everything else in `seat.c` is linked as it ships.             *
+ * client has nothing to write to. `aws_server_schedule_render` only sets a flag on a server this  *
+ * file does not have — the seat asks for a frame whenever the COMPOSITOR draws the pointer, and a *
+ * compositor-owned cursor is a DRM fact rather than a seat rule. Everything else in `seat.c` is    *
+ * linked as it ships.                                                                            *
  * ============================================================================================ */
 static struct aws_surface *s_under_pointer;	/* what the stubbed hit test answers */
 static int s_global_sends;			/* how many absolute positions were sent */
@@ -59,6 +62,14 @@ void aws_window_send_pointer_global(struct aws_surface *surface, int x, int y)
  * to be here or the suite would not link. If the list ever grows a claim worth testing, this is where a counter
  * would go. */
 void aws_shell_window_list_changed(struct aws_server *server)
+{
+	(void)server;
+}
+
+/* **AND THE FOURTH: A FRAME REQUEST.** The seat schedules a redraw when the pointer moves on a backend that draws
+ * its own cursor (`backend.owns_cursor`), so the symbol is asked for even though a test server has no loop to draw in.
+ * A counter here would be the place to assert that request if the seat's cursor rule ever becomes a claim. */
+void aws_server_schedule_render(struct aws_server *server)
 {
 	(void)server;
 }

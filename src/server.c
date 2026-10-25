@@ -117,6 +117,7 @@ void aws_server_destroy(struct aws_server *server)
 	/* **THE DISPLAY GOES LAST**, once nothing holds a source on its loop and no client resource names platform
 	 * state that has been released. */
 	wl_display_destroy(server->display);
+	aws_cursor_finish(server);
 	free(server->dmabuf_formats);
 	free(server);
 }

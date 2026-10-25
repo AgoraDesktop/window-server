@@ -135,9 +135,11 @@ static void pointer_set_cursor(struct wl_client *client, struct wl_resource *res
 			       struct wl_resource *surface, int32_t hotspot_x, int32_t hotspot_y)
 {
 	(void)client; (void)resource; (void)serial; (void)surface; (void)hotspot_x; (void)hotspot_y;
-	/* THE CURSOR IS THE HOST'S HERE: a nested compositor draws inside a window whose pointer the HOST is
-	 * already showing, and a second cursor drawn into that window is a pointer the person did not ask for. A
-	 * real output would honour this, and it is where the honouring goes. */
+	/* **A CLIENT'S CURSOR SURFACE IS STILL NOT IMPLEMENTED, AND THE FALLBACK IS WHAT SHIPS.** A nested compositor
+	 * draws inside a window whose pointer the HOST is already showing, so a second cursor drawn into that window
+	 * would be a pointer the person did not ask for; a DRM output has no host pointer at all, and the compositor
+	 * draws its own arrow (cursor.c) so that the shipping path has one. Honouring the client's surface is the
+	 * protocol feature this request is for, and it is where the honouring goes. */
 }
 
 static void pointer_release(struct wl_client *client, struct wl_resource *resource)
@@ -521,6 +523,12 @@ void aws_seat_pointer_leave(struct aws_server *server)
 {
 	server->pointer_inside = 0;
 	pointer_set_focus(server, NULL);
+	/* **AND THE FRAME THAT TAKES THE CURSOR AWAY.** A compositor-owned pointer is part of the picture, so an output
+	 * with no host pointer keeps its last frame — arrow and all — until something composites again. Leaving the
+	 * output is exactly such a thing. */
+	if (server->backend.owns_cursor) {
+		aws_server_schedule_render(server);
+	}
 }
 
 void aws_seat_pointer_motion(struct aws_server *server, int x, int y)
@@ -531,6 +539,13 @@ void aws_seat_pointer_motion(struct aws_server *server, int x, int y)
 
 	server->pointer_x = x;
 	server->pointer_y = y;
+	/* **A CURSOR THE COMPOSITOR DRAWS ONLY MOVES WHEN A FRAME COMPOSITES.** On a backend with a host pointer the
+	 * person's own cursor moves with the device and no frame is needed; on DRM the arrow is pixels, and a motion with
+	 * no redraw is a pointer that appears stuck until a client happens to repaint. Scheduled BEFORE the focus test
+	 * below, because motion over an empty desktop has no surface to tell and is exactly the case that needed this. */
+	if (server->backend.owns_cursor) {
+		aws_server_schedule_render(server);
+	}
 	if (!server->pointer_inside) {
 		return;
 	}

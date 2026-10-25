@@ -782,6 +782,10 @@ static void cpu_draw(struct aws_server *server)
 		backend->pixels[i] = AWS_BACKGROUND;
 	}
 	aws_output_walk(server, cpu_emit);
+	/* **AND THE POINTER IS OVER EVERYTHING, INCLUDING THE MENU BAR.** It is drawn last because that is what "above"
+	 * means here: the walk has painted the desktop, the windows and the furniture in their own order, and a cursor is
+	 * the one thing with no level. A backend with a host pointer of its own draws nothing (see `backend.owns_cursor`). */
+	aws_cursor_draw_cpu(server);
 }
 
 int aws_renderer_cpu_create(struct aws_server *server)

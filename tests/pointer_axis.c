@@ -38,7 +38,9 @@
  * `aws_surface_at` is the hit test over the stacking order — an input to this test rather than a  *
  * fact to discover. `aws_window_send_pointer_global` and `aws_shell_window_list_changed` are     *
  * calls the seat makes on paths this test does not drive, but the symbols have to exist for    *
- * `seat.c` to link.                                                                             *
+ * `seat.c` to link. `aws_server_schedule_render` is the frame the seat asks for when the        *
+ * COMPOSITOR draws the pointer (a DRM fact, `backend.owns_cursor`), and it is the same kind of   *
+ * call: sets a flag on a server this file does not own.                                         *
  * ============================================================================================ */
 static struct aws_surface *s_under_pointer;
 
@@ -58,6 +60,11 @@ void aws_window_send_pointer_global(struct aws_surface *surface, int x, int y)
 }
 
 void aws_shell_window_list_changed(struct aws_server *server)
+{
+	(void)server;
+}
+
+void aws_server_schedule_render(struct aws_server *server)
 {
 	(void)server;
 }

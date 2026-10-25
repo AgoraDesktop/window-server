@@ -231,12 +231,20 @@ static int drm_atomic_modeset(struct aws_server *server, int on, uint32_t fb_id)
 		drm_set_plane(server, req, fb_id);
 	} else {
 		/* TURNING IT OFF, AND IN THE REVERSE OF THE ORDER THAT SET IT UP: the plane lets go of the framebuffer
-		 * and the CRTC, then the CRTC goes inactive, then the connector lets go of the CRTC. Clearing ACTIVE
-		 * while the plane still holds the framebuffer is EINVAL — measured, on every exit, before this order
-		 * was right. */
+		 * and the CRTC, then the CRTC goes inactive, then the connector lets go of the CRTC.
+		 *
+		 * **AND THE MODE GOES WITH THE ACTIVE BIT, WHICH IS THE WHOLE OF AN EINVAL THIS USED TO LOG.** The kernel's
+		 * atomic core keeps one invariant between a CRTC's `enable` and its mode: `enable` is set by MODE_ID and
+		 * cleared by MODE_ID = 0 (drm_atomic_set_mode_for_crtc), and a CRTC with no connectors must have
+		 * `enable == false`. Clearing the connector's CRTC_ID and the CRTC's ACTIVE made the connector mask empty
+		 * while the mode blob was still set, so drm_atomic_helper_check_modeset refused the commit (and the core's
+		 * "disabled with mode blob" WARN_ON fired). MEASURED on a real DRM session: every ordinary SIGTERM logged
+		 * "the atomic teardown was refused: Invalid argument". Clearing MODE_ID is what makes the teardown a
+		 * disable rather than an enabled CRTC with nothing attached. */
 		drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", 0);
 		drm_atomic_set(drm->fd, req, drm->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_ID", 0);
 		drm_atomic_set(drm->fd, req, drm->crtc_id, DRM_MODE_OBJECT_CRTC, "ACTIVE", 0);
+		drm_atomic_set(drm->fd, req, drm->crtc_id, DRM_MODE_OBJECT_CRTC, "MODE_ID", 0);
 		drm_atomic_set(drm->fd, req, drm->connector_id, DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID", 0);
 	}
 	ret = drmModeAtomicCommit(drm->fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
@@ -954,6 +962,9 @@ int aws_backend_drm_start(struct aws_server *server)
 	drmModeFreeConnector(connector);
 
 	server->backend.name = "drm";
+	/* **THE POINTER IS OURS ON A SCANNER.** There is no host window here whose pointer the person can see, so the
+	 * compositor composites the arrow in cursor.c over every frame — on both renderers. */
+	server->backend.owns_cursor = 1;
 	server->backend.data = drm;
 	server->backend.pause = drm_pause;
 	server->backend.resume = drm_resume;

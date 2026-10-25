@@ -334,6 +334,13 @@ every step before it; the committed CPU modeset has also been run and given back
 about what the panel showed. The GBM commit is the one path this machine cannot prove — its GBM refuses the
 surface (see above).
 
+**AND THE TEARDOWN CLEARS THE MODE, WHICH IS A KERNEL INVARIANT AND NOT A PREFERENCE.** A real DRM session logged
+`the atomic teardown was refused: Invalid argument` on every ordinary SIGTERM. The cause is in the atomic core: a
+CRTC's `enable` is set by `MODE_ID` and cleared only by `MODE_ID = 0` (`drm_atomic_set_mode_for_crtc`), and a CRTC
+with no connectors must have `enable == false`. Clearing the connector's `CRTC_ID` and the CRTC's `ACTIVE` emptied the
+connector mask while the mode blob stayed, so `drm_atomic_helper_check_modeset` refused the commit. The teardown now
+sends `MODE_ID = 0` with the rest, which is what makes it a disable rather than an enabled CRTC with nothing attached.
+
 **AND THE CLAIM BELOW WAS MADE ONCE WITHOUT BEING CHECKED, AND WAS WRONG** — the numbers are what the
 COMPOSITOR did, not evidence that light came out of a monitor, which is a thing only a person looking at the
 screen can say:
@@ -499,8 +506,11 @@ that is written down is a decision and one that is not is a surprise.
   are mutually exclusive — both feed one seat, and a device read twice is a pointer that moves at double speed
   — and the default is libinput when it can start, the nested window otherwise. See below for the one thing
   that still blocks libinput on this machine.
-- **No cursor.** `wl_pointer.set_cursor` is accepted and does nothing: a nested output's pointer is the HOST's,
-  and a second cursor drawn into the window is one the person did not ask for.
+- **The pointer is drawn where there is no host to draw it.** `wl_pointer.set_cursor` is still accepted and does
+  nothing — a client's cursor surface is not implemented. What ships is a **fallback arrow the compositor owns**
+  (`src/cursor.c`): rasterized for the output's own (fractional) scale, composited above every surface, and drawn only
+  on a backend that has no host pointer of its own. So a DRM output has a visible pointer from the first frame, a
+  nested X11 output keeps the host's and does not draw a second one, and a headless screenshot stays cursor-free.
 - **No drawing of its own.** The menu bar, the status area and the window frames are the window server's to
   draw in a Mac-like desktop, and this owns none of them yet — which is the honest reason there is no drawing
   library in the build. The compositing is a row copy. **Who owns which pixels, and why `xdg-shell` cannot

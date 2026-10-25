@@ -36,6 +36,10 @@
  *     owns no more than that: the windows are the applications'. It still takes no drawing library, because a
  *     filled strip is a row loop. **ONLY THE STRIP IS FURNITURE**: everything IN it is a client's, and a server
  *     that drew an item would be making the mistake the dock rule exists to prevent. See DESIGN.md.
+ *
+ *     **AND THE POINTER, WHERE THERE IS NO HOST TO DRAW IT.** A nested backend's window already shows the host's
+ *     cursor; a DRM output has only these pixels, so `cursor.c` composites a fallback arrow above every surface and
+ *     `backend.owns_cursor` says which backends need it. A client's cursor surface is still not implemented.
  *   - NO POLICY ABOUT WINDOWS, AND EXACTLY ONE ABOUT THE SCREEN. Placement, stacking and sizing are the
  *     APPLICATION's: no cascade, no tiling, and a frame is acted on as given. What the server does decide is
  *     what the SCREEN reserves for the furniture it owns — a different kind of question, because an application
@@ -53,6 +57,7 @@
 
 #include <wayland-server.h>
 
+#include "cursor.h"
 #include "osdetect.h"
 #include "systemicon.h"
 
@@ -246,6 +251,13 @@ struct aws_backend {
 	/* GIVE BACK WHATEVER `start` TOOK. */
 	void (*stop)(struct aws_server *server);
 
+	/* **WHETHER THE POINTER IS THE COMPOSITOR'S TO DRAW.** A backend that shows its output inside somebody else's
+	 * window system — the nested X11 one — already has a host pointer on the glass, and a second arrow composited
+	 * into the window would be a pointer the person did not ask for. A DRM output has nothing of the sort: the only
+	 * pixels are the ones this process scans out, so there the compositor draws the cursor itself (see cursor.c).
+	 * Headless leaves it zero, which is also why its screenshots stay cursor-free. */
+	int owns_cursor;
+
 	/* **NONZERO WHILE THE BACKEND CANNOT ACCEPT A FRAME** — the display has not taken the last one yet. A RENDER
 	 * LOOP ASKS THIS BEFORE IT DRAWS, because drawing into a buffer the display may still be reading is the tear
 	 * a double-buffered backend exists to avoid. NULL means always ready. */
@@ -435,6 +447,10 @@ struct aws_server {
 	int pointer_x;				/* the pointer, in OUTPUT coordinates */
 	int pointer_y;
 	int pointer_inside;			/* the pointer is inside the output at all */
+	/* **THE FALLBACK CURSOR'S RASTER, KEPT FOR THE SCALE IT WAS MADE AT.** A DRM output has no host pointer, so the
+	 * arrow in cursor.c is composited over every frame; the image is rasterized once per scale and reused, because
+	 * the shape never changes and the raster is the only thing about a cursor that costs anything. */
+	struct aws_cursor cursor;
 	/* AN AXIS HAS BEEN SENT SINCE THE LAST FRAME, which is what makes `axis_source` once per frame rather than
 	 * once per axis — the protocol asks for it in the frame the axis events belong to, and repeating it for the
 	 * second axis of one gesture would be a lie about how many gestures there were. */

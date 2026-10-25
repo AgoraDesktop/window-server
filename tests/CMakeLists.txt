@@ -70,6 +70,15 @@ target_link_libraries(window-server-seat-routing PRIVATE
   PkgConfig::XKBCOMMON)
 add_test(NAME window-server-seat-routing COMMAND window-server-seat-routing)
 
+# **AND THE POINTER THE COMPOSITOR DRAWS ITSELF, WHICH IS WHAT A DRM OUTPUT HAS AND NOTHING ELSE DOES.** The arrow's
+# raster and its placement are arithmetic about device pixels — a rounded box, a hotspot, a clipped blend — so they are
+# asked directly here; a headless session deliberately draws no cursor, which is why no screenshot could make the
+# claim. `../src/cursor.c` is compiled in as it ships.
+add_executable(window-server-cursor cursor.c "${CMAKE_CURRENT_SOURCE_DIR}/../src/cursor.c")
+target_include_directories(window-server-cursor PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(window-server-cursor PRIVATE PkgConfig::WAYLAND_SERVER)
+add_test(NAME window-server-cursor COMMAND window-server-cursor)
+
 # **AND THE SYSTEM MENU'S IDENTITY AND MARKS, AS A UNIT TEST.** The detection fixtures, the resolver and every
 # coverage grid are checked without a display. `osdetect.c`, `systemicon.c`, the generated table and the generated
 # vector data are compiled in as they ship. No Wayland library is needed because nothing here asks the server or the

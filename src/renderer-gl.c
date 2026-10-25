@@ -119,6 +119,22 @@ static const char *const texture_source =
 	"    gl_FragColor = vec4(rgb, a * cover);\n"
 	"}\n";
 
+/* **THE CURSOR IS THE ONLY QUAD WITH NO ROUNDED RECTANGLE IN IT.** Everything else this renderer draws is a
+ * surface or furniture with a corner rule; the pointer's shape is its own antialiased alpha, so the shader samples the
+ * texture and nothing else. The channel swap is the same one the window shader makes: the image is 0xAARRGGBB in
+ * memory, which is BGRA on the wire, so `.bgr` puts red back in `.r`. */
+static const char *const cursor_source =
+	"precision mediump float;\n"
+	"varying vec2 v_pos;\n"
+	"uniform sampler2D u_tex;\n"
+	"uniform vec4 u_rect;\n"
+	"uniform vec2 u_uv_div;\n"
+	"void main() {\n"
+	"    vec4 t = texture2D(u_tex, (v_pos - u_rect.xy) / u_uv_div);\n"
+	"    if (t.a <= 0.0) { discard; }\n"
+	"    gl_FragColor = vec4(t.bgr, t.a);\n"
+	"}\n";
+
 /* **AND THE SHADOW IS THE SAME DISTANCE, WITH THE SAME FALLOFF, MEASURED FROM THE SAME PLACE.** `renderer-cpu.c`
  * computes it from the pixel's INDEX (`row`, `column`) and its integer half-size, not from its centre — so the
  * shader floors `v_pos` back to that index before measuring. That half-pixel is the difference between a shadow
@@ -243,8 +259,13 @@ struct gl_state {
 	struct gl_program texture;
 	struct gl_program texture_external;
 	struct gl_program shadow;
+	struct gl_program cursor;
 
 	GLuint client_texture;		/* the surface being drawn, re-uploaded per draw */
+	/* **THE POINTER'S OWN TEXTURE, UPLOADED WHEN THE SCALE CHANGES.** The arrow's raster is a fact about the output's
+	 * scale, not about the frame, so it is uploaded once per scale rather than sixty times a second. */
+	GLuint cursor_texture;
+	double cursor_scale;		/* the scale in `cursor_texture`; 0 when nothing has been uploaded */
 	GLuint coverage_texture;	/* the System menu's mark, re-uploaded per bar draw */
 	unsigned char *scratch;		/* rows repacked when a shm stride is not w * 4 */
 	size_t scratch_size;
@@ -1062,6 +1083,30 @@ static void gl_draw(struct aws_server *server)
 	glClearColor(r, g, b, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT);
 	aws_output_walk(server, gl_emit);
+	/* **THE POINTER IS OVER EVERYTHING** — the same last act as the CPU renderer's, with the placement and the
+	 * clipping done by `aws_cursor_image`'s own arithmetic rather than by a second copy of it here. */
+	{
+		const struct aws_cursor *cursor = aws_cursor_image(server);
+
+		if (cursor != NULL) {
+			float x = gl_round((double)server->pointer_x * server->backend.scale) -
+				(float)cursor->hotspot_x;
+			float y = gl_round((double)server->pointer_y * server->backend.scale) -
+				(float)cursor->hotspot_y;
+
+			if (gl->cursor_scale != cursor->scale) {
+				glBindTexture(GL_TEXTURE_2D, gl->cursor_texture);
+				glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, cursor->width, cursor->height, 0, GL_RGBA,
+					     GL_UNSIGNED_BYTE, cursor->pixels);
+				gl->cursor_scale = cursor->scale;
+			}
+			gl_textured(gl, &gl->cursor, GL_TEXTURE_2D, gl->cursor_texture, x, y,
+				    (float)cursor->width, (float)cursor->height,
+				    (float)cursor->width, (float)cursor->height,
+				    0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0);
+		}
+	}
 	/* **A SCREENSHOT'S BUFFER IS MADE WHEN IT IS FIRST WANTED, NOT WHEN THE CONTEXT IS.** `--screenshot` is parsed
 	 * after the server (and so after this renderer) is created, so a buffer allocated at init time would be one
 	 * nobody asked for; and the readback is a debug path, so three and a half megabytes are not worth holding for
@@ -1436,13 +1481,15 @@ int aws_renderer_gl_create(struct aws_server *server)
 
 	if (link_program(&gl->solid, solid_source) != 0 ||
 	    link_program(&gl->texture, texture_source) != 0 ||
-	    link_program(&gl->shadow, shadow_source) != 0) {
+	    link_program(&gl->shadow, shadow_source) != 0 ||
+	    link_program(&gl->cursor, cursor_source) != 0) {
 		goto fail;
 	}
 	if (gl->has_external && link_program(&gl->texture_external, texture_external_source) != 0) {
 		goto fail;
 	}
-	if (make_texture(gl, &gl->client_texture) != 0 || make_texture(gl, &gl->coverage_texture) != 0) {
+	if (make_texture(gl, &gl->client_texture) != 0 || make_texture(gl, &gl->coverage_texture) != 0 ||
+	    make_texture(gl, &gl->cursor_texture) != 0) {
 		goto fail;
 	}
 	glDisable(GL_DEPTH_TEST);
