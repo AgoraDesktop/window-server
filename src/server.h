@@ -65,11 +65,19 @@
 #include "systemicon.h"
 
 struct aws_server;
+/* **AND A REGION THE HEADER DOES NOT NEED TO SEE.** A frame's damage is a `pixman_region32_t`, but only four .c files
+ * ever touch one — the region's arithmetic (`damage.c`), the frame (`output.c`) and the two renderers — and those link
+ * pixman. Declaring it here as a struct tag keeps the type in the signature without making every test that includes this
+ * header depend on pixman's include path; `pixman_region32_t` IS `struct pixman_region32`, so the two spellings are one
+ * type and no cast is needed anywhere. */
+struct pixman_region32;
 struct gbm_device;
 struct gbm_surface;
 struct gbm_bo;
 
 /* **A RECTANGLE IN DEVICE PIXELS, TOP-DOWN FROM THE OUTPUT'S TOP-LEFT, AND IT IS THE ONLY SPACE BOTH RENDERERS SHARE.**
+ * It is what ONE pass of a renderer paints: the frame's damage is a `pixman_region32_t` (several of these), and each
+ * renderer walks the region's rectangles one at a time, so a writer only ever has to clip to a box.
  * `x`/`y` are the framebuffer's own coordinates — the ones `backend->pixels` is indexed by and the ones the menu bar's
  * fill uses — NOT the logical coordinates a window's frame, a level and a hit test speak. A box is EMPTY when its width
  * or height is zero, which is how "nothing to paint" is said without a second flag, and an empty box is the identity
@@ -143,11 +151,12 @@ struct aws_surface {
 	/* ---- DAMAGE: WHAT THE CLIENT SAYS IT REPAINTED, IN BUFFER PIXELS, TOP-DOWN. ---- */
 	/* **THE CLIENT NAMES ITS RECTANGLES AND THE COMPOSITOR PAINTS ONLY THOSE.** `wl_surface.damage_buffer` is already in
 	 * buffer pixels; `wl_surface.damage` is surface-local (logical) and is multiplied by the client's scale on the way
-	 * in. `damage` is the union of every rectangle recorded since the last commit, `damage_input` says one arrived, and
-	 * a commit turns either them or (when it recorded none and attached a buffer) THE WHOLE BUFFER into `damage_valid`,
-	 * which one composite consumes. See `damage.c` for the translation to device pixels and `DAMAGE-PLAN.md` for why the
-	 * rectangles are one bounding box and not a region. */
-	struct aws_box damage;		/* accumulated since the last composite, in BUFFER pixels */
+	 * in. `damage` is a REGION of every rectangle recorded since the last commit — a client that damages two strips has
+	 * two rectangles, and a bounding box would repaint the gap between them — and it is a pointer because the type
+	 * belongs to pixman, which this header deliberately does not make every including test depend on. `damage_input`
+	 * says a rectangle arrived; a commit turns the region or (when it recorded none and attached a buffer) THE WHOLE
+	 * BUFFER into `damage_valid`, which one composite consumes. See `damage.c`. */
+	struct pixman_region32 *damage;	/* allocated with the surface; in BUFFER pixels */
 	int damage_input;		/* a rectangle arrived since the last commit */
 	int damage_valid;		/* a commit is waiting for a composite to consume its damage */
 	int damage_whole;		/* that commit damaged nothing, so it means THE WHOLE BUFFER */
@@ -413,11 +422,12 @@ struct aws_dmabuf_buffer {
 struct aws_renderer {
 	const char *name;
 	/* EVERY FRAME, ONCE. Called from `aws_output_render`; the buffer release that follows is the server's. */
-	/* **ONE FRAME, AND WHICH PART OF THE OUTPUT IT IS FOR.** `box` is the rectangle to repaint in DEVICE pixels,
-	 * top-down — or NULL for the whole output, which is what a full redraw is. A renderer that cannot honour a box
-	 * (the GL one on a surface whose swap does not preserve its contents) draws the whole frame instead; it must never
-	 * draw LESS than the box, because a pixel left unpainted is a stale pixel and nobody sees it until much later. */
-	void (*draw)(struct aws_server *server, const struct aws_box *box);
+	/* **ONE FRAME, AND WHICH PART OF THE OUTPUT IT IS FOR.** `damage` is the region to repaint, in DEVICE pixels,
+	 * top-down — or NULL for the whole output, which is what a full redraw is. A renderer walks the region's
+	 * rectangles and paints each one as its own pass: the scene is identical every time, so the only thing a region
+	 * buys over one bounding box is that the gap between two disjoint strips is not repainted. A pixel left unpainted
+	 * is a stale pixel and nobody sees it until much later, so a renderer must paint AT LEAST what it is given. */
+	void (*draw)(struct aws_server *server, const struct pixman_region32 *damage);
 	void (*stop)(struct aws_server *server);
 	/* **THE GPU BUFFERS THIS RENDERER CAN TAKE, AND HOW IT TAKES THEM.** A renderer that fills `formats` and answers a
 	 * positive count is one that can sample a client's dma-buf, and only then is `zwp_linux_dmabuf_v1` advertised at
@@ -559,7 +569,7 @@ struct aws_server {
 	struct xkb_state *xkb_state;
 
 	int render_pending;
-	/* ---- THE FRAME'S BOX: WHAT THE NEXT FRAME HAS TO REPAINT, AND WHY IT MIGHT BE EVERYTHING ---- */
+	/* ---- THE FRAME'S DAMAGE: WHAT THE NEXT FRAME HAS TO REPAINT, AND WHY IT MIGHT BE EVERYTHING ---- */
 	/* **A FRAME IS "THIS RECTANGLE, PLEASE", UNLESS SOMETHING THAT IS NOT A CLIENT COMMIT CHANGED.** `damage`
 	 * accumulates rectangles the COMPOSITOR knows about (the surfaces' own are collected from their ledgers by
 	 * `aws_damage_frame_begin`); `damage_full` overrides it with the whole output and `damage_reason` names the trigger
@@ -567,7 +577,7 @@ struct aws_server {
 	 * The safety valve is the default: `aws_server_schedule_render` — what every non-client change calls — marks the
 	 * frame FULL, and only a client commit that recorded damage narrows it. A missing invalidation would be a stale
 	 * pixel nobody notices; a spurious one is only slow. */
-	struct aws_box damage;
+	struct aws_box damage;		/* the COMPOSITOR's own rectangles (the pointer's sweep) since the last frame */
 	int damage_full;
 	const char *damage_reason;
 	int frames;
@@ -621,6 +631,10 @@ void aws_output_init(struct aws_server *server);
  * callbacks are still completed in that case, because they are a promise and a client that gets none never draws
  * again (see `DAMAGE-PLAN.md` §6.1). Answers 0 when nothing was composited, which is what the loop counts frames by. */
 int aws_output_render(struct aws_server *server);
+/* **THE REGION A FRAME PAINTS IS A REGION, NOT A BOX.** A client that damages two strips has two rectangles, and so
+ * does a moved pointer (where it was, where it is); a bounding box would repaint everything between them. The
+ * rectangles are intersected against the output before the renderer ever sees one, so a rectangle outside the screen
+ * is not a rectangle any writer has to test for. */
 /* **THE COMPOSITE ORDER, IN ONE PLACE.** `emit` is called with a NULL surface when the menu bar is due, and once
  * for each surface that is actually on the screen, in the order they are painted — background clears are the
  * renderer's, and the buffer release after the walk is `aws_output_render`'s. A menu window's `frame_done` belongs
@@ -636,10 +650,22 @@ void aws_output_walk(struct aws_server *server, aws_output_emit_fn emit, const s
 /* **AND THE CALLBACKS A SKIPPED FRAME STILL OWES.** A frame that paints nothing completes the callbacks of every
  * surface that is really on the screen, which is the same set the walk would have visited. */
 void aws_output_complete_frames(struct aws_server *server);
-/* **WHAT THE NEXT FRAME MUST PAINT, COLLECTED AND CONSUMED.** Answers how many surfaces contributed; `box` is the
- * union in device pixels, `full` overrides it, and `reason` names the trigger behind a full frame. Called once per
- * frame by `aws_output_render`, and `/nothing else/` — the ledgers it clears are only meaningful across one frame. */
-int aws_damage_frame_begin(struct aws_server *server, struct aws_box *box, int *full, const char **reason);
+/* **WHAT THE NEXT FRAME MUST PAINT, COLLECTED AND CONSUMED.** Answers how many surfaces contributed; `region` is
+ * INITIALISED here (the caller destoys it) and holds the union in device pixels, `full` overrides it, and `reason`
+ * names the trigger behind a full frame. Called once per frame by `aws_output_render`, and `/nothing else/` — the
+ * ledgers it clears are only meaningful across one frame. */
+int aws_damage_frame_begin(struct aws_server *server, struct pixman_region32 *region, int *full,
+			   const char **reason);
+/* **A SURFACE'S OWN DAMAGE REGION, WHICH `surface.c` OWNS AND NEVER TOUCHES DIRECTLY.** The type is pixman's and the
+ * arithmetic is `damage.c`'s, so these three doors are the whole of what a surface does with it: make one, record a
+ * rectangle (in BUFFER pixels), and give it back. */
+struct pixman_region32 *aws_damage_region_new(void);
+void aws_damage_region_free(struct pixman_region32 *region);
+void aws_damage_region_add(struct pixman_region32 *region, int x, int y, int width, int height);
+/* **AND THE COMPOSITOR'S OWN RECTANGLES.** The pointer is the case: moving it means repainting where it WAS as well
+ * as where it is, and neither is a rectangle any client damaged. They accumulate in `server->damage` until a frame
+ * consumes them — one box for the sweep, because consecutive positions overlap anyway. */
+void aws_damage_box(struct aws_server *server, const struct aws_box *box);
 /* **THE TRIGGERS.** `aws_damage_full` is what anything that is not a client's own pixels calls: a window moved, a
  * menu bar title changed, a scale changed, the pointer moved on an output that draws its own cursor. The reason string
  * is kept for `WINDOW_SERVER_DAMAGE_DIAG=1`, which is the only way to tell a missed invalidation from a slow frame. */

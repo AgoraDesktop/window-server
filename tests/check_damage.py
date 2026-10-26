@@ -50,8 +50,11 @@ def main():
 
     im = Image.open(path).convert("RGB")
     px = im.load()
-    # THE STRIP IS IN BUFFER PIXELS AND THE BUFFER IS PLACED 1:1, so the rows are the window's own offset plus these.
+    # THE STRIPS ARE IN BUFFER PIXELS AND THE BUFFER IS PLACED 1:1, so the rows are the window's own offset plus these.
+    # The second one is the same numbers the client defaults to, and the two are DISJOINT on purpose: a bounding box
+    # around both would paint the gap, and the gap is poisoned.
     STRIP_Y0, STRIP_Y1 = 40, 60
+    STRIP2_Y0, STRIP2_Y1 = 120, 140
     checks = []
 
     def add(name, ok):
@@ -77,6 +80,19 @@ def main():
         add("the row above the strip is NOT the strip (the box is the client's rows, not the window's)",
             px[at[0] + 10, at[1] + STRIP_Y0 - 1] == base)
         add("and the row below is not either", px[at[0] + 10, at[1] + STRIP_Y1] == base)
+    elif mode == "strips":
+        # **TWO DISJOINT STRIPS IN ONE COMMIT, WHICH IS THE REGION'S WHOLE REASON.** Both strips are green, the gap
+        # between them is still the base colour, and no magenta is anywhere — a compositor that kept one bounding box
+        # instead of a region would paint the gap from the poisoned buffer.
+        add("the window is at its frame, in the base colour above the first strip",
+            px[at[0] + 10, at[1] + 10] == base)
+        add("both strips the commit named are the strip colour",
+            px[at[0] + 10, at[1] + STRIP_Y0 + 5] == strip and
+            px[at[0] + 10, at[1] + STRIP2_Y0 + 5] == strip and
+            px[at[0] + width - 10, at[1] + STRIP2_Y1 - 5] == strip)
+        add("and THE GAP BETWEEN THEM is the base colour — two boxes, not one bounding box",
+            all(px[at[0] + 10, at[1] + y] == base for y in range(STRIP_Y1 + 2, STRIP2_Y0 - 2, 4)))
+        add("nor did the strip's box reach below the second strip", px[at[0] + 10, at[1] + STRIP2_Y1 + 5] == base)
     elif mode == "whole":
         # **THE WHOLE-BUFFER RULE: a commit with a buffer and NO damage means every pixel.** The third picture covers the
         # poison and the strip, so the window is one colour from corner to corner.

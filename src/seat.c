@@ -520,17 +520,44 @@ void aws_seat_pointer_enter(struct aws_server *server, int x, int y)
 	aws_seat_pointer_motion(server, x, y);
 }
 
+/* **A MOVING POINTER COSTS A POINTER, NOT A SCREEN.** The pixels where the pointer WAS are not a rectangle any client
+ * damaged, so a frame that repaints only what the clients named would leave a trail of arrows behind it; the answer is
+ * the union of the two boxes the pointer occupies — where it was and where it is — not the whole output. Both are asked
+ * of `aws_cursor_device_box`, which is the drawing path's own arithmetic, and both end up in the server's own damage
+ * ledger, which the next frame consumes (`aws_damage_box`). */
+static void pointer_damage(struct aws_server *server, int was_visible, int was_x, int was_y, int is_visible, int is_x,
+			   int is_y)
+{
+	struct aws_box box;
+	int damaged = 0;
+
+	if (!server->backend.owns_cursor) {
+		return;
+	}
+	if (was_visible && aws_cursor_device_box(server, was_x, was_y, &box)) {
+		aws_damage_box(server, &box);
+		damaged = 1;
+	}
+	if (is_visible && aws_cursor_device_box(server, is_x, is_y, &box)) {
+		aws_damage_box(server, &box);
+		damaged = 1;
+	}
+	if (damaged) {
+		aws_server_schedule_render_partial(server);
+	}
+}
+
 void aws_seat_pointer_leave(struct aws_server *server)
 {
+	int was_x = server->pointer_x;
+	int was_y = server->pointer_y;
+	int was_inside = server->pointer_inside;
+
 	server->pointer_inside = 0;
+	/* **THE FRAME THAT TAKES THE CURSOR AWAY.** A compositor-owned pointer is part of the picture, so the pixels it
+	 * occupied have to be painted over — and nothing else does. */
+	pointer_damage(server, was_inside, was_x, was_y, 0, was_x, was_y);
 	pointer_set_focus(server, NULL);
-	/* **AND THE FRAME THAT TAKES THE CURSOR AWAY.** A compositor-owned pointer is part of the picture, so an output
-	 * with no host pointer keeps its last frame — arrow and all — until something composites again. Leaving the
-	 * output is exactly such a thing. */
-	if (server->backend.owns_cursor) {
-		aws_damage_full(server, "the pointer left the output");
-		aws_server_schedule_render(server);
-	}
 }
 
 /* **A CLIENT THAT IS NOT READING MUST NOT BE GIVEN MORE EVENTS.** libwayland keeps a 4 KiB outgoing buffer per
@@ -568,6 +595,9 @@ void aws_seat_pointer_motion(struct aws_server *server, int x, int y)
 	struct aws_surface *surface;
 	struct aws_pointer *pointer;
 	wl_fixed_t sx, sy;
+	int was_x = server->pointer_x;
+	int was_y = server->pointer_y;
+	int was_inside = server->pointer_inside;
 
 	server->pointer_x = x;
 	server->pointer_y = y;
@@ -575,13 +605,10 @@ void aws_seat_pointer_motion(struct aws_server *server, int x, int y)
 	 * person's own cursor moves with the device and no frame is needed; on DRM the arrow is pixels, and a motion with
 	 * no redraw is a pointer that appears stuck until a client happens to repaint. Scheduled BEFORE the focus test
 	 * below, because motion over an empty desktop has no surface to tell and is exactly the case that needed this. */
-	if (server->backend.owns_cursor) {
-		/* **THE OLD RECTANGLE IS THE TRAP.** A pointer that moves has to have the pixels where it WAS repainted from
-		 * whatever is underneath, and those pixels are not a rectangle this frame's surfaces damaged — so until the
-		 * seat remembers its own previous box (DAMAGE-PLAN.md §6.2, step 5), a motion is a full frame. */
-		aws_damage_full(server, "the pointer moved");
-		aws_server_schedule_render(server);
-	}
+	/* **THE OLD RECTANGLE IS THE TRAP, AND THE SEAT NOW REMEMBERS IT.** A pointer that moves has to have the pixels where
+	 * it WAS repainted from whatever is underneath, and those pixels are not a rectangle this frame's surfaces damaged —
+	 * so both boxes go into the frame, and a motion is a pointer-sized frame rather than a screen-sized one. */
+	pointer_damage(server, was_inside, was_x, was_y, 1, x, y);
 	if (!server->pointer_inside) {
 		return;
 	}

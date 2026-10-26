@@ -280,22 +280,51 @@ void aws_cursor_draw_cpu(struct aws_server *server)
 	aws_cursor_draw_cpu_box(server, NULL);
 }
 
+int aws_cursor_device_box(struct aws_server *server, int x, int y, struct aws_box *box)
+{
+	struct aws_backend *backend;
+	int left, top;
+	double scale;
+
+	if (server == NULL || box == NULL || !server->backend.owns_cursor) {
+		return 0;
+	}
+	/* **THE IMAGE, NOT "IS IT VISIBLE"** — the seat asks this for the position the pointer is LEAVING, where
+	 * `pointer_inside` is already false and the image is still exactly what has to be painted over. */
+	aws_cursor_ensure(server);
+	if (server->cursor.pixels == NULL) {
+		return 0;
+	}
+	backend = &server->backend;
+	scale = backend->scale > 0.0 ? backend->scale : 1.0;
+	left = cursor_device_edge((double)x * scale) - server->cursor.hotspot_x;
+	top = cursor_device_edge((double)y * scale) - server->cursor.hotspot_y;
+	box->x = left;
+	box->y = top;
+	box->width = server->cursor.width;
+	box->height = server->cursor.height;
+	return 1;
+}
+
 void aws_cursor_draw_cpu_box(struct aws_server *server, const struct aws_box *box)
 {
 	struct aws_backend *backend = &server->backend;
 	const struct aws_cursor *cursor;
+	struct aws_box placed;
 	int left, top, row, column;
 
 	if (!aws_cursor_visible(server)) {
 		return;
 	}
-	aws_cursor_ensure(server);
-	cursor = &server->cursor;
-	if (cursor->pixels == NULL) {
+	/* **THE PLACEMENT IS `aws_cursor_device_box`'s, SO THE SEAT AND THE DRAW CANNOT DISAGREE.** The seat asks the same
+	 * question about the position the pointer is leaving, and a second copy of this arithmetic is how "the frame repaints
+	 * where the pointer was" would end up repainting a rectangle a hotspot away from it. */
+	if (!aws_cursor_device_box(server, server->pointer_x, server->pointer_y, &placed)) {
 		return;
 	}
-	left = cursor_device_edge((double)server->pointer_x * backend->scale) - cursor->hotspot_x;
-	top = cursor_device_edge((double)server->pointer_y * backend->scale) - cursor->hotspot_y;
+	cursor = &server->cursor;
+	left = placed.x;
+	top = placed.y;
 	/* CLIPPED TO THE OUTPUT PER PIXEL rather than by shrinking the loop: the pointer may be at the very edge, and a
 	 * cursor that vanished there would be a pointer that left before it did. */
 	for (row = 0; row < cursor->height; row++) {

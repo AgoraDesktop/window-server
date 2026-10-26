@@ -10,9 +10,11 @@ window and not the screen. `README.md` §2d is the reader-facing account; `src/d
 `tests/run-damage.sh` is the test, and it poisons what the client does not damage so that an over-paint is visible.
 
 The steps below were followed in order and each has a "done when"; the notes in place say where the landed code differs
-from the plan (the box is passed down the walk so a skipped surface still gets its callback; the GL renderer honours the
-box only where its swap preserves; the pointer's old rectangle is still a full frame). Read §6 before touching it — the
-traps there are the ones that would otherwise produce a session of "the window flickers and I do not know why".
+from the plan: the frame's damage is a REGION whose rectangles are each one pass (step 3's done-when, exceeded), the walk
+still visits every surface so a skipped one gets its callback, the pointer's old rectangle is a damaged box rather than a
+full frame (§6.2, solved), and the GL renderer keeps the frame in its own texture so a box means the same thing on every
+driver (step 4, solved). Read §6 before touching it — the traps there are the ones that would otherwise produce a
+session of "the window flickers and I do not know why".
 
 ---
 
@@ -85,10 +87,11 @@ level and once per renderer's clip, rather than twice in two hand-written copies
    client's `buffer_scale`. Out-of-bounds rectangles are clamped, and an EMPTY damage list on a commit that attached a
    buffer means "the whole buffer" (Wayland's own rule — a client that attaches and damages nothing is asking for a
    full repaint).
-2. **The compositor consumes damage as ONE BOUNDING BOX of output pixels per frame, not a region.** The AppKit caps
-   itself at sixteen rectangles and a terminal's are one strip; a region buys corner cases (disjoint strips) at the
-   cost of a clip that has to be honoured by every writer. If a profile later says otherwise, a `pixman_region32_t`
-   replaces the box without changing anything above it.
+2. **The compositor consumes damage as a REGION of output pixels per frame, and each of its rectangles is one pass.**
+   ~~One bounding box~~ was the first version and it is the one that landed first; the region replaced it once the box's
+   gap was measured — two 320x20 strips out of a 320x200 window cost 0.316 ms/frame as a box and 0.248-0.261 as two
+   rectangles, because a box repaints the gap. A writer still clips to ONE box: the renderers walk the region's
+   rectangles and paint each as its own pass of the same scene.
 3. **Anything that is not a client commit invalidates EVERYTHING** (see §4, step 2). This is the safety valve: the
    feature starts as "a commit can be partial, nothing else can", which is provable, and widens only when a case is
    measured and tested.
@@ -292,20 +295,27 @@ line of text.
 
 ---
 
-## 10. What the work did not close
+## 10. What the four open items became
 
-- **THE POINTER'S OLD RECTANGLE IS STILL A FULL FRAME.** A motion on an output that draws its own cursor calls
-  `aws_damage_full(server, "the pointer moved")`, because the pixels where the pointer WAS are not a rectangle any
-  client damaged — §6.2. The seat knows `pointer_x`/`pointer_y` and the cursor's device extent, so a union of the old and
-  new boxes plus the client damage is the next step; it needs the previous box remembered across the frame, and a
-  screenshot test that moves the pointer over a damaged strip.
-- **THE GL RENDERER PAINTS THE BOX ONLY WHERE ITS SWAP PRESERVES IT.** `EGL_BUFFER_PRESERVED` is asked for and READ
-  BACK; NVIDIA's EGL refuses it (MEASURED), and a GBM scanout buffer is a fresh allocation, so on those the GL path
-  composites the whole output. The CPU renderer — which is what the shipping DRM path uses when the GL context is the
-  CPU's — is where the measurement above comes from. Fixing this properly is a preserved back buffer or a second
-  surface, not a scissor.
-- **THE CLIENT STILL WIDENS ITS DAMAGE BY WHAT ITS OTHER BUFFER IS MISSING** (`_cg_paintMissing`), which is correct for
-  a two-buffer client and now costs more than it needs to on a compositor that keeps the screen. Narrowing it is a
-  `libagora-app` change with its own numbers — §8's criterion 5.
-- **A REGION, WHEN A PROFILE ASKS FOR ONE.** The box is decided in `damage.c` and nothing above it knows how the union is
-  kept, so a `pixman_region32_t` there is a local change: the renderers would then take a clip list instead of one box.
+- **THE POINTER'S OLD RECTANGLE IS NO LONGER A FULL FRAME.** `aws_cursor_device_box` is the drawing path's placement
+  arithmetic asked without drawing; the seat asks it for where the pointer was and where it is, unions both into
+  `server->damage`, and asks for a PARTIAL render. `tests/seat_routing.c` cases 10-12 pin it: a motion damages the two
+  boxes and NOT the screen, a leave damages exactly where the pointer was, and a backend with a host-drawn pointer
+  damages nothing (none of those pixels are this compositor's).
+- **THE GL RENDERER HONOURS THE BOX EVERYWHERE.** The scene is composed into a framebuffer object that survives a swap,
+  each damage rectangle is a scissor around the scene draws, and one full-viewport quad copies the texture to the back
+  buffer. The `EGL_BUFFER_PRESERVED` query — and the caveat that the DRM path always drew the whole output — is gone.
+  MEASURED while landing it: the shadow's own scissor used to *disable* the scissor test mid-pass, so the surface drawn
+  after a shadow painted its whole quad; the frame's box and the shadow's row limit are now one intersection and the
+  test's poison caught it.
+- **THE CLIENT NO LONGER WIDENS ITS DAMAGE BY WHAT THE OTHER BUFFER IS MISSING.** `-cg_drawFrameDirty:` still COPIES the
+  missing pixels (that is what keeps the buffer correct), but it no longer names them to the compositor when the copy
+  succeeded: the copy writes the pixels the screen already shows. When the copy is refused the region is painted and
+  reported with the rest, because then it did change. `libagora-app`'s README says so beside its damage section.
+- **A REGION, NOT A BOX.** See §3's second point; the gap between two strips is not painted, and the renderers were not
+  given a second clipping path to do it.
+
+What is left is a cost, not a gap: the GL renderer's copy is a full-viewport fill per frame, which is GPU work the CPU
+path does not do — a profile could skip it on a driver that preserves the back buffer, at the price of a second code
+path. And a region with many rectangles costs one scene walk each; the AppKit's cap is sixteen and a terminal's strips
+are one or two, so nothing here has needed more than four.

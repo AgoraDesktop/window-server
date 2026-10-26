@@ -227,18 +227,21 @@ the client's buffer scale on the way in; the composite happens in DEVICE pixels.
 every scale that is not exactly 1 (this machine's 1.332 is enough), so the translation lives once, in `src/damage.c`,
 and everything above it speaks the one space `struct aws_box` is documented in.
 
-**ONE BOUNDING BOX PER FRAME, NOT A REGION.** The AppKit caps itself at sixteen rectangles and a terminal's are one
-strip, so a box covers the case this exists for; a region would buy disjoint strips at the cost of a clip every writer
-has to honour. The box is the union of every surface's damage in device pixels, rounded OUTWARD at every edge — half a
-pixel of over-paint is a slower frame, half a pixel of under-paint is a stale line.
+**A REGION PER FRAME, AND EACH OF ITS RECTANGLES IS ONE WHOLE PASS.** The union is a `pixman_region32_t`: a client that
+damages two strips has two rectangles, a second surface brings its own, and the pointer's old place is a third — a
+bounding box around all of them would repaint the gap between them, which is the work this exists to avoid. A writer
+still only ever clips to ONE box, because each renderer walks the region's rectangles and paints each as its own pass of
+the same scene; edges round OUTWARD — half a pixel of over-paint is a slower frame, half a pixel of under-paint is a
+stale line. MEASURED, a client damaging two 320x20 strips out of a 320x200 window, 300 commits: **0.316 ms/frame** as
+one bounding box, **0.248-0.261 ms/frame** as two rectangles.
 
-**AND EVERYTHING THAT IS NOT A CLIENT COMMIT IS A FULL FRAME, WHICH IS THE SAFETY VALVE.** `aws_server_schedule_render`
-— what a window's frame, level, visibility or stacking calls, what a menu bar title change calls, what the pointer
-calls on an output that draws its own cursor, what a display resume calls — marks the frame FULL and names itself. Only
-`surface_commit`, which has the client's rectangles, narrows it, and only when the commit changed nothing else about the
-surface: a buffer of a different size, a different scale, a map or an unmap are each a full frame with their own name,
-and a commit that attaches a buffer and damages nothing means THE WHOLE BUFFER (Wayland's own rule). A missing
-invalidation would be a stale pixel nobody notices; a spurious one is only slow, so the default is the safe one.
+**AND EVERYTHING THAT IS NOT A CLIENT COMMIT OR A POINTER MOVE IS A FULL FRAME, WHICH IS THE SAFETY VALVE.**
+`aws_server_schedule_render` — what a window's frame, level, visibility or stacking calls, what a menu bar title change
+calls, what a display resume or an Expose calls — marks the frame FULL and names itself. Only `surface_commit` (which
+has the client's rectangles) and the seat's pointer boxes narrow it, and a commit narrows it only when it changed nothing
+else about the surface: a buffer of a different size, a different scale, a map or an unmap are each a full frame with
+their own name, and a commit that attaches a buffer and damages nothing means THE WHOLE BUFFER (Wayland's own rule). A
+missing invalidation would be a stale pixel nobody notices; a spurious one is only slow, so the default is the safe one.
 
 **A SKIPPED SURFACE STILL OWES ITS CALLBACK.** `wl_surface.frame` is a promise: a client that commits and waits for one
 never draws again if the compositor skips it along with its pixels. So the walk still visits every surface in order and
@@ -250,25 +253,35 @@ commits, against a build of the parent commit:**
 
 | what the client does | before | after |
 |---|---|---|
-| damages a 320x20 strip each frame | 1.617-1.791 ms/frame | **0.208-0.227 ms/frame** |
-| repaints and damages the whole window each frame | 1.520-1.783 ms/frame | **0.523-0.543 ms/frame** |
+| damages a 320x20 strip each frame | 1.835-1.898 ms/frame | **0.220-0.246 ms/frame** |
+| repaints and damages the whole window each frame | 1.783-1.866 ms/frame | **0.532-0.542 ms/frame** |
+| damages TWO 320x20 strips each frame | 1.752-1.870 ms/frame | **0.248-0.261 ms/frame** (0.316 as one box) |
 | idle after three frames | 3 composites, no busy loop | 3 composites, no busy loop |
 
 The second row is the one that surprises: a FULL-window commit names the window, not the screen, so the frame clears and
 paints 320x200 instead of 1280x720. And the first is the feature's whole point — a strip repaint costs a strip.
 
-**WHAT DOES NOT GET THE BOX YET, NAMED RATHER THAN LEFT TO BE FOUND.** The GL renderer paints the box only when its
-swap PRESERVES the pixels it did not touch (`EGL_BUFFER_PRESERVED`, asked for and then READ BACK, because a driver may
-refuse — MEASURED, NVIDIA's EGL answers `EGL_BUFFER_DESTROYED`). On such a driver, and on DRM/GBM where every scanout
-buffer is a fresh allocation, the GL renderer composites the WHOLE output every frame: correct, unchanged from before,
-and slow in exactly the way this work removes from the CPU path. The pointer's OLD rectangle is also still a full frame
-— moving it means repainting the pixels where it was, which is not a rectangle any client damaged.
+**AND THE POINTER IS A RECTANGLE LIKE ANY OTHER.** Moving it means repainting where it WAS as well as where it is, and
+neither is a rectangle any client damaged — so the seat asks `aws_cursor_device_box` for both positions (the same
+placement arithmetic the drawing path uses, asked without drawing), puts the union in the compositor's own ledger, and
+asks for a PARTIAL frame. A motion on a DRM output used to cost the whole screen; it now costs the swept box, and
+`tests/seat_routing.c` pins which boxes a motion and a leave name.
 
-`WINDOW_SERVER_DAMAGE_DIAG=1` prints one line per frame — `damage: 1 surface(s), box 320x20 at (100,120)` or
-`damage: FULL (a window moved)` — because a damage bug is invisible in a screenshot of a static window and obvious in
-a line of text. `tests/run-damage.sh` is the test: the client POISONS every pixel it does not damage, so a compositor
-that recomposites the whole window is a green strip on magenta, and the run's log must account for every full redraw.
-The three sessions are a partial commit, a commit that damages nothing (the whole-buffer rule), and a window move.
+**AND THE GL RENDERER KEEPS THE FRAME IN A TEXTURE, SO ITS SWAPS NO LONGER DECIDE WHAT A FRAME IS.** A swap may destroy
+the back buffer — EGL's default for a window, and every GBM scanout buffer by construction — so a damage box painted
+into the back buffer could not be trusted to sit on top of the last frame. The scene is composed into a framebuffer
+object that PERSISTS across swaps, each damage rectangle is a scissor around the scene draws, and one full-viewport quad
+copies the texture to the back buffer before the swap. The copy is a GPU fill; the scene draws are what the box saves.
+That also retired the "only where the driver preserves" caveat this section used to carry, and the GL damage case in
+`tests/run-damage.sh` now runs everywhere rather than skipping on a driver that refuses `EGL_BUFFER_PRESERVED`.
+
+`WINDOW_SERVER_DAMAGE_DIAG=1` prints one line per frame — `damage: 1 surface(s), 2 box(es): 320x20 at (100,120)
+320x20 at (100,200)` or `damage: FULL (a window moved)` — because a damage bug is invisible in a screenshot of a static
+window and obvious in a line of text. `tests/run-damage.sh` is the test: the client POISONS every pixel it does not
+damage, so a compositor that recomposites the whole window is a green strip on magenta, and the run's log must account
+for every full redraw. Four sessions: a partial commit, TWO DISJOINT STRIPS in one commit (a bounding box would paint
+the poisoned gap), a commit that damages nothing (the whole-buffer rule), and a window move — the last three on the CPU
+renderer and the strip on the GL one as well.
 
 ### 3. Input travels the whole way
 

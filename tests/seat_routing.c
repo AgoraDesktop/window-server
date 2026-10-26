@@ -74,6 +74,31 @@ void aws_server_schedule_render(struct aws_server *server)
 	(void)server;
 }
 
+/* **AND THE OTHER HALF OF THE POINTER'S FRAME: a render that may be partial, and the pointer's own box.** The seat is
+ * the caller here: a motion adds where the pointer was and where it is to the server's damage ledger and asks for a
+ * partial render. The real `aws_cursor_device_box` is `cursor.c`'s arithmetic (device placement and hotspot), which the
+ * cursor suite checks on its own; this stub is a 16x16 box at the pointer, so what is measured here is the SEAT's
+ * decision about which boxes a motion touches. */
+static int s_partial_renders;
+
+void aws_server_schedule_render_partial(struct aws_server *server)
+{
+	(void)server;
+	s_partial_renders++;
+}
+
+int aws_cursor_device_box(struct aws_server *server, int x, int y, struct aws_box *box)
+{
+	if (!server->backend.owns_cursor) {
+		return 0;
+	}
+	box->x = x;
+	box->y = y;
+	box->width = 16;
+	box->height = 16;
+	return 1;
+}
+
 static int s_failed;
 
 static void check(int ok, const char *what)
@@ -201,6 +226,45 @@ int main(void)
 	aws_seat_surface_gone(&server, &s_a);
 	check(server.pointer_capture == NULL && server.pointer_focus == NULL,
 	      "and a window DESTROYED mid-drag takes its capture with it");
+
+	/* 10. **A MOVING POINTER IS A POINTER-SIZED FRAME, NOT A SCREEN-SIZED ONE.** Both boxes — where it was and where it
+	 * is — are damaged, the frame is NOT marked full, and the render asked for is the partial one. The old box is the
+	 * trap this exists for: those pixels are not a rectangle any client damaged. */
+	reset(&server);
+	server.display = display;
+	server.backend.owns_cursor = 1;
+	s_under_pointer = NULL;
+	s_partial_renders = 0;
+	aws_seat_pointer_motion(&server, 140, 120);
+	check(server.damage.x == 100 && server.damage.y == 100 && server.damage.width == 56 &&
+		      server.damage.height == 36,
+	      "a motion damages BOTH the pointer's old box and its new one, as one union");
+	check(server.damage_full == 0, "and it is NOT a full redraw");
+	check(s_partial_renders == 1, "and it asks for a PARTIAL render, which is the only kind that can be clipped");
+
+	/* 11. **AND LEAVING THE OUTPUT REPAINTS WHERE THE POINTER WAS, WITH NO NEW BOX.** The pointer is gone, so only the
+	 * old rectangle is damaged — the frame after it leaves cannot be a no-op. */
+	reset(&server);
+	server.display = display;
+	server.backend.owns_cursor = 1;
+	s_under_pointer = NULL;
+	s_partial_renders = 0;
+	aws_seat_pointer_leave(&server);
+	check(server.damage.x == 100 && server.damage.y == 100 && server.damage.width == 16 &&
+		      server.damage.height == 16,
+	      "leaving the output damages exactly where the pointer was");
+	check(s_partial_renders == 1 && server.damage_full == 0, "as one partial frame, not a screen");
+
+	/* 12. **A BACKEND WITH A HOST POINTER DOES NOTHING AT ALL.** The host draws that arrow and no pixel of this
+	 * compositor's contains it, so a motion here must not damage anything. */
+	reset(&server);
+	server.display = display;
+	server.backend.owns_cursor = 0;
+	s_under_pointer = NULL;
+	s_partial_renders = 0;
+	aws_seat_pointer_motion(&server, 140, 120);
+	check(server.damage.width == 0 && server.damage.height == 0 && s_partial_renders == 0,
+	      "and a host-drawn pointer damages nothing, because none of its pixels are ours");
 
 	wl_display_destroy(display);
 	printf("seat_routing: %d case(s) failed\n", s_failed);

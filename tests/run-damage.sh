@@ -86,7 +86,7 @@ run_case() {
 
 	WAYLAND_DISPLAY="${SOCK}" "${CLIENT}" --width "${W}" --height "${H}" --x "${OLD_X}" --y "${OLD_Y}" \
 		--colour "${BASE_COLOUR}" --strip "${STRIP_Y0}:${STRIP_Y1}:${STRIP_COLOUR}" \
-		--third "${THIRD_COLOUR}" --damage "${mode}" --frames "${frames}" --hold "$@" \
+		--third "${THIRD_COLOUR}" --damage "${mode}" --frames "${frames}" --hold ${CLIENT_EXTRA:-} "$@" \
 		>/dev/null 2>&1 &
 	CPID=$!
 	sleep 1.5
@@ -123,11 +123,11 @@ check_case() {
 echo "1. a client damages a strip, and the frame paints the strip and nothing else"
 SHOT_STRIP="${RUNTIME}/agora-damage-strip-$$.ppm"
 LOG_STRIP="${RUNTIME}/agora-damage-strip-$$.log"
-run_case strip 3 "${SHOT_STRIP}" "${LOG_STRIP}"
+run_case strip 4 "${SHOT_STRIP}" "${LOG_STRIP}"
 check_case strip "${SHOT_STRIP}"
 # **THE DIAGNOSTIC'S HALF: the box, and a full redraw that can be accounted for.** The first commit maps the window, so
 # the first frame is FULL and must NAME the trigger; every frame after it is the strip's own box.
-if ! grep -q "damage: 1 surface(s), box ${W}x$(( STRIP_Y1 - STRIP_Y0 )) at (${STRIP_BOX_AT_X},${STRIP_BOX_AT_Y})" \
+if ! grep -q "box(es): ${W}x$(( STRIP_Y1 - STRIP_Y0 )) at (${STRIP_BOX_AT_X},${STRIP_BOX_AT_Y})" \
 	"${LOG_STRIP}"; then
 	echo "FAIL: the strip's damage box was not printed as ${W}x$(( STRIP_Y1 - STRIP_Y0 )) at (${STRIP_BOX_AT_X},${STRIP_BOX_AT_Y})" >&2
 	grep -E 'damage:' "${LOG_STRIP}" >&2
@@ -145,19 +145,32 @@ if [ "$(grep -c 'damage: FULL' "${LOG_STRIP}")" -ne 1 ]; then
 fi
 cleanup_case
 
-echo "2. a commit that damages NOTHING means the WHOLE buffer"
+echo "2. two DISJOINT strips in one commit are two boxes, and the gap is not painted"
+SHOT_STRIPS="${RUNTIME}/agora-damage-strips-$$.ppm"
+LOG_STRIPS="${RUNTIME}/agora-damage-strips-$$.log"
+run_case strips 4 "${SHOT_STRIPS}" "${LOG_STRIPS}"
+check_case strips "${SHOT_STRIPS}"
+# **BOTH RECTANGLES, IN ONE LINE**: a bounding box would print one 320x100 box and repaint the gap.
+if ! grep -q "2 box(es): ${W}x$(( STRIP_Y1 - STRIP_Y0 )) at (${OLD_X},${STRIP_BOX_AT_Y}) ${W}x$(( STRIP_Y1 - STRIP_Y0 )) at (${OLD_X},$(( OLD_Y + 120 )))" "${LOG_STRIPS}"; then
+	echo "FAIL: the two strips were not two damage boxes" >&2
+	grep -E 'damage:' "${LOG_STRIPS}" >&2
+	FAILED=1
+fi
+cleanup_case
+
+echo "3. a commit that damages NOTHING means the WHOLE buffer"
 SHOT_WHOLE="${RUNTIME}/agora-damage-whole-$$.ppm"
 LOG_WHOLE="${RUNTIME}/agora-damage-whole-$$.log"
-run_case whole 4 "${SHOT_WHOLE}" "${LOG_WHOLE}"
+run_case whole 5 "${SHOT_WHOLE}" "${LOG_WHOLE}"
 check_case whole "${SHOT_WHOLE}"
-if ! grep -q "damage: 1 surface(s), box ${W}x${H} at (${OLD_X},${OLD_Y})" "${LOG_WHOLE}"; then
+if ! grep -q "box(es): ${W}x${H} at (${OLD_X},${OLD_Y})" "${LOG_WHOLE}"; then
 	echo "FAIL: the whole-buffer commit did not repaint the whole window" >&2
 	grep -E 'damage:' "${LOG_WHOLE}" >&2
 	FAILED=1
 fi
 cleanup_case
 
-echo "3. a window that moves repaints BOTH its new place and the ground it left"
+echo "4. a window that moves repaints BOTH its new place and the ground it left"
 SHOT_MOVE="${RUNTIME}/agora-damage-move-$$.ppm"
 LOG_MOVE="${RUNTIME}/agora-damage-move-$$.log"
 run_case move 4 "${SHOT_MOVE}" "${LOG_MOVE}" --move-to "${NEW_X},${NEW_Y}"
@@ -169,45 +182,37 @@ if ! grep -q 'damage: FULL' "${LOG_MOVE}"; then
 fi
 cleanup_case
 
-# **AND THE GL RENDERER'S BOX, WHERE ITS SWAPS MAKE ONE MEANINGFUL.** A partial GL frame draws into the back buffer and
-# leaves the rest of it alone, which is only correct if the next back buffer begins as the last front buffer did —
-# `EGL_BUFFER_PRESERVED`. A driver may refuse (MEASURED: NVIDIA's EGL takes the request and answers
-# `EGL_BUFFER_DESTROYED`), and a GBM scanout buffer is a different allocation every frame, so on those the renderer
-# composites the WHOLE output every frame — correct, slow, and a full frame that legitimately shows the poison, because
-# the buffer really does contain it. So this case is run only when the server says its swaps preserve, and it says so on
-# startup rather than leaving the difference to be guessed.
-echo "4. and the GL renderer paints the same box, where its swaps preserve what it does not paint"
+# **AND THE GL RENDERER PAINTS THE SAME BOX.** The scene is composed into a texture that survives a swap, so a damage box
+# is a scissor around the scene draws and one full-viewport copy — the driver's swap behaviour no longer decides what a
+# frame is. Same client, same poison: a compositor that recomposites the whole window shows the magenta here too.
+echo "5. and the GL renderer paints the same box"
 if [ -z "${DISPLAY:-}" ]; then
 	echo "  SKIP: no DISPLAY for the nested backend"
-	SKIPPED_GL=1
 else
 	SERVER_EXTRA="--backend x11 --renderer gl --scale 1"
+	# **AND A SLOWER CLIENT, SO THE HOST'S EXPOSE LANDS BEFORE THE POISON DOES.** See the client's `--frame-delay`.
+	CLIENT_EXTRA="--frame-delay 150"
 	SHOT_GL="${RUNTIME}/agora-damage-gl-$$.ppm"
 	LOG_GL="${RUNTIME}/agora-damage-gl-$$.log"
-	run_case strip 3 "${SHOT_GL}" "${LOG_GL}"
+	run_case strip 4 "${SHOT_GL}" "${LOG_GL}"
 	if ! grep -q "renderer: gl" "${LOG_GL}"; then
 		echo "  SKIP: the GL renderer did not start, so there is no second renderer to ask"
-		SKIPPED_GL=1
-	elif grep -q "gl: a swap preserves" "${LOG_GL}"; then
+	else
 		check_case strip "${SHOT_GL}"
-		if ! grep -q "damage: 1 surface(s), box ${W}x$(( STRIP_Y1 - STRIP_Y0 )) at (${STRIP_BOX_AT_X},${STRIP_BOX_AT_Y})" "${LOG_GL}"; then
+		if ! grep -q "box(es): ${W}x$(( STRIP_Y1 - STRIP_Y0 )) at (${STRIP_BOX_AT_X},${STRIP_BOX_AT_Y})" "${LOG_GL}"; then
 			echo "FAIL: the GL renderer did not paint the strip's box" >&2
 			grep -E 'damage:' "${LOG_GL}" >&2
 			FAILED=1
 		fi
-	else
-		# **THE HONEST SKIP: this driver cannot preserve a back buffer, so the renderer's full frame is the correct
-		# answer and there is no box to compare.** The line is printed rather than swallowed, because "GL draws the
-		# whole output" is a fact about the session that a reader of the results should know.
-		echo "  SKIP: this GL driver destroys the back buffer, so the renderer's frames are FULL (see its own startup line)"
-		SKIPPED_GL=1
 	fi
 	cleanup_case
 	SERVER_EXTRA=""
+	CLIENT_EXTRA=""
 	rm -f "${SHOT_GL}" "${LOG_GL}"
 fi
 
-rm -f "${SHOT_STRIP}" "${LOG_STRIP}" "${SHOT_WHOLE}" "${LOG_WHOLE}" "${SHOT_MOVE}" "${LOG_MOVE}"
+rm -f "${SHOT_STRIP}" "${LOG_STRIP}" "${SHOT_STRIPS}" "${LOG_STRIPS}" "${SHOT_WHOLE}" "${LOG_WHOLE}" \
+	"${SHOT_MOVE}" "${LOG_MOVE}"
 
 if [ "${FAILED}" -ne 0 ]; then
 	exit 1

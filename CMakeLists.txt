@@ -66,6 +66,11 @@ pkg_check_modules(WAYLAND_SERVER REQUIRED IMPORTED_TARGET wayland-server)
 # speaks its client end, so the two are different libraries and neither substitutes for the other.
 pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
 pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
+# **AND THE RECTANGLE ARITHMETIC A FRAME'S DAMAGE NEEDS.** A frame may paint several disjoint rectangles (a client
+# that damages two strips, a second surface, the pointer's old place), so the union is a `pixman_region32_t` and not a
+# bounding box: one box would repaint the gap between two strips, and a compositor that paints what nobody damaged is
+# the thing this is for. pixman is the same library the rest of the tree takes from the system.
+pkg_check_modules(PIXMAN REQUIRED IMPORTED_TARGET pixman-1)
 
 if(AWS_WITH_DRM)
   pkg_check_modules(DRM REQUIRED IMPORTED_TARGET libdrm)
@@ -190,7 +195,8 @@ target_include_directories(window-server PRIVATE
 
 target_link_libraries(window-server PRIVATE
   PkgConfig::WAYLAND_SERVER
-  PkgConfig::XKBCOMMON)
+  PkgConfig::XKBCOMMON
+  PkgConfig::PIXMAN)
 
 if(AWS_WITH_DRM)
   target_compile_definitions(window-server PRIVATE AWS_HAVE_DRM)

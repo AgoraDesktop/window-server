@@ -69,6 +69,23 @@ void aws_server_schedule_render(struct aws_server *server)
 	(void)server;
 }
 
+/* **AND THE TWO THE SEAT ASKS WHEN IT DRAWS ITS OWN POINTER.** A motion damages the pointer's old and new boxes and asks
+ * for a PARTIAL render (`aws_cursor_device_box`, `aws_server_schedule_render_partial`); this file is about axis events, so
+ * neither is interesting here and both are stubbed. A test server has no cursor pixels to place. */
+void aws_server_schedule_render_partial(struct aws_server *server)
+{
+	(void)server;
+}
+
+int aws_cursor_device_box(struct aws_server *server, int x, int y, struct aws_box *box)
+{
+	(void)server;
+	(void)x;
+	(void)y;
+	(void)box;
+	return 0;
+}
+
 /* ============================================================================================ *
  * THE WIRE, INTERPOSED AT THE ONE FUNCTION EVERY EVENT GOES THROUGH.                           *
  *                                                                                                *

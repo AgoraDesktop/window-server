@@ -17,10 +17,11 @@
  * screenshot never shows. So the translation lives here, ONCE, and everything above it (the renderers, the cursor, the
  * frame loop) speaks the one space `struct aws_box` is documented in.
  *
- * THE FRAME IS ONE BOUNDING BOX AND NOT A REGION. The AppKit caps itself at sixteen rectangles and a terminal's are one
- * strip, so a box covers the case this exists for; a region buys disjoint strips at the cost of a clip every writer has
- * to honour. If a profile later says otherwise, a `pixman_region32_t` replaces the box without changing anything above
- * it — which is why nothing in this file's callers may know how the union is kept.
+ * AND THE FRAME IS A REGION, NOT A BOUNDING BOX. Two strips from one client, two surfaces, the pointer's old place and
+ * its new one — a box around all of that repaints the gap between them, which is the work this file exists to avoid. The
+ * union is a `pixman_region32_t`, and the renderers walk its rectangles one at a time, so a writer still only ever has
+ * to clip to ONE box: the region is a scheduling decision, not a second clipping path. A bounding box remains the right
+ * answer for the pointer's own sweep (`server->damage`), because consecutive positions overlap.
  *
  * AND "THE WHOLE BUFFER" IS A SENTENCE, NOT A RECTANGLE. Wayland's rule is that a commit which attaches a buffer and
  * damages nothing means every pixel; the surface's `damage_whole` keeps that meaning until the composite asks, because
@@ -29,6 +30,9 @@
 
 #include "server.h"
 
+#include <pixman.h>
+
+#include <stdlib.h>
 #include <string.h>
 
 #include <wayland-server-protocol.h>
@@ -72,6 +76,11 @@ static void box_add(struct aws_box *into, int x0, int y0, int x1, int y1)
 	}
 	into->width = right - into->x;
 	into->height = bottom - into->y;
+}
+
+void aws_damage_box(struct aws_server *server, const struct aws_box *box)
+{
+	aws_box_union(&server->damage, box);
 }
 
 void aws_box_union(struct aws_box *into, const struct aws_box *add)
@@ -128,6 +137,38 @@ int aws_box_intersects(const struct aws_box *box, const struct aws_box *other)
 }
 
 /* ---------------------------------------------------------------------------------------------------
+ * a surface's ledger
+ * --------------------------------------------------------------------------------------------------- */
+
+struct pixman_region32 *aws_damage_region_new(void)
+{
+	pixman_region32_t *region = calloc(1, sizeof *region);
+
+	if (region == NULL) {
+		return NULL;
+	}
+	pixman_region32_init(region);
+	return region;
+}
+
+void aws_damage_region_free(struct pixman_region32 *region)
+{
+	if (region == NULL) {
+		return;
+	}
+	pixman_region32_fini(region);
+	free(region);
+}
+
+void aws_damage_region_add(struct pixman_region32 *region, int x, int y, int width, int height)
+{
+	if (region == NULL || width <= 0 || height <= 0) {
+		return;
+	}
+	pixman_region32_union_rect(region, region, x, y, (unsigned)width, (unsigned)height);
+}
+
+/* ---------------------------------------------------------------------------------------------------
  * the triggers
  * --------------------------------------------------------------------------------------------------- */
 
@@ -179,21 +220,29 @@ static void surface_extent(const struct aws_surface *surface, int *width, int *h
  * is a stale line. It is the same rule `libagora-app` uses on the client side of the wire, which is what keeps the
  * contract in one piece. */
 static void add_buffer_rect(struct aws_server *server, const struct aws_surface *surface, double buffer_x,
-			    double buffer_y, double buffer_width, double buffer_height, struct aws_box *into)
+			    double buffer_y, double buffer_width, double buffer_height,
+			    pixman_region32_t *region)
 {
 	double client = surface->buffer_scale > 0.0 ? surface->buffer_scale : 1.0;
 	double out = server->backend.scale > 0.0 ? server->backend.scale : 1.0;
+	int x0, y0, x1, y1;
 
-	box_add(into,
-		aws_edge_floor(((double)surface->x + buffer_x / client) * out),
-		aws_edge_floor(((double)surface->y + buffer_y / client) * out),
-		aws_edge_ceil(((double)surface->x + (buffer_x + buffer_width) / client) * out),
-		aws_edge_ceil(((double)surface->y + (buffer_y + buffer_height) / client) * out));
+	x0 = aws_edge_floor(((double)surface->x + buffer_x / client) * out);
+	y0 = aws_edge_floor(((double)surface->y + buffer_y / client) * out);
+	x1 = aws_edge_ceil(((double)surface->x + (buffer_x + buffer_width) / client) * out);
+	y1 = aws_edge_ceil(((double)surface->y + (buffer_y + buffer_height) / client) * out);
+	if (x1 <= x0 || y1 <= y0) {
+		return;
+	}
+	/* **AND THE RECTANGLE IS ONE RECTANGLE OF THE FRAME.** pixman unions it with what is already there, so two
+	 * disjoint strips stay two rectangles — which is the whole difference between a region and a box. */
+	pixman_region32_union_rect(region, region, x0, y0, (unsigned)(x1 - x0), (unsigned)(y1 - y0));
 }
 
 /* A SURFACE'S CONTRIBUTION, CLAMPED TO EVERYTHING THAT IS NOT PART OF ITS WINDOW: the buffer's own pixels, and the
  * frame's device extent when the buffer is bigger than the window. */
-static void add_surface_damage(struct aws_server *server, const struct aws_surface *surface, struct aws_box *into)
+static void add_surface_damage(struct aws_server *server, const struct aws_surface *surface,
+			       pixman_region32_t *region)
 {
 	double client = surface->buffer_scale > 0.0 ? surface->buffer_scale : 1.0;
 	int logical_width, logical_height;
@@ -219,57 +268,67 @@ static void add_surface_damage(struct aws_server *server, const struct aws_surfa
 		}
 	}
 	if (surface->damage_whole) {
-		add_buffer_rect(server, surface, 0.0, 0.0, (double)limit_width, (double)limit_height, into);
+		add_buffer_rect(server, surface, 0.0, 0.0, (double)limit_width, (double)limit_height, region);
 		return;
 	}
-	/* THE RECTANGLE THE CLIENT NAMED, clamped to the buffer in BUFFER pixels — the space the protocol named it in. */
-	x0 = surface->damage.x < 0 ? 0.0 : (double)surface->damage.x;
-	y0 = surface->damage.y < 0 ? 0.0 : (double)surface->damage.y;
-	x1 = (double)surface->damage.x + (double)surface->damage.width;
-	y1 = (double)surface->damage.y + (double)surface->damage.height;
-	if (x1 > (double)limit_width) {
-		x1 = (double)limit_width;
+	/* **EVERY RECTANGLE THE CLIENT NAMED, EACH CLAMPED TO THE BUFFER IN BUFFER PIXELS** — the space the protocol named
+	 * them in. Two strips stay two rectangles here and in the frame, which is what makes the gap between them cost
+	 * nothing. */
+	{
+		int count = 0;
+		int i;
+		pixman_box32_t *rects = pixman_region32_rectangles(surface->damage, &count);
+
+		for (i = 0; i < count; i++) {
+			x0 = rects[i].x1 < 0 ? 0.0 : (double)rects[i].x1;
+			y0 = rects[i].y1 < 0 ? 0.0 : (double)rects[i].y1;
+			x1 = (double)rects[i].x2;
+			y1 = (double)rects[i].y2;
+			if (x1 > (double)limit_width) {
+				x1 = (double)limit_width;
+			}
+			if (y1 > (double)limit_height) {
+				y1 = (double)limit_height;
+			}
+			if (x1 <= x0 || y1 <= y0) {
+				continue;
+			}
+			add_buffer_rect(server, surface, x0, y0, x1 - x0, y1 - y0, region);
+		}
 	}
-	if (y1 > (double)limit_height) {
-		y1 = (double)limit_height;
-	}
-	if (x1 <= x0 || y1 <= y0) {
-		return;
-	}
-	add_buffer_rect(server, surface, x0, y0, x1 - x0, y1 - y0, into);
 }
 
 /* **THE LEDGER IS CONSUMED WHATEVER THE SURFACE TURNED OUT TO BE.** A hidden window's damage is not drawn, and keeping
  * it would be rectangles waiting for a frame that may never come; showing it again is a full redraw anyway (§4 step 2),
  * so the safe place for a skipped ledger is the floor. */
-int aws_damage_frame_begin(struct aws_server *server, struct aws_box *box, int *full, const char **reason)
+int aws_damage_frame_begin(struct aws_server *server, pixman_region32_t *region, int *full, const char **reason)
 {
 	struct aws_surface *surface;
 	int count = 0;
 
-	box->x = 0;
-	box->y = 0;
-	box->width = 0;
-	box->height = 0;
+	/* **THE CALLER OWNS THE REGION AND MUST `pixman_region32_fini` IT.** Initialising it here rather than making the
+	 * caller remember to is one less way to hand a renderer an uninitialised region, and a `pixman_region32_t` that is
+	 * never fini'd is a leak the tests under LSan would find. */
+	pixman_region32_init(region);
 	wl_list_for_each(surface, &server->surfaces, link) {
 		if (!surface->damage_valid) {
 			continue;
 		}
 		if (surface->mapped && surface->visible && surface->current_buffer != NULL) {
-			add_surface_damage(server, surface, box);
+			add_surface_damage(server, surface, region);
 			count++;
 		}
 		surface->damage_valid = 0;
 		surface->damage_whole = 0;
-		surface->damage.x = 0;
-		surface->damage.y = 0;
-		surface->damage.width = 0;
-		surface->damage.height = 0;
+		if (surface->damage != NULL) {
+			pixman_region32_clear(surface->damage);
+		}
 	}
-	/* AND WHAT THE COMPOSITOR ITSELF NAMED — a pointer's old rectangle, once step 5 is allowed to stop redrawing
-	 * everything for it. Empty today, and unioned here so the day it is not is a change in the seat and not in the
-	 * frame path. */
-	aws_box_union(box, &server->damage);
+	/* AND WHAT THE COMPOSITOR ITSELF NAMED — the pointer's old and new rectangles. */
+	if (!aws_box_empty(&server->damage)) {
+		pixman_region32_union_rect(region, region, server->damage.x, server->damage.y,
+					   (unsigned)server->damage.width, (unsigned)server->damage.height);
+	}
 	server->damage.x = 0;
 	server->damage.y = 0;
 	server->damage.width = 0;

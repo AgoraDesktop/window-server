@@ -110,18 +110,11 @@ static void surface_send_frame_callbacks(struct aws_surface *surface, uint32_t t
  * already said "the whole buffer" is not made smaller by a later rectangle. */
 static void damage_add(struct aws_surface *surface, int x, int y, int width, int height)
 {
-	struct aws_box rect;
-
-	if (width <= 0 || height <= 0) {
-		return;
+	aws_damage_region_add(surface->damage, x, y, width, height);
+	if (width > 0 && height > 0) {
+		surface->damage_input = 1;
+		surface->damage_valid = 1;
 	}
-	rect.x = x;
-	rect.y = y;
-	rect.width = width;
-	rect.height = height;
-	aws_box_union(&surface->damage, &rect);
-	surface->damage_input = 1;
-	surface->damage_valid = 1;
 }
 
 /* **THE BUFFER'S SIZE, WITHOUT LOOKING INSIDE IT.** `wl_shm` owns its own fields, and a dma-buf keeps its size in the
@@ -234,6 +227,7 @@ static void surface_destroy_resource(struct wl_resource *resource)
 	 * not something this surface ever damaged. */
 	aws_damage_full(surface->server, "a surface was destroyed");
 	aws_server_schedule_render(surface->server);
+	aws_damage_region_free(surface->damage);
 	free(surface);
 }
 
@@ -576,6 +570,15 @@ static void compositor_create_surface(struct wl_client *client, struct wl_resour
 		return;
 	}
 	surface->server = server;
+	/* **THE DAMAGE LEDGER IS ALLOCATED WITH THE SURFACE AND FREED WITH IT**, because a region is not a value a
+	 * `calloc` can make: it has its own rectangles to own. A surface that cannot have one is a surface that cannot be
+	 * drawn, so the client is told rather than given one that silently drops its damage. */
+	surface->damage = aws_damage_region_new();
+	if (surface->damage == NULL) {
+		free(surface);
+		wl_client_post_no_memory(client);
+		return;
+	}
 	surface->visible = 1;	/* a new surface is ON the screen until the application says otherwise */
 	/* **AND IT MAY ACTIVATE UNTIL IT SAYS OTHERWISE**, which is what every ordinary window wants and what a Dock
 	 * switches off with `set_activatable`. */
@@ -583,6 +586,7 @@ static void compositor_create_surface(struct wl_client *client, struct wl_resour
 	surface->resource = wl_resource_create(client, &wl_surface_interface,
 					       wl_resource_get_version(resource), id);
 	if (surface->resource == NULL) {
+		aws_damage_region_free(surface->damage);
 		free(surface);
 		wl_client_post_no_memory(client);
 		return;

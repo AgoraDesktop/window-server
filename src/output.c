@@ -25,6 +25,8 @@
 
 #include "server.h"
 
+#include <pixman.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -199,16 +201,29 @@ void aws_output_complete_frames(struct aws_server *server)
  * window is right, the pixels around it are stale — and obvious in a line of text, so the diagnostic prints the box the
  * frame painted and, for a full frame, the trigger that asked for it. It is compiled in and gated on the environment,
  * like `AWS_RENDER_DEBUG`, because the alternative is a build nobody can reproduce a report against. */
-static void damage_report(const char *what, int surfaces, const struct aws_box *box, const char *reason)
+static void damage_report(const char *what, int surfaces, const pixman_region32_t *damage, const char *reason)
 {
 	if (getenv("WINDOW_SERVER_DAMAGE_DIAG") == NULL) {
 		return;
 	}
 	if (strcmp(what, "full") == 0) {
 		fprintf(stderr, "damage: FULL (%s)\n", reason != NULL ? reason : "a render was requested");
-	} else if (strcmp(what, "box") == 0) {
-		fprintf(stderr, "damage: %d surface(s), box %dx%d at (%d,%d)\n", surfaces, box->width,
-			box->height, box->x, box->y);
+	} else if (strcmp(what, "region") == 0) {
+		/* **EVERY RECTANGLE, IN ORDER, BECAUSE THE COUNT IS THE POINT OF A REGION.** A frame with two strips must print
+		 * two boxes: one box covering the gap would pass a screenshot and fail this line. */
+		/* pixman's query is not const-correct: it hands back the region's own rectangles, which is exactly what a
+		 * printer wants and exactly why the cast is here rather than at every call. */
+		pixman_box32_t *rects;
+		int count = 0;
+		int i;
+
+		rects = pixman_region32_rectangles((pixman_region32_t *)damage, &count);
+		fprintf(stderr, "damage: %d surface(s), %d box(es):", surfaces, count);
+		for (i = 0; i < count; i++) {
+			fprintf(stderr, " %dx%d at (%d,%d)", rects[i].x2 - rects[i].x1, rects[i].y2 - rects[i].y1,
+				rects[i].x1, rects[i].y1);
+		}
+		fprintf(stderr, "\n");
 	} else {
 		fprintf(stderr, "damage: nothing to paint, no frame\n");
 	}
@@ -216,7 +231,7 @@ static void damage_report(const char *what, int surfaces, const struct aws_box *
 
 int aws_output_render(struct aws_server *server)
 {
-	struct aws_box box;
+	pixman_region32_t damage;
 	int full = 0;
 	const char *reason = NULL;
 	int surfaces;
@@ -225,30 +240,36 @@ int aws_output_render(struct aws_server *server)
 	/* **THE LEDGERS ARE CONSUMED HERE, ONCE, WHATEVER HAPPENS NEXT.** A frame that is skipped does not keep the
 	 * rectangles for later: they described the buffer as it was committed, and a later frame's buffer is a different
 	 * picture. */
-	surfaces = aws_damage_frame_begin(server, &box, &full, &reason);
+	surfaces = aws_damage_frame_begin(server, &damage, &full, &reason);
 	if (!full) {
-		aws_box_clip(&box, server->backend.width, server->backend.height);
-		if (aws_box_empty(&box)) {
+		/* **A RECTANGLE OUTSIDE THE SCREEN IS NOT A RECTANGLE ANY WRITER SHOULD SEE.** A window half off the right edge
+		 * is normal, and intersecting the region against the output once is what keeps every inner loop from testing
+		 * the same two comparisons per pixel. */
+		pixman_region32_intersect_rect(&damage, &damage, 0, 0, (unsigned)server->backend.width,
+					       (unsigned)server->backend.height);
+		if (!pixman_region32_not_empty(&damage)) {
 			rendered = 0;
 		}
 	}
 	if (!rendered) {
 		aws_output_complete_frames(server);
-		damage_report("nothing", 0, &box, reason);
+		damage_report("nothing", 0, &damage, reason);
+		pixman_region32_fini(&damage);
 		return 0;
 	}
 	/* **THE RENDERER'S, AND NOTHING ELSE'S.** A server always has one — `aws_renderer_init` guarantees a CPU
 	 * renderer even when a GL context could not be made — so a NULL here is a lifecycle bug rather than a
-	 * configuration, and drawing nothing is the honest response to it. **NULL MEANS THE WHOLE OUTPUT**, and a box means
-	 * only that box; no renderer may draw less than either. */
+	 * configuration, and drawing nothing is the honest response to it. **NULL MEANS THE WHOLE OUTPUT**, and a region
+	 * means exactly those rectangles; no renderer may draw less than either. */
 	if (server->renderer != NULL && server->renderer->draw != NULL) {
-		server->renderer->draw(server, full ? NULL : &box);
+		server->renderer->draw(server, full ? NULL : &damage);
 	}
-	damage_report(full ? "full" : "box", surfaces, &box, reason);
+	damage_report(full ? "full" : "region", surfaces, &damage, reason);
 	/* **THE FRAME IS SPENT, so the next one starts from nothing.** `damage_full` is a statement about ONE frame; leaving
 	 * it set would make every frame full forever, which is the bug this whole file exists to avoid. */
 	server->damage_full = 0;
 	server->damage_reason = NULL;
+	pixman_region32_fini(&damage);
 	/* **AND NO BUFFER IS RELEASED HERE, BECAUSE A SURFACE'S CONTENT IS NOT THIS PASS'S TO GIVE UP.** This used to
 	 * release every surface's buffer after every composite, which reads as harmless and is not: a release is a
 	 * promise that the compositor has finished with those pixels, so the client repaints them in place — and the

@@ -88,6 +88,13 @@ void aws_cursor_draw_cpu(struct aws_server *server);
 struct aws_box;
 void aws_cursor_draw_cpu_box(struct aws_server *server, const struct aws_box *box);
 
+/* **THE RECTANGLE THE POINTER OCCUPIES AT A GIVEN LOGICAL POSITION, IN DEVICE PIXELS.** Answers 0 when this backend
+ * does not draw a pointer or has no image to draw, and 1 with `box` filled otherwise. The seat asks it for the OLD
+ * position as well as the new one: the pixels where the pointer was are not a rectangle any client damaged, and a
+ * frame that repaints both boxes is what makes a moving pointer cost a pointer instead of a screen. It is the same
+ * placement arithmetic `aws_cursor_draw_cpu_box` uses, asked without drawing — two copies would be two answers. */
+int aws_cursor_device_box(struct aws_server *server, int x, int y, struct aws_box *box);
+
 /* The image, for a renderer that uploads it as a texture rather than blending it. NULL when there is nothing to
  * draw. */
 const struct aws_cursor *aws_cursor_image(struct aws_server *server);

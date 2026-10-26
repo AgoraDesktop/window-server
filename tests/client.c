@@ -121,13 +121,21 @@ struct client {
 	 * ignored the damage; if it does not, the rest of the window is the picture it already had. `--damage strip` is the
 	 * partial commit, `whole` is a commit that damages nothing (Wayland's whole-buffer rule), and `move` is a
 	 * `set_frame` — a full-redraw trigger that must repaint BOTH the new place and the ground the window left. */
-	int damage_mode;		/* 0 none, 1 strip, 2 whole-buffer rule, 3 move */
+	int damage_mode;		/* 0 none, 1 strip, 2 whole-buffer rule, 3 move, 4 two strips */
 	int strip_y0;
 	int strip_y1;
+	int strip2_y0;			/* the second, DISJOINT strip: a region's reason for existing */
+	int strip2_y1;
 	uint32_t strip_colour;
 	uint32_t third_colour;
 	int move_x;
 	int move_y;
+	/* **AND A PAUSE BETWEEN COMMITS, WHICH IS WHAT LETS A HOST'S EXPOSE LAND FIRST.** A nested window that has just
+	 * mapped can be exposed by the X server a frame or two later, and an expose is a FULL redraw by definition — on a
+	 * client that had already poisoned its buffer that full frame would put the poison on the glass for the right
+	 * reason. A delay is the test's way of letting the host say everything it has to say while the buffer is still an
+	 * honest picture. */
+	int frame_delay_ms;
 
 	/* THE WALLPAPER IMAGE, when --image named one: RGB, three bytes per sample. */
 	const char *image_path;
@@ -303,16 +311,30 @@ static void damage_mode_paint(struct client *client)
 	if (client->damage_mode == 0) {
 		return;
 	}
-	if (index == 0) {
+	/* **TWO PLAIN FRAMES FIRST, AND THEY ARE NOT DECORATION.** A window that has just mapped can be exposed by the host
+	 * a frame or two later, and a compositor must answer an expose with a FULL frame — which on a client that had already
+	 * poisoned its buffer would put the poison on the glass for the right reason. Letting the exposure land while the
+	 * buffer still holds an honest picture is what makes the poison mean "the compositor over-painted" rather than "the
+	 * host asked for the window again". */
+	if (index < 2) {
 		paint_band(client, 0, client->buffer_height, client->colour);
 		return;
 	}
-	if (client->damage_mode == 2 && index >= 2) {
+	if (client->damage_mode == 4 && index >= 2) {
+		/* **TWO STRIPS AND THE GAP BETWEEN THEM, WHICH IS THE WHOLE POINT OF A REGION.** The gap is poisoned like
+		 * everything else, so a compositor that unions the two rectangles into one bounding box paints the gap from the
+		 * poisoned buffer and the gap goes magenta. */
+		paint_band(client, 0, client->buffer_height, POISON_COLOUR);
+		paint_band(client, client->strip_y0, client->strip_y1, client->strip_colour);
+		paint_band(client, client->strip2_y0, client->strip2_y1, client->strip_colour);
+		return;
+	}
+	if (client->damage_mode == 2 && index >= 3) {
 		/* THE THIRD PICTURE, COMMITTED WITH NO DAMAGE: the whole-buffer rule has to repaint the window. */
 		paint_band(client, 0, client->buffer_height, client->third_colour);
 		return;
 	}
-	if (client->damage_mode == 3 && index >= 2) {
+	if (client->damage_mode == 3 && index >= 3) {
 		/* THE WINDOW MOVED, and the buffer is painted correctly so the assertion is about the move rather than
 		 * about the poison. The commit still damages NOTHING: `set_frame` is the full-redraw trigger. */
 		paint_band(client, 0, client->buffer_height, client->colour);
@@ -341,10 +363,18 @@ static void submit_frame(struct client *client)
 	}
 	wl_callback_add_listener(callback, &frame_listener, client);
 	damage_mode_paint(client);
+	if (client->frame_delay_ms > 0 && client->frames > 0) {
+		usleep((useconds_t)client->frame_delay_ms * 1000u);
+	}
 	wl_surface_attach(client->surface, buffer, 0, 0);
 	/* **THE DAMAGE IS THE FRAME'S STATEMENT ABOUT ITS PIXELS, AND EACH MODE IS A DIFFERENT ONE.** */
-	if ((client->damage_mode == 1 && client->frames >= 1) ||
-	    ((client->damage_mode == 2 || client->damage_mode == 3) && client->frames == 1)) {
+	if (client->damage_mode == 4 && client->frames >= 2) {
+		wl_surface_damage_buffer(client->surface, 0, client->strip_y0, client->buffer_width,
+					 client->strip_y1 - client->strip_y0);
+		wl_surface_damage_buffer(client->surface, 0, client->strip2_y0, client->buffer_width,
+					 client->strip2_y1 - client->strip2_y0);
+	} else if ((client->damage_mode == 1 && client->frames >= 2) ||
+	    ((client->damage_mode == 2 || client->damage_mode == 3) && client->frames == 2)) {
 		wl_surface_damage_buffer(client->surface, 0, client->strip_y0, client->buffer_width,
 					 client->strip_y1 - client->strip_y0);
 	} else if (client->damage_mode == 3 && client->frames >= 2) {
@@ -701,6 +731,8 @@ int main(int argc, char **argv)
 	client.level = 0;
 	client.strip_y0 = 40;
 	client.strip_y1 = 60;
+	client.strip2_y0 = 120;
+	client.strip2_y1 = 140;
 	client.strip_colour = 0x0000FF00u;
 	client.third_colour = 0x00FFFF00u;
 	client.move_x = 600;
@@ -750,6 +782,8 @@ int main(int argc, char **argv)
 				client.damage_mode = 2;
 			} else if (strcmp(mode, "move") == 0) {
 				client.damage_mode = 3;
+			} else if (strcmp(mode, "strips") == 0) {
+				client.damage_mode = 4;
 			} else {
 				fprintf(stderr, "client: --damage wants strip, whole or move\n");
 				return 2;
@@ -769,6 +803,8 @@ int main(int argc, char **argv)
 			client.strip_colour = (uint32_t)strtoul(third + 1, NULL, 16);
 		} else if (strcmp(argv[i], "--third") == 0 && i + 1 < argc) {
 			client.third_colour = (uint32_t)strtoul(argv[++i], NULL, 16);
+		} else if (strcmp(argv[i], "--frame-delay") == 0 && i + 1 < argc) {
+			client.frame_delay_ms = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--move-to") == 0 && i + 1 < argc) {
 			const char *value = argv[++i];
 			const char *comma = strchr(value, ',');

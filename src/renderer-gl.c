@@ -25,6 +25,8 @@
 
 #include "server.h"
 
+#include <pixman.h>
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -133,6 +135,21 @@ static const char *const cursor_source =
 	"    vec4 t = texture2D(u_tex, (v_pos - u_rect.xy) / u_uv_div);\n"
 	"    if (t.a <= 0.0) { discard; }\n"
 	"    gl_FragColor = vec4(t.bgr, t.a);\n"
+	"}\n";
+
+/* **AND THE FRAME ITSELF, COPIED OUT OF ITS OWN TEXTURE.** The scene is composed into an offscreen texture that
+ * SURVIVES a swap (see `struct gl_state`), and this is the one quad that puts it on the glass. It samples without the
+ * BGRA swap the client shaders make — by the time a pixel is in the frame texture it is already in the order the
+ * screen wants — and forces alpha to one, because the frame is opaque even when a window on it is not. */
+static const char *const blit_source =
+	"precision mediump float;\n"
+	"varying vec2 v_pos;\n"
+	"uniform sampler2D u_tex;\n"
+	"uniform vec4 u_rect;\n"
+	"uniform vec2 u_uv_div;\n"
+	"void main() {\n"
+	"    vec2 uv = (v_pos - u_rect.xy) / u_uv_div;\n"
+	"    gl_FragColor = vec4(texture2D(u_tex, vec2(uv.x, 1.0 - uv.y)).rgb, 1.0);\n"
 	"}\n";
 
 /* **AND THE SHADOW IS THE SAME DISTANCE, WITH THE SAME FALLOFF, MEASURED FROM THE SAME PLACE.** `renderer-cpu.c`
@@ -279,13 +296,24 @@ struct gl_state {
 	int width;
 	int height;
 	int own_pixels;			/* the readback buffer is ours to free */
-	/* **WHETHER A SWAP LEAVES WHAT THIS FRAME DID NOT PAINT WHERE IT WAS.** A partial frame is a scissor around a
-	 * smaller clear and a smaller walk, which is only correct if the next back buffer starts as the last front buffer did.
-	 * EGL's default for a window surface is `EGL_BUFFER_DESTROYED`; the compositor asks for `EGL_BUFFER_PRESERVED` and
-	 * BELIEVES THE ANSWER rather than the request, because a driver may refuse and a hole is worse than a slow frame. A
-	 * GBM surface has nothing to ask — the next scanout buffer is a different allocation — so the DRM path always
-	 * composites the whole output. */
-	int buffer_preserved;
+	/* **THE FRAME LIVES IN ITS OWN TEXTURE, SO THE SWAP'S BEHAVIOUR DOES NOT DECIDE WHAT A FRAME IS.** A swap may
+	 * destroy the back buffer (EGL's default; GBM's next scanout buffer is a different allocation every frame), so a
+	 * damage box painted into the back buffer could not be trusted to sit on top of the last frame. The scene is
+	 * therefore composed into `frame_texture` through a framebuffer object that PERSISTS across swaps — a damage box
+	 * paints the box and leaves the rest of the texture as it was — and one full-viewport quad copies the texture to the
+	 * back buffer before the swap. The copy is a GPU fill; the scene draws are what the box saves. */
+	struct gl_program blit;
+	GLuint frame_texture;
+	GLuint frame_fbo;
+	/* **AND THE FRAME'S BOX AS GL STATE, BECAUSE TWO THINGS IN A PASS BOTH WANT THE SCISSOR.** The frame's damage box
+	 * is what keeps a partial frame partial; the shadow's row limit (nothing casts a shadow up across the bar or across a
+	 * sheet's parent title bar) is what keeps a shadow off somebody else's pixels. They are not alternatives — a shadow in
+	 * a partial frame must honour both — so the shadow's scissor is their INTERSECTION and the restore puts the frame's
+	 * back rather than switching the test off. MEASURED as the bug this fixes: the shadow clip disabled the scissor
+	 * mid-pass, and the surface drawn after it painted its whole quad — a poisoned buffer on screen outside the strip the
+	 * client had actually damaged. */
+	struct aws_box frame_box;
+	int frame_box_active;
 
 #ifdef AWS_HAVE_GBM
 	/* **A GBM SURFACE IS THE DRM BACKEND'S "WINDOW".** With no window system, EGL is given the card's GBM device;
@@ -563,19 +591,44 @@ static void upload_coverage(struct gl_state *gl, struct aws_system_icon *icon, i
  * **AND THE SHEET IS THE SECOND USER OF THE SAME SENTENCE.** A sheet's top edge is its parent's title bar's bottom
  * edge, so its shadow must stop there too: the caller passes its own top edge when it has one, and what gets clipped
  * is a shadow ON a title bar that is supposed to be a seam rather than a ledge. */
-static void shadow_clip(struct gl_state *gl, int enable, float clip_top)
+/* **THE ONE SCISSOR THIS RENDERER EVER SETS, BUILT FROM THE TWO THINGS THAT LIMIT IT.** The frame's box is where the
+ * renderer may paint at all; `clip_top` (top-down device rows) is the lowest row a SHADOW may use. Zero for `clip_top`
+ * means "no row limit", which is also how the frame's box is restored after a shadow — so there is no separate
+ * "disable" path to get wrong, and a caller cannot switch the frame's clip off by accident. An empty intersection is an
+ * empty box rather than a disabled test: nothing may be painted, which is what it means. */
+static void scissor_set(struct gl_state *gl, float clip_top)
 {
-	if (enable) {
+	int x0 = 0, y0 = 0, x1 = gl->width, y1 = gl->height;
+
+	if (gl->frame_box_active) {
+		x0 = gl->frame_box.x;
+		y0 = gl->height - (gl->frame_box.y + gl->frame_box.height);
+		x1 = x0 + gl->frame_box.width;
+		y1 = y0 + gl->frame_box.height;
+	}
+	{
 		int below = gl->height - (int)(clip_top + 0.5f);
 
 		if (below < 0) {
 			below = 0;
 		}
-		glEnable(GL_SCISSOR_TEST);
-		glScissor(0, 0, gl->width, below);
-	} else {
-		glDisable(GL_SCISSOR_TEST);
+		if (below < y1) {
+			y1 = below;
+		}
 	}
+	if (x1 < x0) {
+		x1 = x0;
+	}
+	if (y1 < y0) {
+		y1 = y0;
+	}
+	glEnable(GL_SCISSOR_TEST);
+	glScissor(x0, y0, x1 - x0, y1 - y0);
+}
+
+static void shadow_clip(struct gl_state *gl, int enable, float clip_top)
+{
+	scissor_set(gl, enable ? clip_top : 0.0f);
 }
 
 /* ---------------------------------------------------------------------------------------------------
@@ -1143,24 +1196,77 @@ static void gl_readback(struct aws_server *server)
 	free(pixels);
 }
 
-static void gl_draw(struct aws_server *server, const struct aws_box *box)
+/* **THE FRAME'S OWN TEXTURE AND THE FRAMEBUFFER THAT DRAWS INTO IT.** This is what makes a damage box mean anything on
+ * a path whose swaps destroy the back buffer: the composition lives here and survives every swap, so a box paints the box
+ * and leaves the rest of the texture exactly as the last frame left it. GLES2 requires framebuffer objects, so this
+ * cannot fail on a conforming driver; a driver that does fail it gets a message and the CPU renderer rather than a
+ * picture with holes in it. Re-made when the output changes size, which nothing does today. */
+static int gl_frame_target_create(struct gl_state *gl)
+{
+	GLenum status;
+
+	if (gl->frame_texture != 0) {
+		glDeleteTextures(1, &gl->frame_texture);
+		gl->frame_texture = 0;
+	}
+	if (gl->frame_fbo != 0) {
+		glDeleteFramebuffers(1, &gl->frame_fbo);
+		gl->frame_fbo = 0;
+	}
+	glGenTextures(1, &gl->frame_texture);
+	glBindTexture(GL_TEXTURE_2D, gl->frame_texture);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, gl->width, gl->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	/* **NEAREST, BECAUSE THE COPY IS 1:1 AND A FILTER WOULD SOFTEN TEXT THAT THE CLIENT SENT SHARP.** */
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glGenFramebuffers(1, &gl->frame_fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, gl->frame_fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gl->frame_texture, 0);
+	status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	gl->width = gl->width > 0 ? gl->width : 1;
+	gl->height = gl->height > 0 ? gl->height : 1;
+	return status == GL_FRAMEBUFFER_COMPLETE ? 0 : -1;
+}
+
+/* **AND THE ONE QUAD THAT PUTS THE FRAME ON THE GLASS.** Full viewport, no blending, no scissor: the back buffer may
+ * contain anything at all after a swap, and the frame texture is the only complete picture. */
+static void gl_blit_frame(struct gl_state *gl)
+{
+	float v[8];
+
+	quad_vertices(v, 0.0f, 0.0f, (float)gl->width, (float)gl->height);
+	glUseProgram(gl->blit.id);
+	glUniform2f(gl->blit.u_size, (float)gl->width, (float)gl->height);
+	glUniform4f(gl->blit.u_rect, 0.0f, 0.0f, (float)gl->width, (float)gl->height);
+	glUniform2f(gl->blit.u_uv_div, (float)gl->width, (float)gl->height);
+	glUniform1i(gl->blit.u_tex, 0);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, gl->frame_texture);
+	glEnableVertexAttribArray((GLuint)gl->blit.a_pos);
+	glVertexAttribPointer((GLuint)gl->blit.a_pos, 2, GL_FLOAT, GL_FALSE, 0, v);
+	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+/* **ONE RECTANGLE OF A FRAME, AS A WHOLE PASS INTO THE FRAME TEXTURE.** GL's origin is the bottom left while the box's
+ * is the top left: the conversion is here, once, and nowhere else — `y_gl = height - (box.y + box.height)`, the row the
+ * box's LAST device row starts at. `box` NULL is the whole output. */
+static void gl_draw_rect(struct aws_server *server, const struct aws_box *box)
 {
 	struct gl_state *gl = server->renderer->data;
 	float r, g, b;
 
 	rgb_of(AWS_BACKGROUND, &r, &g, &b);
 	glViewport(0, 0, gl->width, gl->height);
-	/* **A PARTIAL FRAME IS A SCISSOR, AND GL'S ORIGIN IS THE BOTTOM LEFT WHILE THE BOX'S IS THE TOP LEFT.** The
-	 * conversion is here, once, and nowhere else: `y_gl = height - (box.y + box.height)`, which is the row the box's
-	 * LAST device row starts at. A box drawn full because the swap does not preserve what this frame leaves alone is the
-	 * correct answer rather than a slow one — under-painting would be a hole. */
-	if (box != NULL && gl->buffer_preserved) {
-		glEnable(GL_SCISSOR_TEST);
-		glScissor(box->x, gl->height - (box->y + box->height), box->width, box->height);
+	if (box != NULL) {
+		gl->frame_box = *box;
+		gl->frame_box_active = 1;
 	} else {
-		box = NULL;
-		glDisable(GL_SCISSOR_TEST);
+		gl->frame_box_active = 0;
 	}
+	scissor_set(gl, 0.0f);
 	glClearColor(r, g, b, 1.0f);
 	/* **THE CLEAR HONOURS THE SCISSOR, WHICH IS WHY THERE IS NO SECOND PATH FOR IT.** `glClear` is clipped by the
 	 * scissor test, so "clear the background inside the box" is the same call as "clear the whole output" with a box
@@ -1192,9 +1298,52 @@ static void gl_draw(struct aws_server *server, const struct aws_box *box)
 				    0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0);
 		}
 	}
-	/* **AND THE SCISSOR GOES OFF BEFORE ANYTHING ELSE DRAWS — OR SWAPS.** State left on would clip a frame that never
-	 * asked to be clipped, and the next frame's readback would be a picture of the last box. */
+}
+
+/* **AND THE FRAME: EVERY RECTANGLE PAINTED INTO THE TEXTURE, THEN ONE COPY TO THE GLASS.** A region's rectangles are
+ * disjoint, so each is its own pass of the same scene — the picture is identical in every pass, and the gap between two
+ * strips is never touched. The copy is full-viewport because the back buffer's previous contents are the swap's business
+ * and not something this renderer may assume; the texture is where the frame lives. */
+static void gl_draw(struct aws_server *server, const pixman_region32_t *damage)
+{
+	struct gl_state *gl = server->renderer->data;
+	pixman_box32_t *rects;
+	int count = 0;
+	int i;
+
+	/* **AN OUTPUT THAT CHANGED SIZE RE-MAKES THE TEXTURE.** Nothing in this server resizes an output today (see the X11
+	 * backend's ConfigureNotify), but a frame texture that kept the old size would be a frame that is half a picture on
+	 * the day something does. */
+	if (gl->width != server->backend.width || gl->height != server->backend.height) {
+		if (gl_frame_target_create(gl) != 0) {
+			return;
+		}
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, gl->frame_fbo);
+	glViewport(0, 0, gl->width, gl->height);
+	if (damage == NULL) {
+		gl_draw_rect(server, NULL);
+	} else {
+		/* pixman's query is not const-correct: it hands back the region's own rectangles, and this is the one place
+		 * the renderer needs them. */
+		rects = pixman_region32_rectangles((pixman_region32_t *)damage, &count);
+		for (i = 0; i < count; i++) {
+			struct aws_box box;
+
+			box.x = rects[i].x1;
+			box.y = rects[i].y1;
+			box.width = rects[i].x2 - rects[i].x1;
+			box.height = rects[i].y2 - rects[i].y1;
+			gl_draw_rect(server, &box);
+		}
+	}
+	/* **THE SCISSOR GOES OFF BEFORE THE COPY AND BEFORE ANY SWAP**, or the copy itself would be clipped to the last
+	 * rectangle and the rest of the screen would keep whatever the swap left there. */
 	glDisable(GL_SCISSOR_TEST);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glViewport(0, 0, gl->width, gl->height);
+	glDisable(GL_BLEND);
+	gl_blit_frame(gl);
 	/* **A SCREENSHOT'S BUFFER IS MADE WHEN IT IS FIRST WANTED, NOT WHEN THE CONTEXT IS.** `--screenshot` is parsed
 	 * after the server (and so after this renderer) is created, so a buffer allocated at init time would be one
 	 * nobody asked for; and the readback is a debug path, so three and a half megabytes are not worth holding for
@@ -1272,6 +1421,12 @@ static void gl_stop(struct aws_server *server)
 		eglTerminate(gl->display);
 	}
 	free(gl->scratch);
+	/* **AND THE FRAME'S TEXTURE AND FBO GO BEFORE THE CONTEXT DOES.** They are GL objects like any other: deleting them
+	 * after `eglDestroyContext` would be deleting names in a context that no longer exists. */
+	if (gl->frame_texture != 0 && gl->display != EGL_NO_DISPLAY && gl->context != EGL_NO_CONTEXT) {
+		glDeleteTextures(1, &gl->frame_texture);
+		glDeleteFramebuffers(1, &gl->frame_fbo);
+	}
 	/* **WHOEVER ALLOCATED THE PIXELS FREES THEM, AND HERE THAT IS US.** The readback buffer exists only because
 	 * `--screenshot` asked for one; the X11 backend gave its own copy-path memory back when the renderer took the
 	 * present, so `backend.pixels` is this struct's or nothing at all. */
@@ -1530,28 +1685,16 @@ int aws_renderer_gl_create(struct aws_server *server)
 	 * flip (`drm_busy`), and asking EGL to wait for a vblank as well would spend two vblanks per frame on a driver
 	 * that implements the wait. The X11 surface has no flip event of ours to pace it, so it keeps interval 1. */
 	eglSwapInterval(gl->display, use_gbm ? 0 : 1);
-	/* **AND WHETHER A SWAP KEEPS THE PIXELS THIS FRAME DID NOT PAINT.** A partial frame draws into the back buffer and
-	 * leaves the rest of it alone, so the frame is only complete if the back buffer began as the last front buffer did.
-	 * A window surface asks for that with `EGL_BUFFER_PRESERVED` and READS THE ANSWER BACK: Mesa may refuse, and a
-	 * compositor that believed the request instead of the reply would paint the strip and leave holes around it. A GBM
-	 * surface has no preservation to ask for (the next scanout buffer is a fresh allocation), so the DRM path draws the
-	 * whole output and says so. */
-	{
-		EGLint behaviour = EGL_BUFFER_DESTROYED;
-
-		if (!use_gbm &&
-		    eglSurfaceAttrib(gl->display, gl->surface, EGL_SWAP_BEHAVIOR, EGL_BUFFER_PRESERVED)) {
-			eglQuerySurface(gl->display, gl->surface, EGL_SWAP_BEHAVIOR, &behaviour);
-		}
-		gl->buffer_preserved = (behaviour == EGL_BUFFER_PRESERVED);
+	/* **AND THE FRAME'S OWN TEXTURE, WHICH IS WHAT MAKES THE DAMAGE BOX MEANINGFUL ON THIS PATH.** A swap may destroy
+	 * the back buffer — EGL's default for a window, and every GBM scanout buffer by construction — so painting only the
+	 * damaged box into it would leave holes wherever the previous frame was. The scene is composed into a texture that
+	 * survives every swap, and one full-viewport quad copies it out. GLES2 requires framebuffer objects, so a driver
+	 * that cannot make one cannot run this renderer at all, and saying so here is better than a partial picture later. */
+	if (gl_frame_target_create(gl) != 0) {
+		fprintf(stderr, "window-server: gl: no framebuffer object for the frame texture\n");
+		goto fail;
 	}
-	/* **AND IT SAYS SO, BECAUSE IT CHANGES WHAT A FRAME IS.** A preserved swap makes the damage box a scissor and the
-	 * whole output unnecessary; a destroyed one means every frame is a full frame, which is CORRECT and slow, and the
-	 * difference is one line of text rather than a mystery about why a DRM session still costs what it did. */
-	fprintf(stderr, "window-server: gl: a swap %s the frame it does not paint%s\n",
-		gl->buffer_preserved ? "preserves" : "DESTROYS",
-		gl->buffer_preserved ? ", so a frame may paint its damage box"
-				     : " (a GBM scanout buffer is a different allocation), so every frame is a full frame");
+	(void)use_gbm;
 
 	/* **AND WHETHER THIS GL CAN SAMPLE AN EXTERNAL IMAGE.** Some drivers refuse `GL_TEXTURE_2D` for a dma-buf
 	 * modifier and offer only `GL_TEXTURE_EXTERNAL_OES`; the shader for that is linked only when the extension is
@@ -1592,6 +1735,7 @@ int aws_renderer_gl_create(struct aws_server *server)
 	if (link_program(&gl->solid, solid_source) != 0 ||
 	    link_program(&gl->texture, texture_source) != 0 ||
 	    link_program(&gl->shadow, shadow_source) != 0 ||
+	    link_program(&gl->blit, blit_source) != 0 ||
 	    link_program(&gl->cursor, cursor_source) != 0) {
 		goto fail;
 	}

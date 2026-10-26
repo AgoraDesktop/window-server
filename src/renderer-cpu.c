@@ -22,6 +22,8 @@
 
 #include "server.h"
 
+#include <pixman.h>
+
 #include <math.h>	/* sqrt — the one place a distance is needed */
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,7 +31,7 @@
 
 /* EVERY PIXEL, DRAWN BY THE CPU. The background is cleared first and the walk then paints the bar and the
  * surfaces over it, in the order the server decided on. */
-static void cpu_draw(struct aws_server *server, const struct aws_box *box);
+static void cpu_draw(struct aws_server *server, const pixman_region32_t *damage);
 
 /* ---------------------------------------------------------------------------------------------------
  * the System menu's mark
@@ -917,7 +919,10 @@ static void cpu_emit(struct aws_server *server, struct aws_surface *surface, uin
 	aws_surface_frame_done(surface, time);
 }
 
-static void cpu_draw(struct aws_server *server, const struct aws_box *box)
+/* **ONE RECTANGLE OF A FRAME, AS A WHOLE PASS.** A region's rectangles are disjoint, so each is cleared, walked and
+ * given its pointer independently — the picture is the same in every pass, and the only thing a pass must not do is
+ * touch a pixel outside its own box. `NULL` is the whole output. */
+static void cpu_draw_rect(struct aws_server *server, const struct aws_box *box)
 {
 	struct aws_backend *backend = &server->backend;
 	size_t count = (size_t)backend->width * (size_t)backend->height;
@@ -946,6 +951,30 @@ static void cpu_draw(struct aws_server *server, const struct aws_box *box)
 	 * means here: the walk has painted the desktop, the windows and the furniture in their own order, and a cursor is
 	 * the one thing with no level. A backend with a host pointer of its own draws nothing (see `backend.owns_cursor`). */
 	aws_cursor_draw_cpu_box(server, box);
+}
+
+static void cpu_draw(struct aws_server *server, const pixman_region32_t *damage)
+{
+	pixman_box32_t *rects;
+	int count = 0;
+	int i;
+
+	if (damage == NULL) {
+		cpu_draw_rect(server, NULL);
+		return;
+	}
+	/* pixman's query is not const-correct — it hands back the region's own rectangles — so the cast is the price of
+	 * a renderer signature that says it will not change the damage. */
+	rects = pixman_region32_rectangles((pixman_region32_t *)damage, &count);
+	for (i = 0; i < count; i++) {
+		struct aws_box box;
+
+		box.x = rects[i].x1;
+		box.y = rects[i].y1;
+		box.width = rects[i].x2 - rects[i].x1;
+		box.height = rects[i].y2 - rects[i].y1;
+		cpu_draw_rect(server, &box);
+	}
 }
 
 int aws_renderer_cpu_create(struct aws_server *server)

@@ -69,6 +69,7 @@ target_include_directories(window-server-seat-routing PRIVATE "${_generated}" "$
 target_link_libraries(window-server-seat-routing PRIVATE
   PkgConfig::WAYLAND_SERVER
   PkgConfig::XKBCOMMON)
+target_link_libraries(window-server-seat-routing PRIVATE PkgConfig::PIXMAN)
 add_test(NAME window-server-seat-routing COMMAND window-server-seat-routing)
 
 # **AND THE SHEET'S PLACE IN THE COMPOSITE ORDER, ASKED OF THE WALK ITSELF.** "A sheet is always exactly one layer above
@@ -81,6 +82,7 @@ add_executable(window-server-sheet-stack sheet_stack.c "${CMAKE_CURRENT_SOURCE_D
   "${CMAKE_CURRENT_SOURCE_DIR}/../src/damage.c")
 target_include_directories(window-server-sheet-stack PRIVATE "${_generated}" "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 target_link_libraries(window-server-sheet-stack PRIVATE PkgConfig::WAYLAND_SERVER)
+target_link_libraries(window-server-sheet-stack PRIVATE PkgConfig::PIXMAN)
 add_test(NAME window-server-sheet-stack COMMAND window-server-sheet-stack)
 
 # **AND THE POINTER THE COMPOSITOR DRAWS ITSELF, WHICH IS WHAT A DRM OUTPUT HAS AND NOTHING ELSE DOES.** The image's
@@ -244,7 +246,8 @@ add_test(NAME window-server-surface-lifetime
 add_executable(window-server-pointer-axis pointer_axis.c "${CMAKE_CURRENT_SOURCE_DIR}/../src/seat.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/../src/damage.c")
 target_include_directories(window-server-pointer-axis PRIVATE "${_generated}" "${CMAKE_CURRENT_SOURCE_DIR}/../src")
-target_link_libraries(window-server-pointer-axis PRIVATE PkgConfig::WAYLAND_SERVER PkgConfig::XKBCOMMON)
+target_link_libraries(window-server-pointer-axis PRIVATE PkgConfig::WAYLAND_SERVER PkgConfig::XKBCOMMON
+  PkgConfig::PIXMAN)
 add_test(NAME window-server-pointer-axis COMMAND window-server-pointer-axis)
 
 # **AND A BUFFER BIGGER THAN THE SURFACE IT DESCRIBES.** `wl_surface.set_buffer_scale` is how a HiDPI client says "this
