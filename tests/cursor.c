@@ -7,9 +7,10 @@
  *
  * **THE REPORT THIS FILE EXISTS FOR WAS "the desktop renders, but no mouse cursor is visible", on a DRM output with
  * both renderers.** Pointer motion and buttons worked: the compositor received input and had nothing to draw with it,
- * because `wl_pointer.set_cursor` was an empty function and neither renderer painted a pointer of its own. The fix is
- * an arrow the compositor owns (src/cursor.c), and this is the part of it that needs no scanner: the RASTER, the
- * SCALE IT IS MADE FOR, and WHERE IT LANDS.
+ * because `wl_pointer.set_cursor` was an empty function and neither renderer painted a pointer of its own. The pointer
+ * the compositor owns is now the theme's image (src/cursor.c + src/cursor-theme.c), with the drawn arrow as the
+ * fallback, and this is the part of it that needs no scanner: WHICH IMAGE is made for which scale and setting, and
+ * WHERE IT LANDS.
  *
  * IT IS A UNIT TEST AND NOT A SCREENSHOT, because the claim is arithmetic about device pixels — a box, a hotspot and
  * a clipped blend — and the headless backend deliberately draws no cursor at all (its screenshots are compared
@@ -59,6 +60,8 @@ static void reset(struct aws_server *server, double scale, int width, int height
 static void finish(struct aws_server *server)
 {
 	aws_cursor_finish(server);
+	aws_cursor_theme_close(server->cursor_theme);
+	server->cursor_theme = NULL;
 	free(server->backend.pixels);
 	server->backend.pixels = NULL;
 }
@@ -77,8 +80,10 @@ static unsigned luminance(uint32_t pixel)
 	return (r * 30u + g * 59u + b * 11u) / 100u;
 }
 
-/* THE TWO TONES THE ARROW IS MADE OF, ASKED OF A BOX OF THE FRAME: a black body and a white fringe, both present.
- * A shape drawn in one colour would be an arrow that vanishes on half the desktops a person might put behind it. */
+/* THE TWO TONES A POINTER IS MADE OF, ASKED OF A BOX OF THE FRAME: a dark body and a light outline, both present. A
+ * shape drawn in one colour would be a pointer that vanishes on half the desktops a person might put behind it. The
+ * body's threshold is 80 rather than black because the theme's arrow is a very dark grey (51,51,51) with a white
+ * fringe — a palette chosen so the pointer does not read as a hole in the window it is over. */
 static int box_has_two_tones(struct aws_server *server, int left, int top, int width, int height)
 {
 	int dark = 0, light = 0;
@@ -93,7 +98,7 @@ static int box_has_two_tones(struct aws_server *server, int left, int top, int w
 				continue;
 			}
 			value = luminance(at(server, left + column, top + row));
-			if (value < 40u) {
+			if (value < 80u) {
 				dark = 1;
 			}
 			if (value > 200u) {
@@ -104,9 +109,10 @@ static int box_has_two_tones(struct aws_server *server, int left, int top, int w
 	return dark && light;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
 	struct aws_server server;
+	const char *theme_directory = (argc > 1) ? argv[1] : NULL;
 
 	printf("cursor: the compositor-owned fallback pointer\n");
 
@@ -203,6 +209,62 @@ int main(void)
 		aws_cursor_draw_cpu(&server);
 		check(at(&server, 11, 13) == once, "drawing the same pointer twice leaves the same pixel");
 	}
+
+	finish(&server);
+
+	/* 10. **AND WHEN A THEME IS THERE, THE ARROW IS THE THEME'S.** This is the integration the module exists for: the
+	 * pointer's pixels, its size and its hotspot come from the vendored Vimix theme rather than from the polygon above.
+	 * The numbers are the theme's own — its 24-nominal art is 32x32 with a (4,4) tip — so a polygon that happened to
+	 * be the right size could not pass this by accident. */
+	reset(&server, 1.33203125, 128, 128);
+	if (theme_directory != NULL) {
+		server.cursor_theme = aws_cursor_theme_open(theme_directory);
+	}
+	server.cursor_size = AWS_CURSOR_DEFAULT_SIZE;
+	check(server.cursor_theme != NULL, "the vendored Vimix theme opens");
+	aws_cursor_ensure(&server);
+	check(server.cursor.width == 32 && server.cursor.height == 32,
+	      "a 24-point pointer is the theme's 32x32 arrow at 96 dpi, not a rasterized polygon");
+	check(server.cursor.hotspot_x == 4 && server.cursor.hotspot_y == 4, "with the theme's own hotspot");
+	check(server.cursor.generation == server.cursor_generation, "and it numbers the image it made");
+	aws_cursor_draw_cpu(&server);
+	/* left = round(10 * 1.33203) - 4 = 9, top = 9, so the box starts at (9,9) and the tip is four pixels in. */
+	check(at(&server, 9 + 4, 9 + 4) != BACKGROUND, "and the theme's tip is drawn where the pointer is");
+	check(box_has_two_tones(&server, 9, 9, 32, 32), "the themed pointer has a dark body and a light outline");
+
+	/* **AND A SCALE CHANGE RE-MAKES IT, WITH A NUMBER NO TEXTURE CACHE CAN CONFUSE.** The GL renderer keeps the pointer
+	 * as a texture and uploads it when the image's number moves; a theme and a size can change while the scale stays
+	 * put, and a scale can change while both stay put, so the number is per image rather than per setting. */
+	{
+		unsigned before = server.cursor.generation;
+
+		server.backend.scale = 2.0;
+		aws_cursor_ensure(&server);
+		check(server.cursor.width == 48 && server.cursor.height == 48,
+		      "a 2x output makes the same 24-point pointer the theme's 48-pixel variant");
+		check(server.cursor.generation != before, "and the re-made image is numbered afresh");
+		server.backend.scale = 1.33203125;
+		aws_cursor_ensure(&server);
+	}
+
+	/* 11. **A NEW SIZE IS A NEW VARIANT, AND A NEW IMAGE.** The theme's sizes are a vocabulary (24 → 32 px, 30 → 40,
+	 * 36 → 48, 48 → 64): asking for 48 points at 96 dpi is 64 device pixels, which is the largest variant, and the
+	 * cache must notice — a pointer that kept the old image would be a session whose cursor size did nothing. */
+	server.cursor_size = 48.0;
+	server.cursor_generation++;
+	aws_cursor_ensure(&server);
+	check(server.cursor.width == 64 && server.cursor.height == 64,
+	      "a 48-point pointer takes the theme's 64-pixel variant");
+	check(server.cursor.hotspot_x == 8 && server.cursor.hotspot_y == 8, "and that variant's hotspot");
+
+	/* 12. **AND WITHOUT A THEME THE DRAWN ARROW COMES BACK**, which is what a checkout with the artwork removed, or a
+	 * path that is not a theme, has to look like: still a pointer, and Agora's own. */
+	aws_cursor_theme_close(server.cursor_theme);
+	server.cursor_theme = NULL;
+	server.cursor_generation++;
+	aws_cursor_ensure(&server);
+	check(server.cursor.width == 16 && server.cursor.height == 25,
+	      "with no theme, the drawn fallback arrow is made for the same scale");
 
 	finish(&server);
 	printf("\n%s\n", s_failed == 0 ? "all checks passed" : "FAILURES");

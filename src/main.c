@@ -150,6 +150,7 @@ static void usage(const char *program)
 	fprintf(stderr,
 		"usage: %s [--backend NAME] [--input NAME] [--width W] [--height H] [--socket NAME]\n"
 		"          [--frames N] [--screenshot PATH.ppm] [--system-menu-icon auto|NAME]\n"
+		"          [--cursor-theme DIR] [--cursor-size N]\n"
 		"          [--list-system-menu-icons] [--dump-os-identity]\n"
 		"  --backend NAME    where the pixels go: %s (default headless)\n"
 		"  --renderer NAME   who draws them: %s (default auto: gl when the backend can give it a drawable — an\n"
@@ -173,6 +174,15 @@ static void usage(const char *program)
 		"                    smaller. AGORA_UI_SCALE states the same number from the environment,\n"
 		"                    and this option wins over it\n"
 		"  --socket NAME     the Wayland socket's name; the default is chosen and printed\n"
+		"  --cursor-theme DIR\n"
+		"                    the Xcursor theme the pointer's artwork comes from — a directory holding\n"
+		"                    `cursors/`, which is what `~/.icons/Vimix` or `/usr/share/icons/Vimix`\n"
+		"                    is (default: AGORA_CURSOR_THEME, then the installed Vimix theme; with\n"
+		"                    neither, the pointer is the arrow the compositor draws itself)\n"
+		"  --cursor-size N   the pointer's size in points (default 24, or AGORA_CURSOR_SIZE). The\n"
+		"                    theme's own variant is used for it, chosen for the output's scale: 24\n"
+		"                    points is its 32-pixel arrow on a 96-dpi panel and its 64-pixel one at\n"
+		"                    2x. Never resampled, so a size between variants takes the next one up\n"
 		"  --launcher NAME   where the terminal comes from: existing (default — run it from a text\n"
 		"                    console) or vt (switch to --vt N; needs root, and a display manager may\n"
 		"                    own the terminal you name — see --vt-timeout)\n"
@@ -247,6 +257,15 @@ int main(int argc, char **argv)
 	const char *socket_name = NULL;
 	const char *screenshot = NULL;
 	const char *system_menu_icon = NULL;
+	/* **AND THE POINTER'S ARTWORK AND ITS SIZE.** The theme is a directory of Xcursor files: NULL means the
+	 * environment, then the theme this build installs, and the compositor falls back to its own drawn arrow when
+	 * there is neither. The size is in POINTS and resolved the same way — the flag, then `AGORA_CURSOR_SIZE`, then the
+	 * theme's own design size — because a pointer's size is a comfort setting like the UI scale, and a person who wants
+	 * a bigger one should not have to pick a theme to get it. */
+	const char *cursor_theme = NULL;
+	double cursor_size = 0.0;
+	int cursor_size_given = 0;
+	const char *cursor_size_door = "--cursor-size";
 	int list_system_menu_icons = 0;
 	int dump_os_identity = 0;
 	struct aws_server *server;
@@ -292,6 +311,11 @@ int main(int argc, char **argv)
 			screenshot = argv[++i];
 		} else if (strcmp(argv[i], "--system-menu-icon") == 0 && i + 1 < argc) {
 			system_menu_icon = argv[++i];
+		} else if (strcmp(argv[i], "--cursor-theme") == 0 && i + 1 < argc) {
+			cursor_theme = argv[++i];
+		} else if (strcmp(argv[i], "--cursor-size") == 0 && i + 1 < argc) {
+			cursor_size = atof(argv[++i]);
+			cursor_size_given = 1;
 		} else if (strcmp(argv[i], "--list-system-menu-icons") == 0) {
 			list_system_menu_icons = 1;
 		} else if (strcmp(argv[i], "--dump-os-identity") == 0) {
@@ -385,6 +409,33 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
+	/* **THE POINTER'S SIZE, AND A DOOR THAT SAID NOTHING MEANS THE THEME'S OWN DESIGN SIZE.** The flag wins,
+	 * `AGORA_CURSOR_SIZE` is the door a login uses, and the theme's design size is the default. The bounds are the
+	 * theme's own vocabulary: a pointer smaller than a point is not a pointer, and one larger than the largest variant
+	 * is a number that promises a size no artwork can show — the largest variant would be used anyway, so refusing says
+	 * what happened instead of quietly capping it. **AND A VALUE THAT IS NOT A NUMBER IS REFUSED**, because a typo in a
+	 * login's environment otherwise reads as zero and then as "nobody said", which is the wrong size presented as the
+	 * right one: the same reason `--dpi 0` is refused above. */
+	if (!cursor_size_given) {
+		const char *environment = getenv("AGORA_CURSOR_SIZE");
+
+		if (environment != NULL && environment[0] != '\0') {
+			cursor_size = atof(environment);
+			cursor_size_door = "AGORA_CURSOR_SIZE";
+			cursor_size_given = 1;
+		}
+	}
+	if (!cursor_size_given) {
+		cursor_size = AWS_CURSOR_DEFAULT_SIZE;
+	}
+	if (cursor_size < 1.0 || cursor_size > AWS_MAX_CURSOR_SIZE) {
+		fprintf(stderr, "window-server: the pointer's size (%s) must be between 1 and %g points, not %g\n",
+			cursor_size_door, AWS_MAX_CURSOR_SIZE, cursor_size);
+		fprintf(stderr, "                (the default is %g, the cursor theme's own design size — `--cursor-size N` or\n"
+				"                AGORA_CURSOR_SIZE sets it)\n", AWS_CURSOR_DEFAULT_SIZE);
+		return 2;
+	}
+
 	/* **THE TERMINAL IS CLAIMED BEFORE THE DEVICE, AND THE ORDER IS LOAD-BEARING.** A DRM master is the process the
 	 * kernel's terminal bookkeeping names as the owner of the screen; taking the device first and the terminal second
 	 * would claim a display for a session that is not yet the active one — which is exactly the state a compositor
@@ -405,7 +456,7 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
-	server = aws_server_create(backend, input, renderer, width, height, scale, ui_scale);
+	server = aws_server_create(backend, input, renderer, width, height, scale, ui_scale, cursor_theme, cursor_size);
 	if (server == NULL) {
 		fprintf(stderr, "window-server: could not start (backend '%s')\n", backend);
 		/* **A CLAIMED TERMINAL IS GIVEN BACK ON EVERY EXIT PATH, NOT ONLY THE HAPPY ONE.** Leaving it here would
@@ -571,29 +622,42 @@ int main(int argc, char **argv)
 		 * deadline belongs on the PAINT. */
 		if (server->render_pending && !aws_backend_busy(server) &&
 		    aws_monotonic_ns() >= s_last_render_ns + AWS_FRAME_NS) {
+			int composited;
+
 			server->render_pending = 0;
-			aws_output_render(server);
-			/* AND THEN IT GOES ON THE SCREEN, if the backend has one. */
-			aws_backend_present(server);
+			/* **A FRAME THAT HAS NOTHING IN IT IS NOT A FRAME, AND THE DIFFERENCE MATTERS.** `aws_output_render`
+			 * collects the damage and consumes it; an empty box means nothing changed, so there is nothing to clear,
+			 * nothing to walk, nothing to present and no frame to count. The callbacks a skipped frame owes are
+			 * completed inside it — see `aws_output_complete_frames`. */
+			composited = aws_output_render(server);
+			/* AND THEN IT GOES ON THE SCREEN, if the backend has one and there was something to put on it. */
+			if (composited) {
+				aws_backend_present(server);
+			}
 			/* **THE RENDER QUEUES EVENTS — the buffer release and the frame callbacks — SO THE FLUSH HAS TO
 			 * FOLLOW IT.** The flush above happens before the render and therefore misses exactly the events
 			 * that make the next frame possible: the client sits waiting for a callback that is still in this
 			 * process's outgoing buffer, and the event loop blocks forever. MEASURED as a compositor that
-			 * composited one frame and then stopped with a connected client. */
+			 * composited one frame and then stopped with a connected client.
+			 *
+			 * **AND IT RUNS FOR A SKIPPED FRAME TOO**, because that is the frame the callbacks were flushed from: a
+			 * flush inside the `composited` branch would leave exactly those events in the buffer. */
 			wl_display_flush_clients(server->display);
-			server->frames++;
-			/* THE FIRST FRAME IS THE PROOF THAT THERE IS A COMPOSITOR HERE, so the deadline goes and the terminal
-			 * negotiation arrives. Both are one-way: a session that later goes quiet keeps its terminal, as a
-			 * session should. */
-			if (s_startup_timer != NULL) {
-				wl_event_source_timer_update(s_startup_timer, 0);
-			}
-			if (server->frames == 1) {
-				vt_watch_arm(server);
-			}
-			s_last_render_ns = aws_monotonic_ns();
-			if (server->max_frames > 0 && server->frames >= server->max_frames) {
-				break;
+			if (composited) {
+				server->frames++;
+				/* THE FIRST FRAME IS THE PROOF THAT THERE IS A COMPOSITOR HERE, so the deadline goes and the
+				 * terminal negotiation arrives. Both are one-way: a session that later goes quiet keeps its
+				 * terminal, as a session should. */
+				if (s_startup_timer != NULL) {
+					wl_event_source_timer_update(s_startup_timer, 0);
+				}
+				if (server->frames == 1) {
+					vt_watch_arm(server);
+				}
+				s_last_render_ns = aws_monotonic_ns();
+				if (server->max_frames > 0 && server->frames >= server->max_frames) {
+					break;
+				}
 			}
 		}
 	}

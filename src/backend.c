@@ -111,6 +111,7 @@ void aws_server_resume(struct aws_server *server)
 	server->suspended = 0;
 	/* **AND EVERYTHING IS REPAINTED**, because the terminal came back with whatever the kernel drew on it — a text
 	 * console, another session's leftovers — and every pixel of this compositor's scene is stale. */
+	aws_damage_full(server, "the display came back from another terminal");
 	server->render_pending = 1;
 }
 

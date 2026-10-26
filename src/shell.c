@@ -252,6 +252,7 @@ void aws_shell_place_status_items(struct aws_server *server)
 		surface->frame_width = surface->status_length;
 		surface->frame_height = AWS_MENU_BAR_HEIGHT;
 	}
+	aws_damage_full(server, "the status area was repacked");
 	aws_server_schedule_render(server);
 	/* AN ITEM JUST MOVED, so the surface under the pointer may be a different one now. */
 	aws_seat_pointer_recheck(server);
@@ -279,6 +280,7 @@ static void window_set_frame(struct wl_client *client, struct wl_resource *resou
 		aws_shell_place_status_items(surface->server);
 		return;
 	}
+	aws_damage_full(surface->server, "a window's frame changed");
 	aws_server_schedule_render(surface->server);
 	aws_seat_pointer_recheck(surface->server);
 }
@@ -312,6 +314,7 @@ static void window_set_visible(struct wl_client *client, struct wl_resource *res
 		return;
 	}
 	surface->visible = visible ? 1 : 0;
+	aws_damage_full(surface->server, "a window was shown or hidden");
 	aws_server_schedule_render(surface->server);
 	/* SHOWN OR HIDDEN, the set of surfaces the pointer can be over has changed. */
 	aws_seat_pointer_recheck(surface->server);
@@ -333,6 +336,7 @@ static void window_set_level(struct wl_client *client, struct wl_resource *resou
 		return;
 	}
 	surface->level = (int)level;
+	aws_damage_full(surface->server, "a window's level changed");
 	aws_server_schedule_render(surface->server);
 	aws_seat_pointer_recheck(surface->server);
 	aws_shell_window_list_changed(surface->server);
@@ -340,10 +344,38 @@ static void window_set_level(struct wl_client *client, struct wl_resource *resou
 
 /* RAISE AND LOWER MOVE A WINDOW WITHIN ITS LEVEL, which is why they are a list operation and not a level
  * change: `-orderFront:` is not `-setLevel:`, and a window raised does not join the level above it. */
+/* **AND A WINDOW'S SHEET IS NOT A WINDOW BESIDE IT — IT IS PART OF IT, SO IT MOVES WITH IT.** A sheet ordered below
+ * the window it belongs to is a sheet that has gone behind its parent, which is what a click on the parent's title
+ * bar, a Dock's `activate_window` and the application's own `-orderFront:` were each able to do: the list is the
+ * stack, so restacking one of the pair left the other where it was. The pair is maintained HERE, in the one place
+ * the list is reordered, and both directions are the same rule: the sheet sits immediately ABOVE its parent — one
+ * node later in the list, which is the node the composite pass draws next and the node the hit test meets first.
+ *
+ * ONE SHEET PER WINDOW, which is the AppKit's rule rather than a limit of this loop: a window attaches one at a time,
+ * and a loop that walked a second one would reverse the pair on every call. */
+static void surface_place_sheets(struct aws_server *server, struct aws_surface *parent, int above)
+{
+	struct aws_surface *surface;
+
+	wl_list_for_each(surface, &server->surfaces, link) {
+		if (surface->sheet_parent != parent) {
+			continue;
+		}
+		wl_list_remove(&surface->link);
+		if (above) {
+			wl_list_insert(&parent->link, &surface->link);
+		} else {
+			wl_list_insert(parent->link.prev, &surface->link);
+		}
+		return;
+	}
+}
+
 static void surface_bring_to_front(struct aws_server *server, struct aws_surface *surface)
 {
 	wl_list_remove(&surface->link);
 	wl_list_insert(server->surfaces.prev, &surface->link);
+	surface_place_sheets(server, surface, 1);
 }
 
 static void window_raise(struct wl_client *client, struct wl_resource *resource)
@@ -354,7 +386,16 @@ static void window_raise(struct wl_client *client, struct wl_resource *resource)
 	if (surface == NULL) {
 		return;
 	}
+	/* **AND A SHEET IS RAISED WITH ITS FAMILY, WHICH IS WHAT THE MAC DOES WITH ONE.** A sheet brought forward on its
+	 * own is a sheet in front of the window it belongs to and behind nothing — which is a state that cannot exist on
+	 * the glass (the pair is drawn as one), so the request is answered on the parent: the document (and the question
+	 * hanging off it) come forward together. It is also what keeps the LIST in step, since the parent's raise is what
+	 * re-places the sheet behind it. */
+	if (surface->sheet_parent != NULL) {
+		surface = surface->sheet_parent;
+	}
 	surface_bring_to_front(surface->server, surface);
+	aws_damage_full(surface->server, "a window was raised");
 	aws_server_schedule_render(surface->server);
 	aws_seat_pointer_recheck(surface->server);
 	aws_shell_window_list_changed(surface->server);
@@ -368,8 +409,16 @@ static void window_lower(struct wl_client *client, struct wl_resource *resource)
 	if (surface == NULL) {
 		return;
 	}
+	/* **AND DOWN IS THE SAME PAIR RULE AS UP.** Lowering a sheet lowers its document, and the sheet stays immediately
+	 * ABOVE the parent — the bug this used to have was the other way round, with the sheet placed below it, which is
+	 * the two halves of one window in the wrong order. */
+	if (surface->sheet_parent != NULL) {
+		surface = surface->sheet_parent;
+	}
 	wl_list_remove(&surface->link);
 	wl_list_insert(&surface->server->surfaces, &surface->link);
+	surface_place_sheets(surface->server, surface, 1);
+	aws_damage_full(surface->server, "a window was lowered");
 	aws_server_schedule_render(surface->server);
 	aws_seat_pointer_recheck(surface->server);
 }
@@ -467,6 +516,62 @@ static void window_set_buffer_scale_fixed(struct wl_client *client, struct wl_re
 		return;
 	}
 	aws_surface_set_buffer_scale_fixed(surface, wl_fixed_to_double(scale));
+}
+
+/* **THE SHEET'S STATEMENT, AND THE TWO THINGS THE SERVER DRAWS FROM IT.** See the protocol's `set_sheet_parent`: two
+ * windows the application made and placed, which the server can only tell apart from neighbours because the
+ * application SAID so. What it buys is the shape — a sheet's top corners are the parent's title bar's seam, not its
+ * own edge, so they stay square like a menu hanging from the menu bar — and the order, which `surface_place_sheets`
+ * keeps from here on. The `parent` is nullable in the XML, and a NULL arrives here as a NULL resource rather than as a
+ * surface, which is what detaching looks like.
+ *
+ * A WINDOW CANNOT BE ITS OWN PARENT: the frames would be a loop with nothing under it, and the AppKit never asks. It
+ * is turned into a detach rather than refused, because there is no state a client could be in where the honest answer
+ * is anything else. */
+static void window_set_sheet_parent(struct wl_client *client, struct wl_resource *resource,
+				    struct wl_resource *parent_resource, int32_t seam)
+{
+	struct aws_surface *surface = wl_resource_get_user_data(resource);
+	struct aws_surface *parent = NULL;
+
+	(void)client;
+	if (surface == NULL) {
+		return;
+	}
+	if (parent_resource != NULL) {
+		parent = wl_resource_get_user_data(parent_resource);
+	}
+	if (parent == surface) {
+		parent = NULL;
+	}
+	surface->sheet_parent = parent;
+	/* **AND THE SEAM, WHICH IS A NUMBER RATHER THAN A SHAPE THE SERVER COULD SEE.** How far the sheet's top edge is
+	 * tucked into the parent's title bar; the shadow stops there, because those rows are the bar's. A negative number
+	 * is not a smaller tuck, it is a client bug, and zero is what it means. */
+	surface->sheet_seam = seam > 0 ? (int)seam : 0;
+	if (parent != NULL) {
+		surface_place_sheets(surface->server, parent, 1);
+	}
+	aws_damage_full(surface->server, "a sheet was attached or detached");
+	aws_server_schedule_render(surface->server);
+	aws_seat_pointer_recheck(surface->server);
+	aws_shell_window_list_changed(surface->server);
+}
+
+/* **AND THE ONE CROSS-SURFACE PROMISE THIS SERVER KEEPS, WHICH IS THAT IT DOES NOT KEEP A DEAD ONE.** The sheet holds
+ * the only reference — the parent knows nothing about the sheets hanging from it — so a parent destroyed first would
+ * leave its sheet naming freed memory, and the next composite or hit test would read it. Walking the list here, while
+ * the dying surface is still in it (the caller has already unlinked it, which is why the walk cannot find itself), is
+ * the whole of the clean-up. A sheet destroyed first has nothing to undo: nothing points at it. */
+void aws_shell_surface_gone(struct aws_server *server, struct aws_surface *surface)
+{
+	struct aws_surface *sheet;
+
+	wl_list_for_each(sheet, &server->surfaces, link) {
+		if (sheet->sheet_parent == surface) {
+			sheet->sheet_parent = NULL;
+		}
+	}
 }
 
 /* **AND THE ONE A DRAG TAKES, WHICH IS A REAL GRAB.** See the protocol's `set_pointer_capture`: while this is
@@ -605,6 +710,7 @@ static const struct agora_window_interface agora_window_implementation = {
 	window_set_dock_menu,
 	window_set_badge,
 	window_set_buffer_scale_fixed,
+	window_set_sheet_parent,
 };
 
 static void agora_window_destroy_resource(struct wl_resource *resource)
@@ -753,6 +859,7 @@ static void shell_activate_window(struct wl_client *client, struct wl_resource *
 	 * pair — which is what makes the application's own menu bar follow. */
 	surface_bring_to_front(server, surface);
 	aws_seat_set_keyboard_focus(server, surface);
+	aws_damage_full(server, "a dock activated a window");
 	aws_server_schedule_render(server);
 	aws_seat_pointer_recheck(server);
 	aws_shell_window_list_changed(server);

@@ -1,13 +1,18 @@
-# Damage: the client names its rectangles and the compositor does not use them
+# Damage: the client names its rectangles, and the compositor paints them
 
-**A HANDOFF, and it starts with a sentence that would be a lie if it were left out: HALF OF THIS IS DONE AND THE DONE
-HALF IS INERT.** A client now tells the compositor exactly which pixel rectangles it changed, in buffer pixels, on
-every commit. This compositor throws them away on purpose and recomposites the whole output every frame, so nothing a
-terminal (or any other client) saves on its own side reaches the screen. **The work below is the other half, and until
-it lands the whole feature is a promise with no payer.**
+**BOTH HALVES ARE NOW DONE — this document is the record of the work rather than a handoff, and §9 says what is still
+open.** A client tells the compositor which pixel rectangles it changed, in buffer pixels, on every commit, and the
+compositor's frame is the union of those rectangles in device pixels: one bounding box per frame, clipped in both
+renderers, with every non-client change invalidating the whole output by name. MEASURED on this machine, a 320x20 strip
+repaint went from 1.617-1.791 ms/frame to 0.208-0.227 ms/frame of server CPU (`headless`, 300 commits, against a build of
+the parent commit), and a whole-window commit from 1.520-1.783 to 0.523-0.543 ms/frame because the frame is now the
+window and not the screen. `README.md` §2d is the reader-facing account; `src/damage.c` is the arithmetic;
+`tests/run-damage.sh` is the test, and it poisons what the client does not damage so that an over-paint is visible.
 
-Read this document in one sitting before touching anything; the traps in §6 are the ones that will otherwise produce
-a session of "the window flickers and I do not know why".
+The steps below were followed in order and each has a "done when"; the notes in place say where the landed code differs
+from the plan (the box is passed down the walk so a skipped surface still gets its callback; the GL renderer honours the
+box only where its swap preserves; the pointer's old rectangle is still a full frame). Read §6 before touching it — the
+traps there are the ones that would otherwise produce a session of "the window flickers and I do not know why".
 
 ---
 
@@ -284,3 +289,23 @@ Diagnostics that already exist and that this work should not confuse: `AWS_RENDE
 `AWS_CURSOR_DIAG`, `APPKIT_LOOP_DIAG`, `APPKIT_DRAW_DIAG`. Add **one** of your own (`WINDOW_SERVER_DAMAGE_DIAG`) and
 make it print the box and the reason — a damage bug is invisible in a screenshot of a static window and obvious in a
 line of text.
+
+---
+
+## 10. What the work did not close
+
+- **THE POINTER'S OLD RECTANGLE IS STILL A FULL FRAME.** A motion on an output that draws its own cursor calls
+  `aws_damage_full(server, "the pointer moved")`, because the pixels where the pointer WAS are not a rectangle any
+  client damaged — §6.2. The seat knows `pointer_x`/`pointer_y` and the cursor's device extent, so a union of the old and
+  new boxes plus the client damage is the next step; it needs the previous box remembered across the frame, and a
+  screenshot test that moves the pointer over a damaged strip.
+- **THE GL RENDERER PAINTS THE BOX ONLY WHERE ITS SWAP PRESERVES IT.** `EGL_BUFFER_PRESERVED` is asked for and READ
+  BACK; NVIDIA's EGL refuses it (MEASURED), and a GBM scanout buffer is a fresh allocation, so on those the GL path
+  composites the whole output. The CPU renderer — which is what the shipping DRM path uses when the GL context is the
+  CPU's — is where the measurement above comes from. Fixing this properly is a preserved back buffer or a second
+  surface, not a scissor.
+- **THE CLIENT STILL WIDENS ITS DAMAGE BY WHAT ITS OTHER BUFFER IS MISSING** (`_cg_paintMissing`), which is correct for
+  a two-buffer client and now costs more than it needs to on a compositor that keeps the screen. Narrowing it is a
+  `libagora-app` change with its own numbers — §8's criterion 5.
+- **A REGION, WHEN A PROFILE ASKS FOR ONE.** The box is decided in `damage.c` and nothing above it knows how the union is
+  kept, so a `pixman_region32_t` there is a local change: the renderers would then take a clip list instead of one box.

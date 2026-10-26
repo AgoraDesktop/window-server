@@ -262,10 +262,13 @@ struct gl_state {
 	struct gl_program cursor;
 
 	GLuint client_texture;		/* the surface being drawn, re-uploaded per draw */
-	/* **THE POINTER'S OWN TEXTURE, UPLOADED WHEN THE SCALE CHANGES.** The arrow's raster is a fact about the output's
-	 * scale, not about the frame, so it is uploaded once per scale rather than sixty times a second. */
+	/* **THE POINTER'S OWN TEXTURE, UPLOADED WHEN THE IMAGE IS RE-MADE.** The pointer's raster is a fact about the
+	 * output's scale and the session's theme, not about the frame, so it is uploaded once per image rather than sixty
+	 * times a second. The image says which one it is (`aws_cursor.generation`), because a scale alone would miss a theme
+	 * or size that changed under a running server at the same scale. */
 	GLuint cursor_texture;
-	double cursor_scale;		/* the scale in `cursor_texture`; 0 when nothing has been uploaded */
+	unsigned cursor_generation;	/* the generation in `cursor_texture` */
+	int cursor_uploaded;		/* whether `cursor_texture` holds an image at all */
 	GLuint coverage_texture;	/* the System menu's mark, uploaded when the mark or its size changes */
 	int coverage_ready;		/* whether `coverage_texture` holds anything yet */
 	int coverage_pixels;		/* the uploaded grid's side, in device pixels */
@@ -276,6 +279,13 @@ struct gl_state {
 	int width;
 	int height;
 	int own_pixels;			/* the readback buffer is ours to free */
+	/* **WHETHER A SWAP LEAVES WHAT THIS FRAME DID NOT PAINT WHERE IT WAS.** A partial frame is a scissor around a
+	 * smaller clear and a smaller walk, which is only correct if the next back buffer starts as the last front buffer did.
+	 * EGL's default for a window surface is `EGL_BUFFER_DESTROYED`; the compositor asks for `EGL_BUFFER_PRESERVED` and
+	 * BELIEVES THE ANSWER rather than the request, because a driver may refuse and a hole is worse than a slow frame. A
+	 * GBM surface has nothing to ask — the next scanout buffer is a different allocation — so the DRM path always
+	 * composites the whole output. */
+	int buffer_preserved;
 
 #ifdef AWS_HAVE_GBM
 	/* **A GBM SURFACE IS THE DRM BACKEND'S "WINDOW".** With no window system, EGL is given the card's GBM device;
@@ -545,14 +555,18 @@ static void upload_coverage(struct gl_state *gl, struct aws_system_icon *icon, i
  * --------------------------------------------------------------------------------------------------- */
 
 /* **NOTHING BEHIND THE MENU BAR CASTS A SHADOW ONTO IT**, which is the CPU renderer's rule and now one scissor
- * rectangle instead of a per-row test: the shadow may only land in the rows BELOW the strip. `bar_rows` is the
- * strip's height in DEVICE rows — the scissor is device state, and `AWS_MENU_BAR_HEIGHT` is points. Using the point
- * count here left `round(24 * scale) - 24` rows of the bar (8 at 96 dpi) exposed, which is exactly where a menu's
- * top shadow painted a dark band under the strip. */
-static void shadow_clip(struct gl_state *gl, int enable, float bar_rows)
+ * rectangle instead of a per-row test: the shadow may only land in the rows BELOW `clip_top`, which is a row count in
+ * DEVICE rows measured from the top of the screen — the scissor is device state, and `AWS_MENU_BAR_HEIGHT` is points.
+ * Using the point count here left `round(24 * scale) - 24` rows of the bar (8 at 96 dpi) exposed, which is exactly
+ * where a menu's top shadow painted a dark band under the strip.
+ *
+ * **AND THE SHEET IS THE SECOND USER OF THE SAME SENTENCE.** A sheet's top edge is its parent's title bar's bottom
+ * edge, so its shadow must stop there too: the caller passes its own top edge when it has one, and what gets clipped
+ * is a shadow ON a title bar that is supposed to be a seam rather than a ledge. */
+static void shadow_clip(struct gl_state *gl, int enable, float clip_top)
 {
 	if (enable) {
-		int below = gl->height - (int)(bar_rows + 0.5f);
+		int below = gl->height - (int)(clip_top + 0.5f);
 
 		if (below < 0) {
 			below = 0;
@@ -893,6 +907,11 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 	int transparent;
 	int in_bar;
 	int hangs_from_bar;
+	/* **AND A SHEET HANGS FROM ITS PARENT'S TITLE BAR, WHICH IS A SEAM THE GEOMETRY CANNOT NAME.** The bar below is a
+	 * number both sides have; a sheet's parent is a fact only its application knows, so `set_sheet_parent` is what puts
+	 * this on the surface. The two are one question at the corner — see `shape_coverage` — and this is the GL copy of
+	 * that rule. */
+	int squares_top;
 	float radius;
 	float tl, tr, bl, br;
 
@@ -997,6 +1016,7 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 	 * with it would round the corners of a window that reaches the screen edge on any scaled output. */
 	in_bar = surface->y >= 0 && surface->y + surface->frame_height <= AWS_MENU_BAR_HEIGHT;	/* logical, both sides */
 	hangs_from_bar = surface->y == AWS_MENU_BAR_HEIGHT;
+	squares_top = hangs_from_bar || surface->sheet_parent != NULL;
 	radius = (float)AWS_SHADOW_RADIUS;
 	if (radius > (float)width / 2.0f) {
 		radius = (float)width / 2.0f;
@@ -1004,8 +1024,8 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 	if (radius > (float)height / 2.0f) {
 		radius = (float)height / 2.0f;
 	}
-	tl = (!in_bar && !hangs_from_bar && surface->x > 0 && surface->y > 0) ? 1.0f : 0.0f;
-	tr = (!in_bar && !hangs_from_bar && surface->x + width < aws_output_width(server) && surface->y > 0) ? 1.0f : 0.0f;
+	tl = (!in_bar && !squares_top && surface->x > 0 && surface->y > 0) ? 1.0f : 0.0f;
+	tr = (!in_bar && !squares_top && surface->x + width < aws_output_width(server) && surface->y > 0) ? 1.0f : 0.0f;
 	bl = (!in_bar && surface->x > 0 && surface->y + height < aws_output_height(server)) ? 1.0f : 0.0f;
 	br = (!in_bar && surface->x + width < aws_output_width(server) &&
 	      surface->y + height < aws_output_height(server)) ? 1.0f : 0.0f;
@@ -1013,10 +1033,21 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 	/* THE SHADOW FIRST, because it is a shadow on the things behind. */
 	if (!in_bar) {
 		float s = (float)aws_output_scale(server);
-		/* The bar's height in DEVICE rows, which is what the scissor is measured in — not the 24 points. */
+		/* The bar's height in DEVICE rows, which is what the scissor is measured in — not the 24 points. **AND A
+		 * SHEET'S SEAM IS THE SECOND FLOOR**, for the reason `shadow_clip` gives: the sheet's top edge is tucked
+		 * `sheet_seam` points into its parent's title bar, so no shadow may be painted on the rows above the bottom of
+		 * that tuck — they are the bar's. */
 		float bar_h = gl_round((double)AWS_MENU_BAR_HEIGHT * (double)s);
+		float clip_top = bar_h;
 
-		shadow_clip(gl, 1, bar_h);
+		if (surface->sheet_parent != NULL) {
+			float seam = gl_round((double)(surface->y + surface->sheet_seam) * (double)s);
+
+			if (seam > clip_top) {
+				clip_top = seam;
+			}
+		}
+		shadow_clip(gl, 1, clip_top);
 		gl_shadow(gl, (float)surface->x * s, (float)surface->y * s, (float)surface->frame_width * s,
 			  (float)surface->frame_height * s, (float)AWS_SHADOW_RADIUS * s);
 		shadow_clip(gl, 0, 0.0f);
@@ -1053,11 +1084,29 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 	}
 }
 
-static void gl_emit(struct aws_server *server, struct aws_surface *surface, uint32_t time)
+static void gl_emit(struct aws_server *server, struct aws_surface *surface, uint32_t time,
+		    const struct aws_box *box)
 {
 	if (surface == NULL) {
 		gl_draw_menu_bar(server);
 		return;
+	}
+	/* **THE SCISSOR CLIPS EVERY DRAW, SO AN EMIT OUTSIDE THE BOX COSTS ITS CALLBACK AND NOTHING ELSE.** Trap 1 of
+	 * DAMAGE-PLAN.md §6 is the reason this is a return AFTER `aws_surface_frame_done`: a client whose callback is
+	 * skipped along with its pixels never draws again. */
+	if (box != NULL) {
+		struct aws_box footprint;
+		double scale = server->backend.scale > 0.0 ? server->backend.scale : 1.0;
+		int depth = (int)(AWS_SHADOW_DEPTH * scale + 0.5);
+
+		footprint.x = (int)((double)surface->x * scale + 0.5) - depth;
+		footprint.y = (int)((double)surface->y * scale + 0.5) - depth;
+		footprint.width = (int)((double)surface->frame_width * scale + 0.5) + depth * 2;
+		footprint.height = (int)((double)surface->frame_height * scale + 0.5) + depth * 2;
+		if (!aws_box_intersects(box, &footprint)) {
+			aws_surface_frame_done(surface, time);
+			return;
+		}
 	}
 	gl_draw_surface(server, surface);
 	aws_surface_frame_done(surface, time);
@@ -1094,17 +1143,30 @@ static void gl_readback(struct aws_server *server)
 	free(pixels);
 }
 
-static void gl_draw(struct aws_server *server)
+static void gl_draw(struct aws_server *server, const struct aws_box *box)
 {
 	struct gl_state *gl = server->renderer->data;
 	float r, g, b;
 
 	rgb_of(AWS_BACKGROUND, &r, &g, &b);
 	glViewport(0, 0, gl->width, gl->height);
-	glDisable(GL_SCISSOR_TEST);
+	/* **A PARTIAL FRAME IS A SCISSOR, AND GL'S ORIGIN IS THE BOTTOM LEFT WHILE THE BOX'S IS THE TOP LEFT.** The
+	 * conversion is here, once, and nowhere else: `y_gl = height - (box.y + box.height)`, which is the row the box's
+	 * LAST device row starts at. A box drawn full because the swap does not preserve what this frame leaves alone is the
+	 * correct answer rather than a slow one — under-painting would be a hole. */
+	if (box != NULL && gl->buffer_preserved) {
+		glEnable(GL_SCISSOR_TEST);
+		glScissor(box->x, gl->height - (box->y + box->height), box->width, box->height);
+	} else {
+		box = NULL;
+		glDisable(GL_SCISSOR_TEST);
+	}
 	glClearColor(r, g, b, 1.0f);
+	/* **THE CLEAR HONOURS THE SCISSOR, WHICH IS WHY THERE IS NO SECOND PATH FOR IT.** `glClear` is clipped by the
+	 * scissor test, so "clear the background inside the box" is the same call as "clear the whole output" with a box
+	 * around it — one expression that cannot drift from the walk it belongs to. */
 	glClear(GL_COLOR_BUFFER_BIT);
-	aws_output_walk(server, gl_emit);
+	aws_output_walk(server, gl_emit, box);
 	/* **THE POINTER IS OVER EVERYTHING** — the same last act as the CPU renderer's, with the placement and the
 	 * clipping done by `aws_cursor_image`'s own arithmetic rather than by a second copy of it here. */
 	{
@@ -1116,12 +1178,13 @@ static void gl_draw(struct aws_server *server)
 			float y = gl_round((double)server->pointer_y * server->backend.scale) -
 				(float)cursor->hotspot_y;
 
-			if (gl->cursor_scale != cursor->scale) {
+			if (!gl->cursor_uploaded || gl->cursor_generation != cursor->generation) {
 				glBindTexture(GL_TEXTURE_2D, gl->cursor_texture);
 				glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, cursor->width, cursor->height, 0, GL_RGBA,
 					     GL_UNSIGNED_BYTE, cursor->pixels);
-				gl->cursor_scale = cursor->scale;
+				gl->cursor_generation = cursor->generation;
+				gl->cursor_uploaded = 1;
 			}
 			gl_textured(gl, &gl->cursor, GL_TEXTURE_2D, gl->cursor_texture, x, y,
 				    (float)cursor->width, (float)cursor->height,
@@ -1129,6 +1192,9 @@ static void gl_draw(struct aws_server *server)
 				    0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0);
 		}
 	}
+	/* **AND THE SCISSOR GOES OFF BEFORE ANYTHING ELSE DRAWS — OR SWAPS.** State left on would clip a frame that never
+	 * asked to be clipped, and the next frame's readback would be a picture of the last box. */
+	glDisable(GL_SCISSOR_TEST);
 	/* **A SCREENSHOT'S BUFFER IS MADE WHEN IT IS FIRST WANTED, NOT WHEN THE CONTEXT IS.** `--screenshot` is parsed
 	 * after the server (and so after this renderer) is created, so a buffer allocated at init time would be one
 	 * nobody asked for; and the readback is a debug path, so three and a half megabytes are not worth holding for
@@ -1464,6 +1530,28 @@ int aws_renderer_gl_create(struct aws_server *server)
 	 * flip (`drm_busy`), and asking EGL to wait for a vblank as well would spend two vblanks per frame on a driver
 	 * that implements the wait. The X11 surface has no flip event of ours to pace it, so it keeps interval 1. */
 	eglSwapInterval(gl->display, use_gbm ? 0 : 1);
+	/* **AND WHETHER A SWAP KEEPS THE PIXELS THIS FRAME DID NOT PAINT.** A partial frame draws into the back buffer and
+	 * leaves the rest of it alone, so the frame is only complete if the back buffer began as the last front buffer did.
+	 * A window surface asks for that with `EGL_BUFFER_PRESERVED` and READS THE ANSWER BACK: Mesa may refuse, and a
+	 * compositor that believed the request instead of the reply would paint the strip and leave holes around it. A GBM
+	 * surface has no preservation to ask for (the next scanout buffer is a fresh allocation), so the DRM path draws the
+	 * whole output and says so. */
+	{
+		EGLint behaviour = EGL_BUFFER_DESTROYED;
+
+		if (!use_gbm &&
+		    eglSurfaceAttrib(gl->display, gl->surface, EGL_SWAP_BEHAVIOR, EGL_BUFFER_PRESERVED)) {
+			eglQuerySurface(gl->display, gl->surface, EGL_SWAP_BEHAVIOR, &behaviour);
+		}
+		gl->buffer_preserved = (behaviour == EGL_BUFFER_PRESERVED);
+	}
+	/* **AND IT SAYS SO, BECAUSE IT CHANGES WHAT A FRAME IS.** A preserved swap makes the damage box a scissor and the
+	 * whole output unnecessary; a destroyed one means every frame is a full frame, which is CORRECT and slow, and the
+	 * difference is one line of text rather than a mystery about why a DRM session still costs what it did. */
+	fprintf(stderr, "window-server: gl: a swap %s the frame it does not paint%s\n",
+		gl->buffer_preserved ? "preserves" : "DESTROYS",
+		gl->buffer_preserved ? ", so a frame may paint its damage box"
+				     : " (a GBM scanout buffer is a different allocation), so every frame is a full frame");
 
 	/* **AND WHETHER THIS GL CAN SAMPLE AN EXTERNAL IMAGE.** Some drivers refuse `GL_TEXTURE_2D` for a dma-buf
 	 * modifier and offer only `GL_TEXTURE_EXTERNAL_OES`; the shader for that is linked only when the extension is

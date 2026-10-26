@@ -38,8 +38,11 @@
  *     that drew an item would be making the mistake the dock rule exists to prevent. See DESIGN.md.
  *
  *     **AND THE POINTER, WHERE THERE IS NO HOST TO DRAW IT.** A nested backend's window already shows the host's
- *     cursor; a DRM output has only these pixels, so `cursor.c` composites a fallback arrow above every surface and
- *     `backend.owns_cursor` says which backends need it. A client's cursor surface is still not implemented.
+ *     cursor; a DRM output has only these pixels, so `cursor.c` composites a pointer above every surface and
+ *     `backend.owns_cursor` says which backends need it. **THE POINTER'S PIXELS ARE A CURSOR THEME'S** — the vendored
+ *     Vimix theme, or `AGORA_CURSOR_THEME` — read by `cursor-theme.c`; the nested X11 backend hands the same image to
+ *     the host as the window's cursor, so both display paths show the theme rather than a shape Agora invented. A
+ *     client's cursor surface is still not implemented.
  *   - NO POLICY ABOUT WINDOWS, AND EXACTLY ONE ABOUT THE SCREEN. Placement, stacking and sizing are the
  *     APPLICATION's: no cascade, no tiling, and a frame is acted on as given. What the server does decide is
  *     what the SCREEN reserves for the furniture it owns — a different kind of question, because an application
@@ -65,6 +68,41 @@ struct aws_server;
 struct gbm_device;
 struct gbm_surface;
 struct gbm_bo;
+
+/* **A RECTANGLE IN DEVICE PIXELS, TOP-DOWN FROM THE OUTPUT'S TOP-LEFT, AND IT IS THE ONLY SPACE BOTH RENDERERS SHARE.**
+ * `x`/`y` are the framebuffer's own coordinates — the ones `backend->pixels` is indexed by and the ones the menu bar's
+ * fill uses — NOT the logical coordinates a window's frame, a level and a hit test speak. A box is EMPTY when its width
+ * or height is zero, which is how "nothing to paint" is said without a second flag, and an empty box is the identity
+ * of `aws_box_union`.
+ *
+ * Damage bookkeeping has three spaces in it and they are different numbers (see `DAMAGE-PLAN.md` §6.5): the client's
+ * BUFFER pixels (what `wl_surface.damage_buffer` names, top-down), the LOGICAL pixels a window is placed in, and these
+ * DEVICE pixels. The translation happens once, in `damage.c`, and everything above that line — the renderers, the
+ * cursor, the frame loop — takes this one. */
+struct aws_box {
+	int x;
+	int y;
+	int width;
+	int height;
+};
+
+/* **THE TWO ROUNDINGS A DAMAGE RECTANGLE NEEDS, WITHOUT PULLING `libm` INTO A COMPOSITOR FOR THEM.** A buffer rectangle
+ * becomes a device one by scaling a real number, and the edges round OUTWARD — `floor` on the way in, `ceil` on the way
+ * out — so a device pixel the client's rectangle only partly covers is still repainted. Written as inline arithmetic
+ * rather than `floor`/`ceil` because the C library's versions cost a call and a link for two lines of integer work. */
+static inline int aws_edge_floor(double value)
+{
+	int truncated = (int)value;
+
+	return ((double)truncated > value) ? truncated - 1 : truncated;
+}
+
+static inline int aws_edge_ceil(double value)
+{
+	int truncated = (int)value;
+
+	return ((double)truncated < value) ? truncated + 1 : truncated;
+}
 
 /* A SURFACE, and the role it has been given. A surface is what a client draws into; the ROLE is what makes it
  * a window rather than a cursor or a popup, and this version knows exactly one role. */
@@ -102,6 +140,17 @@ struct aws_surface {
 	 * big it says it is, and `level` is the integer the composition is ordered by. See `src/shell.c`. */
 	int frame_width;
 	int frame_height;
+	/* ---- DAMAGE: WHAT THE CLIENT SAYS IT REPAINTED, IN BUFFER PIXELS, TOP-DOWN. ---- */
+	/* **THE CLIENT NAMES ITS RECTANGLES AND THE COMPOSITOR PAINTS ONLY THOSE.** `wl_surface.damage_buffer` is already in
+	 * buffer pixels; `wl_surface.damage` is surface-local (logical) and is multiplied by the client's scale on the way
+	 * in. `damage` is the union of every rectangle recorded since the last commit, `damage_input` says one arrived, and
+	 * a commit turns either them or (when it recorded none and attached a buffer) THE WHOLE BUFFER into `damage_valid`,
+	 * which one composite consumes. See `damage.c` for the translation to device pixels and `DAMAGE-PLAN.md` for why the
+	 * rectangles are one bounding box and not a region. */
+	struct aws_box damage;		/* accumulated since the last composite, in BUFFER pixels */
+	int damage_input;		/* a rectangle arrived since the last commit */
+	int damage_valid;		/* a commit is waiting for a composite to consume its damage */
+	int damage_whole;		/* that commit damaged nothing, so it means THE WHOLE BUFFER */
 	/* **THE CLIENT'S BUFFER IS THIS MANY DEVICE PIXELS PER LOGICAL ONE, AND THE COMPOSITOR HAS TO KNOW.**
 	 * `wl_surface.set_buffer_scale` is how a client says "my buffer is 2x the surface I am describing": a
 	 * 640x400 window on a 2x output sends a 1280x800 buffer and asks for it to be placed as 640x400. Everything
@@ -149,6 +198,19 @@ struct aws_surface {
 	int activatable;
 	unsigned int id;			/* the server's number for this window; 0 until it is given an agora role */
 	struct wl_resource *agora_window;	/* the role, when this surface's client is an Agora one */
+	/* **AND THE WINDOW THIS ONE HANGS FROM, WHEN THE APPLICATION SAYS IT IS A SHEET.** The one cross-surface
+	 * reference this server keeps, and it is the application's statement rather than something read off the frames:
+	 * two rounded rectangles whose edges happen to touch look identical to two that belong to each other, and the
+	 * shape a sheet's top edge gets — and which of the two is in front — depend on knowing which it is. See the
+	 * protocol's `set_sheet_parent`. The pointer is the PARENT's and it is cleared from the other end when the parent
+	 * goes (`aws_shell_surface_gone`), so a parent destroyed first leaves this an ordinary window and not a dangling
+	 * one; nothing points the other way, so a sheet destroyed first has nothing to clean up. */
+	struct aws_surface *sheet_parent;	/* NULL when this window is not a sheet */
+	/* **AND HOW MUCH OF THE SHEET'S TOP EDGE IS ITS PARENT'S.** Points of the sheet's own top edge that are tucked into
+	 * the parent's title bar — the strip the client paints in the bar's colour so the sheet reads as coming out from
+	 * under it. The shape uses it for one thing: a shadow may not be painted on those rows, because they are the title
+	 * bar's. Zero is a sheet placed flush with the bar's bottom edge. */
+	int sheet_seam;
 
 	int x;					/* where the compositor has put it, in output coordinates */
 	int y;
@@ -271,6 +333,13 @@ struct aws_backend {
 	 * Headless leaves it zero, which is also why its screenshots stay cursor-free. */
 	int owns_cursor;
 
+	/* **AND THE OTHER HALF: WHERE A HOST *DOES* DRAW IT, THE THEME'S POINTER GOES TO THE HOST.** The nested X11
+	 * backend defines the X window's cursor from `aws_cursor_theme_pointer` — the same themed image, variant and
+	 * hotspot the DRM path composites — so a nested session shows the desktop's own pointer and not whatever the
+	 * host X server defaults to. Called at startup and again whenever the theme or the size changes; NULL for a
+	 * backend that has no host pointer or composites its own (DRM), and for headless. */
+	void (*apply_cursor)(struct aws_server *server);
+
 	/* **NONZERO WHILE THE BACKEND CANNOT ACCEPT A FRAME** — the display has not taken the last one yet. A RENDER
 	 * LOOP ASKS THIS BEFORE IT DRAWS, because drawing into a buffer the display may still be reading is the tear
 	 * a double-buffered backend exists to avoid. NULL means always ready. */
@@ -344,7 +413,11 @@ struct aws_dmabuf_buffer {
 struct aws_renderer {
 	const char *name;
 	/* EVERY FRAME, ONCE. Called from `aws_output_render`; the buffer release that follows is the server's. */
-	void (*draw)(struct aws_server *server);
+	/* **ONE FRAME, AND WHICH PART OF THE OUTPUT IT IS FOR.** `box` is the rectangle to repaint in DEVICE pixels,
+	 * top-down — or NULL for the whole output, which is what a full redraw is. A renderer that cannot honour a box
+	 * (the GL one on a surface whose swap does not preserve its contents) draws the whole frame instead; it must never
+	 * draw LESS than the box, because a pixel left unpainted is a stale pixel and nobody sees it until much later. */
+	void (*draw)(struct aws_server *server, const struct aws_box *box);
 	void (*stop)(struct aws_server *server);
 	/* **THE GPU BUFFERS THIS RENDERER CAN TAKE, AND HOW IT TAKES THEM.** A renderer that fills `formats` and answers a
 	 * positive count is one that can sample a client's dma-buf, and only then is `zwp_linux_dmabuf_v1` advertised at
@@ -461,9 +534,16 @@ struct aws_server {
 	int pointer_y;
 	int pointer_inside;			/* the pointer is inside the output at all */
 	/* **THE FALLBACK CURSOR'S RASTER, KEPT FOR THE SCALE IT WAS MADE AT.** A DRM output has no host pointer, so the
-	 * arrow in cursor.c is composited over every frame; the image is rasterized once per scale and reused, because
-	 * the shape never changes and the raster is the only thing about a cursor that costs anything. */
+	 * image in cursor.c is composited over every frame; it is made once per scale and theme setting and reused, because
+	 * the shape does not change per frame and the raster is the only thing about a cursor that costs anything. */
 	struct aws_cursor cursor;
+	/* **AND WHERE ITS PIXELS COME FROM.** `cursor_theme` is the Xcursor theme (`cursor-theme.c`) — the vendored Vimix
+	 * theme by default, or `AGORA_CURSOR_THEME` — and it is NULL when there is none, in which case cursor.c draws its
+	 * own arrow. `cursor_size` is the pointer's size in POINTS, and `cursor_generation` is bumped whenever either of
+	 * them changes, so a cached image knows it is stale without the setter having to reach into it. */
+	struct aws_cursor_theme *cursor_theme;
+	double cursor_size;
+	unsigned cursor_generation;
 	/* AN AXIS HAS BEEN SENT SINCE THE LAST FRAME, which is what makes `axis_source` once per frame rather than
 	 * once per axis — the protocol asks for it in the frame the axis events belong to, and repeating it for the
 	 * second axis of one gesture would be a lie about how many gestures there were. */
@@ -479,6 +559,17 @@ struct aws_server {
 	struct xkb_state *xkb_state;
 
 	int render_pending;
+	/* ---- THE FRAME'S BOX: WHAT THE NEXT FRAME HAS TO REPAINT, AND WHY IT MIGHT BE EVERYTHING ---- */
+	/* **A FRAME IS "THIS RECTANGLE, PLEASE", UNLESS SOMETHING THAT IS NOT A CLIENT COMMIT CHANGED.** `damage`
+	 * accumulates rectangles the COMPOSITOR knows about (the surfaces' own are collected from their ledgers by
+	 * `aws_damage_frame_begin`); `damage_full` overrides it with the whole output and `damage_reason` names the trigger
+	 * that said so, because a damage bug is invisible in a screenshot of a static window and obvious in a line of text.
+	 * The safety valve is the default: `aws_server_schedule_render` — what every non-client change calls — marks the
+	 * frame FULL, and only a client commit that recorded damage narrows it. A missing invalidation would be a stale
+	 * pixel nobody notices; a spurious one is only slow. */
+	struct aws_box damage;
+	int damage_full;
+	const char *damage_reason;
 	int frames;
 	int max_frames;
 	const char *screenshot;
@@ -493,11 +584,28 @@ struct aws_server {
 /* `width` and `height` are LOGICAL pixels — the screen a client is told about — `scale` is the device pixels per
  * logical pixel the DISPLAY asked for, where 0 means "whatever the backend can infer" (see `aws_backend_init`), and
  * `ui_scale` is the USER's comfort factor, applied after that inference and after the override; 0 means "nobody
- * said" and becomes 1, which is the whole of the default behaviour. */
+ * said" and becomes 1, which is the whole of the default behaviour.
+ *
+ * `cursor_theme` is the Xcursor theme directory the pointer's artwork comes from and `cursor_size` is the pointer's
+ * size in points; 0 for the size, and NULL for the directory, mean "the environment, then the built-in default"
+ * (`aws_cursor_theme_default_directory`, `AWS_CURSOR_DEFAULT_SIZE`). Neither can fail the server: a machine with no
+ * theme installed gets the arrow drawn in cursor.c. */
 struct aws_server *aws_server_create(const char *backend_name, const char *input_name, const char *renderer_name,
-				     int width, int height, double scale, double ui_scale);
+				     int width, int height, double scale, double ui_scale,
+				     const char *cursor_theme, double cursor_size);
+/* **CHANGE THE POINTER WITHOUT RESTARTING THE SESSION.** The theme is re-opened (NULL means the environment, then the
+ * installed default) and the size is in points; either bumps the generation, drops the cached image and tells the
+ * backend to re-apply it to a host that draws the pointer itself. The theme setter answers -1 when the directory is
+ * not a theme — which is not a failure, only a fallback: the drawn arrow keeps the pointer visible. */
+int aws_server_set_cursor_theme(struct aws_server *server, const char *directory);
+void aws_server_set_cursor_size(struct aws_server *server, double points);
 void aws_server_destroy(struct aws_server *server);
+/* **A RENDER IS DUE, AND IT IS THE WHOLE OUTPUT UNLESS SOMETHING NARROWED IT.** Every change that is not a client's own
+ * pixels goes through `aws_server_schedule_render`, so a caller that knows nothing about damage is still correct — which
+ * is the point of a safety valve rather than a rule. Only `surface_commit`, which HAS the client's rectangles, uses the
+ * second form: "a render is due, and it may be the part of the output the surfaces have already named". */
 void aws_server_schedule_render(struct aws_server *server);
+void aws_server_schedule_render_partial(struct aws_server *server);
 /* `name` is an icon id, an alias, a distro id, a family, or "auto" to re-resolve from the identity. Returns 0 on
  * success and -1 for an unknown name. */
 int aws_server_set_system_menu_icon(struct aws_server *server, const char *name);
@@ -508,13 +616,39 @@ void aws_xdg_shell_init(struct aws_server *server);
 
 /* output.c — the wl_output global, the composite ORDER, and the screenshot */
 void aws_output_init(struct aws_server *server);
-void aws_output_render(struct aws_server *server);
+/* **PAINT A FRAME, AND ANSWER WHETHER THERE WAS ONE TO PAINT.** The damage is collected (and consumed) here, so a
+ * frame with nothing in it is SKIPPED entirely: no clear, no walk, no present. The clients' `wl_surface.frame`
+ * callbacks are still completed in that case, because they are a promise and a client that gets none never draws
+ * again (see `DAMAGE-PLAN.md` §6.1). Answers 0 when nothing was composited, which is what the loop counts frames by. */
+int aws_output_render(struct aws_server *server);
 /* **THE COMPOSITE ORDER, IN ONE PLACE.** `emit` is called with a NULL surface when the menu bar is due, and once
  * for each surface that is actually on the screen, in the order they are painted — background clears are the
  * renderer's, and the buffer release after the walk is `aws_output_render`'s. A menu window's `frame_done` belongs
- * here because it is owed at composite time; the caller passes the frame's clock down through `time`. */
-typedef void (*aws_output_emit_fn)(struct aws_server *server, struct aws_surface *surface, uint32_t time);
-void aws_output_walk(struct aws_server *server, aws_output_emit_fn emit);
+ * here because it is owed at composite time; the caller passes the frame's clock down through `time`.
+ *
+ * **AND THE BOX COMES DOWN THE WALK, BECAUSE A SKIPPED SURFACE STILL OWES ITS CALLBACK.** `box` is the frame's
+ * rectangle in device pixels, or NULL for everything; the walk still VISITS every surface in order (the order is what
+ * a sheet's adjacency is), and it is the emitter that decides whether that surface has pixels inside the box. A walk
+ * that skipped surfaces to save the emit call would starve them. */
+typedef void (*aws_output_emit_fn)(struct aws_server *server, struct aws_surface *surface, uint32_t time,
+				   const struct aws_box *box);
+void aws_output_walk(struct aws_server *server, aws_output_emit_fn emit, const struct aws_box *box);
+/* **AND THE CALLBACKS A SKIPPED FRAME STILL OWES.** A frame that paints nothing completes the callbacks of every
+ * surface that is really on the screen, which is the same set the walk would have visited. */
+void aws_output_complete_frames(struct aws_server *server);
+/* **WHAT THE NEXT FRAME MUST PAINT, COLLECTED AND CONSUMED.** Answers how many surfaces contributed; `box` is the
+ * union in device pixels, `full` overrides it, and `reason` names the trigger behind a full frame. Called once per
+ * frame by `aws_output_render`, and `/nothing else/` — the ledgers it clears are only meaningful across one frame. */
+int aws_damage_frame_begin(struct aws_server *server, struct aws_box *box, int *full, const char **reason);
+/* **THE TRIGGERS.** `aws_damage_full` is what anything that is not a client's own pixels calls: a window moved, a
+ * menu bar title changed, a scale changed, the pointer moved on an output that draws its own cursor. The reason string
+ * is kept for `WINDOW_SERVER_DAMAGE_DIAG=1`, which is the only way to tell a missed invalidation from a slow frame. */
+void aws_damage_full(struct aws_server *server, const char *reason);
+/* Rectangle arithmetic, on `struct aws_box`. */
+int aws_box_empty(const struct aws_box *box);
+void aws_box_union(struct aws_box *into, const struct aws_box *add);
+void aws_box_clip(struct aws_box *box, int width, int height);
+int aws_box_intersects(const struct aws_box *box, const struct aws_box *other);
 int aws_output_write_ppm(struct aws_server *server, const char *path);
 
 /* renderer.c — choosing who draws, and the two calls the lifecycle makes */const char *aws_renderer_names(void);
@@ -653,6 +787,19 @@ void aws_shell_window_list_changed(struct aws_server *server);
 /* **WHERE AN APPLICATION'S OWN MENUS MAY BEGIN** — the strip minus the System menu's square. The one number about
  * the bar that a client cannot derive, because the System menu's width is the server's. See `agora-shell.xml`. */
 void aws_shell_menu_bar_area(struct aws_server *server, int *x, int *y, int *width, int *height);
+/* **AND WHAT A DESTROYED SURFACE TAKES WITH IT, FROM THE OTHER SIDE OF THE SHEET RELATION.** A window that was some
+ * sheet's parent holds no reference to the sheet — the sheet holds the only one — so this walks the list and clears
+ * every child that named the dying surface, before its memory is given back. */
+void aws_shell_surface_gone(struct aws_server *server, struct aws_surface *surface);
+
+/* **WHETHER A WINDOW IS DRAWABLE ONLY WITH ITS PARENT — THE ONE PREDICATE THE COMPOSITE ORDER AND THE HIT TEST SHARE.**
+ * A sheet is not a window beside its parent; it is part of it, so the pair is ONE thing in the order: the sheet is
+ * drawn immediately above the parent and met immediately in front of it, whatever the list says and whatever level the
+ * sheet was given. That is what makes it impossible for another window to be stacked between them — raising the sheet,
+ * raising its parent, or ordering a third window in between changes the LIST, and the list is not the answer for a
+ * sheet. True only when the parent is really on the screen (mapped, visible, with a buffer); a sheet whose parent is
+ * hidden is an ordinary window in its own pass, which is also what the AppKit does with it. */
+int aws_surface_drawn_with_parent(const struct aws_surface *surface);
 
 /* The packing of the status area, which a client adding or removing an item has just invalidated. */
 void aws_shell_place_status_items(struct aws_server *server);

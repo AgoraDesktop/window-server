@@ -115,6 +115,20 @@ struct client {
 	int buffer_width;
 	int buffer_height;
 
+	/* **A CLIENT WHOSE PIXELS AND WHOSE DAMAGE DISAGREE ON PURPOSE.** A compositor that recomposites the whole window
+	 * looks identical to one that honours the rectangles whenever the client repainted the whole window — so the strip
+	 * modes POISON the rest of the buffer and damage only the strip. If the poison reaches the screen the compositor
+	 * ignored the damage; if it does not, the rest of the window is the picture it already had. `--damage strip` is the
+	 * partial commit, `whole` is a commit that damages nothing (Wayland's whole-buffer rule), and `move` is a
+	 * `set_frame` — a full-redraw trigger that must repaint BOTH the new place and the ground the window left. */
+	int damage_mode;		/* 0 none, 1 strip, 2 whole-buffer rule, 3 move */
+	int strip_y0;
+	int strip_y1;
+	uint32_t strip_colour;
+	uint32_t third_colour;
+	int move_x;
+	int move_y;
+
 	/* THE WALLPAPER IMAGE, when --image named one: RGB, three bytes per sample. */
 	const char *image_path;
 	unsigned char *image_rgb;
@@ -254,6 +268,63 @@ static void frame_done(void *data, struct wl_callback *callback, uint32_t time)
 
 static const struct wl_callback_listener frame_listener = { frame_done };
 
+/* **A HORIZONTAL BAND OF THE BUFFER, IN ONE COLOUR.** The strip modes' whole vocabulary: the base picture, the strip
+ * the commit names, and the poison the commit does not. */
+static void paint_band(struct client *client, int y0, int y1, uint32_t colour)
+{
+	uint32_t *pixels = client->pixels;
+	int x, y;
+
+	if (pixels == NULL) {
+		return;
+	}
+	if (y0 < 0) {
+		y0 = 0;
+	}
+	if (y1 > client->buffer_height) {
+		y1 = client->buffer_height;
+	}
+	for (y = y0; y < y1; y++) {
+		for (x = 0; x < client->buffer_width; x++) {
+			pixels[(size_t)y * (size_t)client->buffer_width + (size_t)x] = colour;
+		}
+	}
+}
+
+#define POISON_COLOUR 0x00FF00FFu	/* magenta: no other test in this tree uses it */
+
+/* **WHAT THIS FRAME'S BUFFER HOLDS, WHICH IS NOT ALWAYS WHAT THIS FRAME'S DAMAGE NAMES.** The frame index is
+ * `client->frames`, the count of frame callbacks already received: 0 is the first commit, which always paints the whole
+ * buffer and damages the whole buffer. */
+static void damage_mode_paint(struct client *client)
+{
+	int index = client->frames;
+
+	if (client->damage_mode == 0) {
+		return;
+	}
+	if (index == 0) {
+		paint_band(client, 0, client->buffer_height, client->colour);
+		return;
+	}
+	if (client->damage_mode == 2 && index >= 2) {
+		/* THE THIRD PICTURE, COMMITTED WITH NO DAMAGE: the whole-buffer rule has to repaint the window. */
+		paint_band(client, 0, client->buffer_height, client->third_colour);
+		return;
+	}
+	if (client->damage_mode == 3 && index >= 2) {
+		/* THE WINDOW MOVED, and the buffer is painted correctly so the assertion is about the move rather than
+		 * about the poison. The commit still damages NOTHING: `set_frame` is the full-redraw trigger. */
+		paint_band(client, 0, client->buffer_height, client->colour);
+		paint_band(client, client->strip_y0, client->strip_y1, client->strip_colour);
+		return;
+	}
+	/* **THE POISON, THEN THE STRIP.** Everything the strip does not cover is a colour that must never reach the
+	 * glass; only the strip is damaged. */
+	paint_band(client, 0, client->buffer_height, POISON_COLOUR);
+	paint_band(client, client->strip_y0, client->strip_y1, client->strip_colour);
+}
+
 /* ONE FRAME, IN THE ORDER THE PROTOCOL WANTS IT: the callback is requested BEFORE the commit it belongs to,
  * and the attach comes before the commit that presents it. */
 static void submit_frame(struct client *client)
@@ -269,8 +340,23 @@ static void submit_frame(struct client *client)
 		buffer = client->buffers[client->slot];
 	}
 	wl_callback_add_listener(callback, &frame_listener, client);
+	damage_mode_paint(client);
 	wl_surface_attach(client->surface, buffer, 0, 0);
-	wl_surface_damage_buffer(client->surface, 0, 0, client->buffer_width, client->buffer_height);
+	/* **THE DAMAGE IS THE FRAME'S STATEMENT ABOUT ITS PIXELS, AND EACH MODE IS A DIFFERENT ONE.** */
+	if ((client->damage_mode == 1 && client->frames >= 1) ||
+	    ((client->damage_mode == 2 || client->damage_mode == 3) && client->frames == 1)) {
+		wl_surface_damage_buffer(client->surface, 0, client->strip_y0, client->buffer_width,
+					 client->strip_y1 - client->strip_y0);
+	} else if (client->damage_mode == 3 && client->frames >= 2) {
+		/* NOTHING DAMAGED, AND THE WINDOW MOVED: the frame is everything, because the ground it left is not the
+		 * client's to damage. */
+		agora_window_set_frame(client->window, client->move_x, client->move_y, client->width,
+				       client->height);
+	} else if (client->damage_mode == 2 && client->frames >= 2) {
+		/* NOTHING DAMAGED, AND A BUFFER ATTACHED: Wayland says that means THE WHOLE BUFFER. */
+	} else {
+		wl_surface_damage_buffer(client->surface, 0, 0, client->buffer_width, client->buffer_height);
+	}
 	wl_surface_commit(client->surface);
 }
 
@@ -613,6 +699,12 @@ int main(int argc, char **argv)
 	client.frame_x = 100;
 	client.frame_y = 80;
 	client.level = 0;
+	client.strip_y0 = 40;
+	client.strip_y1 = 60;
+	client.strip_colour = 0x0000FF00u;
+	client.third_colour = 0x00FFFF00u;
+	client.move_x = 600;
+	client.move_y = 300;
 
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
@@ -649,6 +741,44 @@ int main(int argc, char **argv)
 			client.quadrants = 1;
 		} else if (strcmp(argv[i], "--status-length") == 0 && i + 1 < argc) {
 			client.status_length = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "--damage") == 0 && i + 1 < argc) {
+			const char *mode = argv[++i];
+
+			if (strcmp(mode, "strip") == 0) {
+				client.damage_mode = 1;
+			} else if (strcmp(mode, "whole") == 0) {
+				client.damage_mode = 2;
+			} else if (strcmp(mode, "move") == 0) {
+				client.damage_mode = 3;
+			} else {
+				fprintf(stderr, "client: --damage wants strip, whole or move\n");
+				return 2;
+			}
+		} else if (strcmp(argv[i], "--strip") == 0 && i + 1 < argc) {
+			/* Y0:Y1:RRGGBB, in BUFFER pixels — the space the strip's damage is named in. */
+			char *value = argv[++i];
+			char *second = strchr(value, ':');
+			char *third = second != NULL ? strchr(second + 1, ':') : NULL;
+
+			if (second == NULL || third == NULL) {
+				fprintf(stderr, "client: --strip wants Y0:Y1:RRGGBB\n");
+				return 2;
+			}
+			client.strip_y0 = atoi(value);
+			client.strip_y1 = atoi(second + 1);
+			client.strip_colour = (uint32_t)strtoul(third + 1, NULL, 16);
+		} else if (strcmp(argv[i], "--third") == 0 && i + 1 < argc) {
+			client.third_colour = (uint32_t)strtoul(argv[++i], NULL, 16);
+		} else if (strcmp(argv[i], "--move-to") == 0 && i + 1 < argc) {
+			const char *value = argv[++i];
+			const char *comma = strchr(value, ',');
+
+			if (comma == NULL) {
+				fprintf(stderr, "client: --move-to wants X,Y\n");
+				return 2;
+			}
+			client.move_x = atoi(value);
+			client.move_y = atoi(comma + 1);
 		}
 	}
 

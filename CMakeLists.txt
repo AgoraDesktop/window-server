@@ -14,7 +14,9 @@
 # TWO SYSTEM LIBRARIES, AND NEITHER IS VENDORED: `wayland-server` (the protocol, the event loop and the
 # shared-memory buffer plumbing) and `xkbcommon` (the keymap a seat sends). The xdg-shell BINDINGS ARE
 # GENERATED at build time from the system's `wayland-protocols` by `wayland-scanner`, so a checked-in copy
-# cannot silently age against the protocol on the machine.
+# cannot silently age against the protocol on the machine. The optional backends add their own — libdrm/GBM for
+# DRM and libX11/libXext/libXrender for the nested one — and the pointer's THEME is the one dependency that is
+# data rather than a library: `assets/cursors/Vimix` is installed and read by `src/cursor-theme.c`.
 #
 #===----------------------------------------------------------------------===#
 
@@ -72,6 +74,11 @@ if(AWS_WITH_X11)
   pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
   # XShm, which is what makes a present a pointer instead of 5.8 MB on the wire.
   pkg_check_modules(XEXT REQUIRED IMPORTED_TARGET xext)
+  # **AND RENDER, WHICH IS HOW A THEMED POINTER REACHES A HOST-DRAWN CURSOR.** X11's own cursors carry a 1-bit mask,
+  # so a themed arrow's antialiased alpha would be a jagged silhouette; an ARGB32 picture turned into a cursor is the
+  # only shape-preserving route. Required with the backend rather than optional: a nested session that quietly showed
+  # the host's cursor instead of the desktop's would be the half-feature this dependency exists to avoid.
+  pkg_check_modules(XRENDER REQUIRED IMPORTED_TARGET xrender)
 endif()
 # **AND THE GPU RENDERER'S LIBRARIES.** EGL is the context, GLES2 the drawing, and GBM the surface a DRM backend
 # gives EGL instead of a window. All of them are REQUIRED when the option is on AND the build can host the renderer —
@@ -203,11 +210,24 @@ endif()
 
 if(AWS_WITH_X11)
   target_compile_definitions(window-server PRIVATE AWS_HAVE_X11)
-  target_link_libraries(window-server PRIVATE PkgConfig::X11 PkgConfig::XEXT)
+  target_link_libraries(window-server PRIVATE PkgConfig::X11 PkgConfig::XEXT PkgConfig::XRENDER)
   message(STATUS "window-server: x11 (nested) backend: on")
 else()
   message(STATUS "window-server: x11 (nested) backend: off (AWS_WITH_X11=OFF)")
 endif()
+
+# ---------------------------------------------------------------------------
+# THE POINTER'S THEME
+#
+# The vendored Vimix theme (GPL-3.0, `assets/cursors/Vimix`) is installed as an ordinary freedesktop cursor theme
+# and its location is compiled in as the default, the same way `libagora-iconservices` installs and defaults to
+# Frost. `AGORA_CURSOR_THEME` overrides it at run time, and a machine with no theme at all still gets a pointer:
+# `src/cursor.c` draws one. The path is the INSTALL prefix's, from CMake's own datadir, so a relocatable install
+# finds its own theme.
+# ---------------------------------------------------------------------------
+set(AWS_CURSOR_DEFAULT_THEME "${CMAKE_INSTALL_FULL_DATADIR}/icons/Vimix")
+target_compile_definitions(window-server PRIVATE AWS_CURSOR_DEFAULT_THEME="${AWS_CURSOR_DEFAULT_THEME}")
+message(STATUS "window-server: pointer theme: ${AWS_CURSOR_DEFAULT_THEME} (AGORA_CURSOR_THEME overrides)")
 
 if(AWS_WITH_GL AND (AWS_WITH_X11 OR AWS_WITH_DRM))
   # `EGL_NO_X11` keeps <EGL/eglplatform.h> from dragging libX11's headers into the renderer: the native handles
@@ -245,6 +265,12 @@ add_subdirectory(tests)
 
 install(TARGETS window-server
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+# THE POINTER'S ARTWORK, INSTALLED WHERE AN XCURSOR THEME BELONGS (`share/icons/Vimix/cursors/*`) — the same
+# freedesktop theme directory Frost installs into, so the compositor's compiled default finds it AND so does any
+# other Xcursor-aware program on the machine (`XCURSOR_THEME=Vimix`).
+install(DIRECTORY assets/cursors/Vimix
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/icons)
 
 install(FILES protocol/agora-shell.xml
     DESTINATION ${CMAKE_INSTALL_DATADIR}/agora/protocol)

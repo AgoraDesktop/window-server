@@ -131,6 +131,25 @@ in **at most 2 of 255 per channel, and only on shadow falloff edges** (float ble
 window, corner, bar and menu pixel is identical. That measurement is what caught a real bug: the shadow shader was
 sampling from pixel centres, painting a dark line at row 24 where the CPU painted nothing.
 
+**A SHAPE IS A CORNER DECISION, AND TWO OF THEM ARE NOT THE WINDOW'S OWN.** Every window is clipped to a rounded
+rectangle at the same radius its shadow uses — the client is opaque on the wire, so it cannot round its own corners —
+and a corner stays SQUARE when the edge it sits on is somebody else's: a surface flush with the output (a maximised
+window, the bar, a status item), a menu whose top edge IS the bar's bottom edge, and a SHEET whose top edge is its
+parent's title bar's bottom edge. The first two are geometry, which the compositor can read; the third is not, because
+the title bar is the client's own drawing — so the application says it with `agora_window.set_sheet_parent` (protocol
+version 10) and that one bit buys three things in both renderers: square top corners, a shadow that stops at the seam
+instead of painting up across the title bar (`clip_top` is the larger of the bar's rows and the sheet's own top edge
+plus the `seam` it declares — the points of its top edge the client has tucked into that bar, which nothing may cast a
+shadow onto), and a stack in which the sheet is EXACTLY ONE LAYER ABOVE ITS PARENT, with nothing able to be interleaved.
+That last one is DERIVED rather than maintained, and the difference is the bug that made it a rule: `aws_surface_drawn_
+with_parent` says a sheet whose parent is on the screen has no place of its own, so `aws_output_walk` skips it where the
+list put it and emits it the instant the parent has been drawn, and `aws_surface_at` asks the same predicate so the
+pointer agrees with the picture. Raising the sheet on its own, raising a third window between the two, and an `NSAlert`
+panel at `NSModalPanelWindowLevel` above a document at 0 are then all irrelevant to the pair's order — a sheet's LEVEL
+is unused while it is a sheet — and raising a sheet raises its family. `tests/sheet_stack.c` is that claim as a unit
+test of the walk. Nothing about any of it places or sizes the sheet: both frames stay the application's, as every frame
+here does.
+
 **WHAT THIS DOES NOT ACCELERATE YET, recorded rather than left to be found.** Client buffers are `wl_shm` and are
 uploaded as textures every frame, so this makes *composition* cheap, not *client painting* — the AppKit still draws
 on the CPU. The next win is `zwp_linux_dmabuf_v1` import on both sides of the wire, and that is a separate piece of
@@ -195,12 +214,61 @@ That makes two obligations for anything else that speaks to this compositor:
   damage rectangle to what that buffer is missing (`_cg_paintMissing` in `NSWindow.h`), and a client that ignored
   this would leave stale strips behind.
 
-**AND THE CLIENT NOW TELLS THIS COMPOSITOR WHICH RECTANGLES IT CHANGED — WHICH THIS COMPOSITOR DOES NOT YET READ.**
-`AGWindowDamage` in `libagora-app`'s seam names them in buffer pixels on every commit (a strip repaint reports one
-rectangle of 400 pixels out of 66 600 in `appkit-partial-damage`), and `surface_damage()` here is still the deliberate
-no-op quoted below: a frame recomposites the whole output. [`DAMAGE-PLAN.md`](DAMAGE-PLAN.md) is the handoff for the
-half that makes the rectangles pay — per-surface damage, a clipped composite in both renderers, and the full-redraw
-triggers that keep a partial frame from leaving a stale pixel.
+**AND THE COMPOSITOR NOW READS THEM.** `AGWindowDamage` in `libagora-app`'s seam names the rectangles in buffer pixels
+on every commit (a strip repaint reports one rectangle of 400 pixels out of 66 600 in `appkit-partial-damage`), and
+`surface_damage()`/`surface_damage_buffer()` here turn them into a frame — a partial repaint costs a strip instead of a
+screen. See §2d for the contract, the full-redraw triggers, and the measurement.
+
+### 2d. Damage: the client names the rectangles and the frame paints them
+
+**A CLIENT HAS ALWAYS BEEN ABLE TO SAY "I ONLY REPAINTED THIS", AND UNTIL NOW THE ANSWER WAS TO REPAINT EVERYTHING.**
+`wl_surface.damage_buffer` is in BUFFER pixels with a top-down origin; `damage` is surface-local and is multiplied by
+the client's buffer scale on the way in; the composite happens in DEVICE pixels. Those are three different numbers at
+every scale that is not exactly 1 (this machine's 1.332 is enough), so the translation lives once, in `src/damage.c`,
+and everything above it speaks the one space `struct aws_box` is documented in.
+
+**ONE BOUNDING BOX PER FRAME, NOT A REGION.** The AppKit caps itself at sixteen rectangles and a terminal's are one
+strip, so a box covers the case this exists for; a region would buy disjoint strips at the cost of a clip every writer
+has to honour. The box is the union of every surface's damage in device pixels, rounded OUTWARD at every edge — half a
+pixel of over-paint is a slower frame, half a pixel of under-paint is a stale line.
+
+**AND EVERYTHING THAT IS NOT A CLIENT COMMIT IS A FULL FRAME, WHICH IS THE SAFETY VALVE.** `aws_server_schedule_render`
+— what a window's frame, level, visibility or stacking calls, what a menu bar title change calls, what the pointer
+calls on an output that draws its own cursor, what a display resume calls — marks the frame FULL and names itself. Only
+`surface_commit`, which has the client's rectangles, narrows it, and only when the commit changed nothing else about the
+surface: a buffer of a different size, a different scale, a map or an unmap are each a full frame with their own name,
+and a commit that attaches a buffer and damages nothing means THE WHOLE BUFFER (Wayland's own rule). A missing
+invalidation would be a stale pixel nobody notices; a spurious one is only slow, so the default is the safe one.
+
+**A SKIPPED SURFACE STILL OWES ITS CALLBACK.** `wl_surface.frame` is a promise: a client that commits and waits for one
+never draws again if the compositor skips it along with its pixels. So the walk still visits every surface in order and
+the emitter returns after `aws_surface_frame_done`; a frame with NOTHING in it is not composited at all, and completes
+the callbacks it owes before it returns. `--frames N` counts composites, so an idle session's count stops.
+
+**MEASURED, `headless`, one 320x200 window at (100,80), the client's own server CPU (`ru_utime + ru_stime`) over 300
+commits, against a build of the parent commit:**
+
+| what the client does | before | after |
+|---|---|---|
+| damages a 320x20 strip each frame | 1.617-1.791 ms/frame | **0.208-0.227 ms/frame** |
+| repaints and damages the whole window each frame | 1.520-1.783 ms/frame | **0.523-0.543 ms/frame** |
+| idle after three frames | 3 composites, no busy loop | 3 composites, no busy loop |
+
+The second row is the one that surprises: a FULL-window commit names the window, not the screen, so the frame clears and
+paints 320x200 instead of 1280x720. And the first is the feature's whole point — a strip repaint costs a strip.
+
+**WHAT DOES NOT GET THE BOX YET, NAMED RATHER THAN LEFT TO BE FOUND.** The GL renderer paints the box only when its
+swap PRESERVES the pixels it did not touch (`EGL_BUFFER_PRESERVED`, asked for and then READ BACK, because a driver may
+refuse — MEASURED, NVIDIA's EGL answers `EGL_BUFFER_DESTROYED`). On such a driver, and on DRM/GBM where every scanout
+buffer is a fresh allocation, the GL renderer composites the WHOLE output every frame: correct, unchanged from before,
+and slow in exactly the way this work removes from the CPU path. The pointer's OLD rectangle is also still a full frame
+— moving it means repainting the pixels where it was, which is not a rectangle any client damaged.
+
+`WINDOW_SERVER_DAMAGE_DIAG=1` prints one line per frame — `damage: 1 surface(s), box 320x20 at (100,120)` or
+`damage: FULL (a window moved)` — because a damage bug is invisible in a screenshot of a static window and obvious in
+a line of text. `tests/run-damage.sh` is the test: the client POISONS every pixel it does not damage, so a compositor
+that recomposites the whole window is a green strip on magenta, and the run's log must account for every full redraw.
+The three sessions are a partial commit, a commit that damages nothing (the whole-buffer rule), and a window move.
 
 ### 3. Input travels the whole way
 
@@ -530,10 +598,81 @@ every client that is already drawing.
 
 The arithmetic and its guards are `src/scale.c`, and `tests/scale.c` asks them directly — no display required.
 
+### 5b. The pointer is the theme's, on both display paths
+
+**A desktop's pointer is designed with it, and Agora's used to be invented by the compositor.** The old pointer was an
+arrow drawn from its own points (`src/cursor.c`) — correct, antialiased, and not the pointer anyone has been looking at
+for the last twenty years. The pixels now come from an **Xcursor theme**, the vendored **Vimix** theme by default
+(GPL-3.0 artwork, `assets/cursors/Vimix/` with its own provenance record), and the same image is used by both ways this
+server puts a pointer on a screen:
+
+| display path | who draws the pointer | how the theme gets there |
+|---|---|---|
+| **DRM/KMS** (the shipping output) | the compositor | `aws_cursor_image` — the theme's image is composited above every surface, by the CPU renderer or as a GL texture |
+| **nested X11** (development) | the host X server | `aws_cursor_theme_pointer` — the same variant becomes the window's X cursor through an ARGB32 `XRender` picture, so the host draws *the theme's* pointer |
+
+That split is deliberate and does not change `backend.owns_cursor`: a nested output has a host pointer already and
+compositing a second one into the window would be a pointer nobody asked for, so the theme is handed to the host
+instead. An X11 host gets an **ARGB32** cursor rather than a masked one because a mask cannot carry the antialiased
+alpha the artwork is made of — a 1-bit cursor would be a jagged silhouette of it.
+
+**MEASURED, in a nested session on a 96-dpi desktop.** With the pointer over the compositor's own window,
+`XFixesGetCursorImage` answers a **32×32 cursor with hotspot (4, 4) and 135 antialiased pixels** — the vendored
+theme's 24-nominal `left_ptr`, pixel for pixel, drawn by the host because the compositor told it to. That is the seam
+`tests/run-cursor-theme.sh` guards with `AWS_CURSOR_DIAG`, since no frame this process writes contains it.
+
+**THE SIZE IS THE OUTPUT'S, AND THE VARIANT IS THE THEME'S.** A pointer is `--cursor-size` points (24 by default, the
+theme's own design size) times the output's scale, and the theme supplies the smallest image whose box covers that,
+or its largest — `libXcursor`'s own rule. Nothing is resampled: a themed pointer is the theme's pixels. The theme's
+artwork is 4/3 its nominal size, which is what makes the nominal size a size in *points*:
+
+| nominal | artwork | hotspot (`left_ptr`) |
+|---|---|---|
+| 24 | 32×32 | (4, 4) |
+| 30 | 40×40 | (5, 5) |
+| 36 | 48×48 | (6, 6) |
+| 48 | 64×64 | (8, 8) |
+
+So a 24-point pointer is the 32-pixel arrow on a 96-dpi panel and the 64-pixel one at 2x, and the hotspot is always the
+file's own point rather than a centre — a hand's tip and an I-beam's middle are different, and the theme says where they
+are. The reader is `src/cursor-theme.c`: one C file, no `libXcursor` and no X11 — the compositor should not take an X11
+library into a Wayland server to read a file, and the two display paths must not be able to choose different variants
+of the same pointer.
+
+```
+$ window-server --backend x11 --cursor-theme ~/.icons/Vimix ...
+window-server: the host display is 1080 px on 286 mm (96 dpi), so its scale is 1.33203 (override with --dpi or --scale)
+window-server: the pointer is left_ptr from the cursor theme at /home/you/.icons/Vimix (24 points)
+```
+
+**THE THEME IS INSTALLED, NOT ASSUMED.** `cmake --install` puts it at `<prefix>/share/icons/Vimix`, beside Frost and
+inside the freedesktop theme directories, so the compositor finds it AND any other Xcursor-aware program on the machine
+does (`XCURSOR_THEME=Vimix`); that path is compiled in as the default. `AGORA_CURSOR_THEME` (or
+`--cursor-theme`) points the server at any other theme directory, `AGORA_CURSOR_SIZE` (or `--cursor-size`) changes the
+size, and the demo scripts point the variable at the checkout so a developer sees Vimix without installing anything.
+
+**AND A SESSION WITH NO THEME STILL HAS A POINTER.** The drawn arrow is still there, and every test that does not name a
+theme exercises it. A machine that cannot ship GPL-3.0 artwork deletes `assets/cursors/Vimix` and gets that arrow; a
+theme directory with no `left_ptr` gets the same per draw; a headless screenshot gets no pointer at all, because a
+compositor-owned pointer is a fact about an output nobody is looking at.
+
+What is *not* implemented is a client's cursor shape: `wl_pointer.set_cursor` is still accepted and ignored, so an
+I-beam over a text field is still an arrow, from the theme. When that door opens, the shape it names is a selection in
+the theme that is already loaded — the animated cursors' frames are decoded for it (`wait` is 23 frames of 30 ms) and
+frame zero is what the compositor draws today.
+
+The three suites are `window-server-cursor` (the drawn fallback and the themed image, as arithmetic over device
+pixels), `window-server-cursor-theme` (the reader against the real Vimix files: variant selection, both kinds of
+hotspot, the premultiplied-to-straight conversion, an animated cursor's frames, and what a directory that is not a
+theme answers), and `window-server-cursor-theme-nested` (a real X server, `AWS_CURSOR_DIAG=1`, and the host cursor the
+server handed it — a seam no screenshot can show, and one that SKIPS without a `DISPLAY`).
+
 ### 6. It is tested without the AppKit
 
 `ctest` — the server, a client that is nothing but the protocol, and a check that reads the server's own
-screenshot:
+screenshot. The partial-damage suite is a second one: a client poisons the pixels it does not damage, so a compositor
+that recomposites the whole window shows the poison, and the server's `WINDOW_SERVER_DAMAGE_DIAG` lines have to account
+for the box it painted and for the one full redraw a map produces (`window-server-damage`, §2d):
 
 ```
   [ok] the output is 1280x720
@@ -562,11 +701,13 @@ that is written down is a decision and one that is not is a surprise.
   are mutually exclusive — both feed one seat, and a device read twice is a pointer that moves at double speed
   — and the default is libinput when it can start, the nested window otherwise. See below for the one thing
   that still blocks libinput on this machine.
-- **The pointer is drawn where there is no host to draw it.** `wl_pointer.set_cursor` is still accepted and does
-  nothing — a client's cursor surface is not implemented. What ships is a **fallback arrow the compositor owns**
-  (`src/cursor.c`): rasterized for the output's own (fractional) scale, composited above every surface, and drawn only
-  on a backend that has no host pointer of its own. So a DRM output has a visible pointer from the first frame, a
-  nested X11 output keeps the host's and does not draw a second one, and a headless screenshot stays cursor-free.
+- **The pointer's PIXELS are a cursor theme's; a client's cursor SHAPE is not implemented.** `wl_pointer.set_cursor`
+  is still accepted and does nothing, so an I-beam over a text field is the theme's arrow (§5b). The theme is read by
+  `src/cursor-theme.c` and drawn by `src/cursor.c`: composited above every surface on a backend that has no host pointer
+  (DRM), and handed to the host as the window's X cursor where one exists (nested X11) — so a DRM output has the theme's
+  pointer from the first frame, a nested window has the same one drawn by the host, and a headless screenshot stays
+  cursor-free. With no theme installed the compositor draws its own arrow instead, which is what every test that does not
+  name a theme uses.
 - **No drawing of its own.** The menu bar, the status area and the window frames are the window server's to
   draw in a Mac-like desktop, and this owns none of them yet — which is the honest reason there is no drawing
   library in the build. The compositing is a row copy. **Who owns which pixels, and why `xdg-shell` cannot
@@ -597,6 +738,11 @@ Two system libraries, neither vendored: `wayland-server` (the protocol, the even
 buffer plumbing, which libwayland owns through `wl_display_init_shm`) and `xkbcommon` (the keymap a seat
 sends). The xdg-shell bindings are **generated** at build time from the system's `wayland-protocols`, so a
 checked-in copy cannot silently age against the protocol on the machine.
+
+The optional backends add their own: `libdrm` and GBM for the DRM output, and `libX11`, `libXext` and `libXrender` for
+the nested one — Render because a themed pointer needs an ARGB cursor, not a mask (§5b). **The pointer's theme is the
+one dependency that is DATA rather than a library**: `assets/cursors/Vimix` is installed to
+`<prefix>/share/icons/Vimix` and read by `src/cursor-theme.c`, with no `libXcursor` and no X11 in the reader.
 
 ## The architecture this is being built toward
 
@@ -630,9 +776,13 @@ compositor with an opinion about items would be the same mistake a special case 
 cannot deliver (a window that has gone, or a client bound below version 6) is answered EMPTY NOW rather than left for
 a timeout to say later. `tests/window_list.c` asserts the whole round trip, including both of those answers.
 
-**THE SHELL GLOBAL IS AT VERSION 6.** Version 3 added the window list and the two requests on somebody else's
+**THE SHELL GLOBAL IS AT VERSION 10.** Version 3 added the window list and the two requests on somebody else's
 window, 4 carried `set_activatable`, 5 added `reopen_window` and `take_focus`, and 6 is the tile's menu — four
-requests and two events, and no change to how windows are placed.
+requests and two events, and no change to how windows are placed. 7 is the selection, 8 the badge, and 9 the display's
+fractional scale. **10 is the sheet**: `agora_window.set_sheet_parent` names another window of the same client, and what
+the server does with the pair is the three things above — square top corners, a shadow that stops at the seam, and a
+stack in which the sheet follows the window it hangs from. It is the first statement this protocol has made about TWO
+windows, and it exists because neither fact can be read off the frames.
 
 What is still absent on this side, named rather than left to be discovered: no minimized state, no session (so
 nothing emits `close` on shutdown), and no cross-process data device — which is what a drop on the Dock's Trash

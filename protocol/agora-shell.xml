@@ -36,7 +36,7 @@
     Copyright © 2026 Kyle J. Cardoza.
   </copyright>
 
-  <interface name="agora_shell" version="9">
+  <interface name="agora_shell" version="10">
     <description summary="the window server's own window management">
       One global. It hands out the three objects above it: a window, which is what a surface becomes, an output,
       which is where the work area comes from, and a window list, which is what a shell component asks for.
@@ -61,7 +61,9 @@
       `agora_output.preferred_scale` and `agora_window.set_buffer_scale_fixed`, the pair that lets an application
       rasterise at the display's real dots per inch instead of at an integer multiple the compositor then resamples.
       A point is 1/72 inch; an integer `wl_output.scale` cannot say 1.333, so the client hears the fraction here and
-      the compositor places its buffer 1:1.
+      the compositor places its buffer 1:1. **VERSION 10 ADDS `agora_window.set_sheet_parent`**: the one statement
+      this protocol has ever carried about TWO windows of the same client, and the reason it has to be a statement
+      rather than an inference — see that request for why the pair cannot be read off the frames.
     </description>
 
     <enum name="error">
@@ -458,7 +460,7 @@
     </event>
   </interface>
 
-  <interface name="agora_window" version="9">
+  <interface name="agora_window" version="10">
     <description summary="a window, placed and sized by its application">
       **THE APPLICATION IS HONOURED.** Every set_ here is a DEMAND the server writes down and acts on, not a
       request it may refuse or adjust — which is the inversion of `xdg_toplevel` and the whole point of this
@@ -797,6 +799,65 @@
         been able to check a buffer's honesty, and this request does not pretend to.
       </description>
       <arg name="scale" type="fixed"/>
+    </request>
+
+    <request name="set_sheet_parent" since="10">
+      <description summary="this window hangs from that window's title bar">
+        **A SHEET IS THE FIRST THING ON THIS DESKTOP THAT IS TWO WINDOWS AT ONCE, AND THE SERVER HAS TO BE TOLD.**
+        On the Mac a sheet is a window the application made and the application places — `NSAlert`,
+        `NSSavePanel`, `NSPrintPanel` and every "are you sure?" is an ordinary `NSWindow` with a frame of its own,
+        and `agora_window.set_frame` already moved it. What the server cannot work out for itself is that the two
+        frames belong to each other, and there are two consequences it draws from that:
+
+        **1. THE TOP CORNERS ARE THE PARENT'S.** A window's shape here is a rounded rectangle cut by the
+        compositor (a client is opaque on the wire and cannot round its own corners), and a sheet's top edge is
+        not its own edge — it is somebody else's title bar, the seam the sheet slides out of. So its TOP two
+        corners are square, exactly as `agora_output`'s bar gives a menu hanging from the menu bar square top
+        corners, and its bottom two stay round, which is the shape a sheet has. WITHOUT THIS THE NOTCHES SHOW: two
+        six-point bites out of the seam, with the parent's own content behind them. The same seam is why a sheet's
+        SHADOW stops there — above `seam`'s rows and no higher — because a shadow painted onto a title bar is a
+        dark band under a bar that is supposed to be a seam rather than a ledge.
+
+        **2. THE SHEET IS EXACTLY ONE LAYER ABOVE ITS PARENT, AND NOTHING CAN BE STACKED BETWEEN THEM.** A click on
+        the parent's title bar, a Dock's `activate_window`, the application's own `-orderFront:` on either the sheet
+        or the parent, or a third window raised in between — every one of those reorders the server's stack, and a
+        sheet left anywhere but immediately in front of its parent is a sheet that can go behind it, or that a
+        neighbour can be interleaved with. So the pair has ONE place in the order, and it is derived rather than
+        maintained: a sheet whose parent is on the screen has no place of its own, is drawn the instant its parent
+        has been, and is hit-tested immediately in front of it. **That also means a sheet's LEVEL IS NOT USED while
+        it is a sheet** — an `NSAlert`'s panel is at `NSModalPanelWindowLevel` and the document it asks about is at
+        0, and the pair is drawn at the document's place, which is what keeps the alert under the menu bar rather
+        than above it. Raising a sheet raises its family: a sheet is never in front of its parent *and* behind
+        nothing, that being a state the glass cannot show.
+
+        **IT PLACES NOTHING AND IT SIZES NOTHING.** Where the sheet hangs and how big it is are the
+        application's, as every frame here is; the AppKit puts the sheet's top edge at its parent's content top
+        and re-pins it when the parent moves. A server that computed the placement would be the second opinion
+        the first paragraph of this protocol is about.
+
+        **`parent` IS THE SHEET'S OWN PARENT AND NOT AN ID**, because both windows are the calling client's: a
+        window object belongs to the client that made it, so a client can only ever name a window of its own. That
+        also means the server keeps a POINTER to the parent's surface, and it clears it when the parent goes away
+        — a parent destroyed first leaves the sheet an ordinary window rather than a dangling link.
+
+        **NULL DETACHES**, which is what ending a sheet sends. One parent per window: asking again replaces the
+        first, and a sheet that names a window which is itself a sheet is an ordinary window hanging from a
+        title bar it does not have — the server does not police it, because the AppKit already refuses a second
+        sheet on one window and a server that re-derived that rule would be the second copy of it.
+
+        **`seam` IS HOW MUCH OF THIS WINDOW'S TOP EDGE IS NOT ITS OWN.** A sheet is placed with its top edge a
+        little way INSIDE the parent's title bar rather than flush with its bottom, which is what makes it read as
+        coming out from under the bar: the client paints that strip in the bar's own colour, so the overlap is
+        invisible, and it is robust where a flush placement is not — two frames rounded independently at a
+        fractional scale can leave one device row of the bar's line showing across the top of the sheet. `seam`
+        names that strip, in logical points, and the server's one use for it is the shadow: a shadow may not be
+        painted on the rows the sheet is tucked into, because those rows belong to the title bar. Zero is the
+        ordinary answer for a client that places its sheet flush.
+      </description>
+      <arg name="parent" type="object" interface="agora_window" allow-null="true"
+	   summary="the window this one hangs from, or null to detach"/>
+      <arg name="seam" type="int"
+	   summary="points of this window's top edge tucked into the parent's title bar; nothing casts a shadow there"/>
     </request>
   </interface>
 

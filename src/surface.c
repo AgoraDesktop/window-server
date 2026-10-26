@@ -30,6 +30,7 @@
 
 #include "server.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -96,6 +97,55 @@ static void surface_send_frame_callbacks(struct aws_surface *surface, uint32_t t
 	wl_list_for_each_safe(frame, tmp, &surface->frame_callbacks, link) {
 		wl_callback_send_done(frame->resource, time);
 		wl_resource_destroy(frame->resource);
+	}
+}
+
+/* ---------------------------------------------------------------------------------------------------
+ * damage: the client's own statement about its pixels
+ * --------------------------------------------------------------------------------------------------- */
+
+/* **A RECTANGLE IN BUFFER PIXELS, ACCUMULATED UNTIL A COMPOSITE CONSUMES IT.** Under-damaging is a stale pixel, so the
+ * union is the safe direction even when the rectangles are disjoint: the frame paints one box, and a box that covers
+ * more than the client touched only costs a slower frame. `damage_whole` is NOT cleared here — a commit that has
+ * already said "the whole buffer" is not made smaller by a later rectangle. */
+static void damage_add(struct aws_surface *surface, int x, int y, int width, int height)
+{
+	struct aws_box rect;
+
+	if (width <= 0 || height <= 0) {
+		return;
+	}
+	rect.x = x;
+	rect.y = y;
+	rect.width = width;
+	rect.height = height;
+	aws_box_union(&surface->damage, &rect);
+	surface->damage_input = 1;
+	surface->damage_valid = 1;
+}
+
+/* **THE BUFFER'S SIZE, WITHOUT LOOKING INSIDE IT.** `wl_shm` owns its own fields, and a dma-buf keeps its size in the
+ * protocol struct this server made; a surface's buffer is one of the two and nothing else. */
+static void buffer_extent(struct wl_resource *buffer, int *width, int *height)
+{
+	struct wl_shm_buffer *shm;
+	struct aws_dmabuf_buffer *dmabuf;
+
+	*width = 0;
+	*height = 0;
+	if (buffer == NULL) {
+		return;
+	}
+	shm = wl_shm_buffer_get(buffer);
+	if (shm != NULL) {
+		*width = wl_shm_buffer_get_width(shm);
+		*height = wl_shm_buffer_get_height(shm);
+		return;
+	}
+	dmabuf = aws_dmabuf_buffer_from_resource(buffer);
+	if (dmabuf != NULL) {
+		*width = dmabuf->width;
+		*height = dmabuf->height;
 	}
 }
 
@@ -170,10 +220,20 @@ static void surface_destroy_resource(struct wl_resource *resource)
 	 * window underneath. */
 	wl_list_remove(&surface->link);
 	aws_seat_surface_gone(surface->server, surface);
+	/* **AND A SHEET THAT NAMED THIS WINDOW AS ITS PARENT STOPS NAMING IT.** The relation is one reference, held by the
+	 * sheet, so a parent going away is the only direction with something to undo — and it has to be undone before the
+	 * memory goes, or the next composite reads it. */
+	aws_shell_surface_gone(surface->server, surface);
 	/* **AND A DOCK IS TOLD THE WINDOW IS GONE**, after it has left the list and before the memory goes — the
 	 * snapshot walks the list, so the order is the whole of it. */
 	aws_shell_window_list_changed(surface->server);
 	aws_seat_pointer_recheck(surface->server);
+	/* **AND THE PIXELS IT WAS COVERING HAVE TO COME BACK.** A destroyed surface leaves the list without a commit, and
+	 * without this the frame under it kept showing its last picture until some other client happened to repaint — the
+	 * same class of stale pixel as a missing damage trigger, and the reason this is a FULL redraw: what was underneath is
+	 * not something this surface ever damaged. */
+	aws_damage_full(surface->server, "a surface was destroyed");
+	aws_server_schedule_render(surface->server);
 	free(surface);
 }
 
@@ -209,16 +269,53 @@ static void surface_attach(struct wl_client *client, struct wl_resource *resourc
 static void surface_damage(struct wl_client *client, struct wl_resource *resource,
 			   int32_t x, int32_t y, int32_t width, int32_t height)
 {
-	(void)client; (void)resource; (void)x; (void)y; (void)width; (void)height;
-	/* DAMAGE IS TRACKED NOWHERE, ON PURPOSE: this compositor recomposites the whole output on every frame, so
-	 * a damage rectangle could only be used to AVOID work that is already not being done. It is where the
-	 * optimisation goes when there is a reason for one. */
+	struct aws_surface *surface = aws_surface_from_resource(resource);
+	double scale;
+
+	(void)client;
+	if (surface == NULL) {
+		return;
+	}
+	/* **THE LEDGER IS IN BUFFER PIXELS AND THIS REQUEST IS IN LOGICAL ONES.** `wl_surface.damage` names surface-local
+	 * coordinates — the same space a window is placed in — and the client's buffer is `buffer_scale` device pixels per
+	 * one of those, so the multiplication is here and the rest of the damage path never has to know which request
+	 * produced a rectangle. The PENDING scale is the one that belongs to the buffer this damage describes: a client that
+	 * changes the scale and damages in the same commit is painting the new buffer. */
+	scale = surface->pending_buffer_scale > 0.0 ? surface->pending_buffer_scale : surface->buffer_scale;
+	if (!(scale > 0.0)) {
+		scale = 1.0;
+	}
+	/* **AND THE EDGES ARE CLAMPED BEFORE THEY BECOME INTEGERS.** A client can name a rectangle at `INT32_MAX`, and the
+	 * multiplication would be a cast no C compiler promises anything about; the box is clamped to the buffer again at
+	 * collection, so a number that is merely very large is as good as the right one. */
+	{
+		double x0 = (double)x * scale, y0 = (double)y * scale;
+		double x1 = (double)((int64_t)x + width) * scale, y1 = (double)((int64_t)y + height) * scale;
+		double limit = 1073741824.0;
+		int left, top;
+
+		if (x0 < -limit) x0 = -limit;
+		if (y0 < -limit) y0 = -limit;
+		if (x1 > limit) x1 = limit;
+		if (y1 > limit) y1 = limit;
+		left = aws_edge_floor(x0);
+		top = aws_edge_floor(y0);
+		damage_add(surface, left, top, aws_edge_ceil(x1) - left, aws_edge_ceil(y1) - top);
+	}
 }
 
+/* **AND THE FORM THAT IS ALREADY IN BUFFER PIXELS, WITH A TOP-DOWN ORIGIN** — which is the form the AppKit sends, and
+ * the one a compositor can use without a scale in the middle. */
 static void surface_damage_buffer(struct wl_client *client, struct wl_resource *resource,
 				  int32_t x, int32_t y, int32_t width, int32_t height)
 {
-	surface_damage(client, resource, x, y, width, height);
+	struct aws_surface *surface = aws_surface_from_resource(resource);
+
+	(void)client;
+	if (surface == NULL) {
+		return;
+	}
+	damage_add(surface, (int)x, (int)y, (int)width, (int)height);
 }
 
 static void surface_frame(struct wl_client *client, struct wl_resource *resource, uint32_t callback)
@@ -285,6 +382,9 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
 		wl_display_flush_clients(server->display);
 		return;
 	}
+	/* **WHETHER THIS COMMIT HANDS OVER A BUFFER, READ BEFORE THE ATTACH BLOCK CONSUMES THE FLAG.** The whole-buffer rule
+	 * below is about the commit that ATTACHED, not about the surface's state after it. */
+	int attached = surface->pending_attached;
 
 	/* **A COMMIT THAT DOES NOT ATTACH KEEPS THE BUFFER IT HAD.** Wayland's `attach` is what SETS a surface's
 	 * buffer, and NOT CALLING IT is not the same as calling it with nothing: the second detaches the buffer and
@@ -297,6 +397,16 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
 	 * commit without attaching, and a compositor that unmaps it is wrong about the protocol.) */
 	/* **THE SCALE LANDS WITH THE BUFFER IT DESCRIBES.** Both are double-buffered on `wl_surface`, and the client sets
 	 * them together — a scale applied a commit early would composite the previous frame's pixels at the new divisor. */
+	/* **AND WHAT THIS COMMIT DID TO THE PICTURE IS DECIDED HERE, BEFORE THE RENDER IS ASKED FOR.** The frame may paint
+	 * only the surface's own rectangles, but only if NOTHING ELSE about the surface changed — a buffer of a different
+	 * size, a different scale, a map or an unmap all mean the pixels behind and around it have to be repainted too, and
+	 * that is a full frame. Each cause is named, because `WINDOW_SERVER_DAMAGE_DIAG=1` has to be able to account for
+	 * every full redraw a scripted run produces (DAMAGE-PLAN.md §4 step 2). */
+	const char *full_reason = NULL;
+
+	if (surface->pending_buffer_scale > 0 && surface->pending_buffer_scale != surface->buffer_scale) {
+		full_reason = "a surface's buffer scale changed";
+	}
 	if (surface->pending_buffer_scale > 0) {
 		surface->buffer_scale = surface->pending_buffer_scale;
 		surface->pending_buffer_scale = 0;
@@ -306,6 +416,21 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
 	}
 	if (surface->pending_attached) {
 		struct wl_resource *previous = surface->current_buffer;
+		int previous_width, previous_height, next_width, next_height;
+
+		/* **A BUFFER OF A DIFFERENT SIZE IS A DIFFERENT WINDOW, EVEN WHEN THE FRAME SAYS OTHERWISE.** The old pixels are
+		 * covered by nothing once the new ones arrive, so this is a full frame whatever the client damaged. */
+		buffer_extent(previous, &previous_width, &previous_height);
+		buffer_extent(surface->pending_buffer, &next_width, &next_height);
+		if (previous != NULL && surface->pending_buffer == NULL) {
+			if (full_reason == NULL) {
+				full_reason = "a surface's buffer was detached";
+			}
+		} else if (previous_width != next_width || previous_height != next_height) {
+			if (full_reason == NULL) {
+				full_reason = "a surface's buffer changed size";
+			}
+		}
 
 		if (surface->has_buffer_listener) {
 			wl_list_remove(&surface->buffer_listener.link);
@@ -361,11 +486,30 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
 		/* **AND A DOCK HEARS THAT THE SET CHANGED, ONCE PER ACTUAL CHANGE.** Mapping is not a list edit on its
 		 * own — the list is about windows that EXIST — but a dock reads `visible` and `active` to decide what to
 		 * draw, and a window that has just been given its first buffer is the moment it becomes drawable. */
+		/* **AND A WINDOW THAT APPEARED OR LEFT IS EVERYTHING ELSE'S PROBLEM TOO.** Its own pixels are new, but the pixels
+		 * it now covers (or no longer covers) belong to whatever is underneath — so a map or an unmap is a full frame. */
 		if (was_mapped != surface->mapped) {
+			if (full_reason == NULL) {
+				full_reason = surface->mapped ? "a surface was mapped" : "a surface was unmapped";
+			}
 			aws_shell_window_list_changed(server);
 		}
 	}
-	aws_server_schedule_render(server);
+	if (full_reason != NULL) {
+		aws_damage_full(server, full_reason);
+	}
+	/* **A COMMIT THAT ATTACHED A BUFFER AND DAMAGED NOTHING MEANS THE WHOLE BUFFER.** Wayland's own rule, and the reason
+	 * a client that never calls `damage` still works: a full repaint says NOTHING, not "nothing". The flag is per
+	 * COMMIT (`damage_input`), not per surface, so a later commit in the same frame cannot be read as having damaged
+	 * what the earlier one did. */
+	if (attached && !surface->damage_input) {
+		surface->damage_whole = 1;
+		surface->damage_valid = 1;
+	}
+	surface->damage_input = 0;
+	/* **AND THE FRAME IS ASKED FOR WITHOUT CLAIMING IT IS EVERYTHING** — the one place in the server that is allowed to,
+	 * because this is the one place that HAS the client's rectangles. */
+	aws_server_schedule_render_partial(server);
 	/* **AND THE POINTER IS RE-DECIDED HERE, WHICH IS WHERE THIS BUG LIVED.** A surface that maps under a
 	 * stationary pointer — the menu bar at startup is the one a person meets — gets no motion, so before this
 	 * line it got no `enter` either, and the first click on it went to nobody. See
@@ -807,8 +951,65 @@ void aws_surface_frame_done(struct aws_surface *surface, uint32_t time)
  * answer "what is under this point" for itself.                                                  *
  * ============================================================================================ */
 
+/* **IS THE POINT INSIDE THIS WINDOW?** The rectangle is the BUFFER divided by the client's scale, which is the one
+ * arithmetic both the hit test's own walk and the sheet rule below need — a 2x client's 1280x800 buffer is a 640x400
+ * window, and a fractional scale is divided and rounded the same way, because the logical space is whole pixels and the
+ * buffer is what the client chose on the device grid. */
+static int surface_contains_point(const struct aws_surface *surface, int x, int y)
+{
+	struct wl_shm_buffer *shm;
+	struct aws_dmabuf_buffer *dmabuf;
+	int width, height;
+
+	shm = wl_shm_buffer_get(surface->current_buffer);
+	dmabuf = aws_dmabuf_buffer_from_resource(surface->current_buffer);
+	if (shm != NULL) {
+		width = wl_shm_buffer_get_width(shm);
+		height = wl_shm_buffer_get_height(shm);
+	} else if (dmabuf != NULL) {
+		width = dmabuf->width;
+		height = dmabuf->height;
+	} else {
+		return 0;
+	}
+	if (surface->buffer_scale != 1.0) {
+		double bscale = surface->buffer_scale > 0.0 ? surface->buffer_scale : 1.0;
+
+		width = (int)((double)width / bscale + 0.5);
+		height = (int)((double)height / bscale + 0.5);
+	}
+	return (x >= surface->x && x < surface->x + width && y >= surface->y && y < surface->y + height) ? 1 : 0;
+}
+
+/* **AND THE SHEET ON A WINDOW THAT THE POINT IS REALLY OVER.** A window has at most one sheet (the AppKit refuses a
+ * second), so this is a scan for the child — and it answers the child only when the child is drawable AND contains the
+ * point, because a sheet is bigger than nothing but smaller than its parent. */
+static struct aws_surface *sheet_at_point(struct aws_server *server, const struct aws_surface *parent, int x, int y)
+{
+	struct aws_surface *sheet;
+
+	wl_list_for_each(sheet, &server->surfaces, link) {
+		if (sheet->sheet_parent != parent) {
+			continue;
+		}
+		if (!sheet->mapped || !sheet->visible || sheet->current_buffer == NULL) {
+			continue;
+		}
+		if (surface_contains_point(sheet, x, y)) {
+			return sheet;
+		}
+	}
+	return NULL;
+}
+
 /* THE SURFACE AT A POINT: the TOPMOST one containing it. A surface with no buffer is not there, and a surface is
  * as big as the buffer it committed.
+ *
+ * **A SHEET IS MET WITH ITS PARENT, WHICH IS WHERE IT IS DRAWN**, and that is the same predicate the composite order
+ * uses (`aws_surface_drawn_with_parent`) rather than a second reading of the list — see `aws_surface_at` below. Without
+ * it a click on a sheet could land on the window that raised itself into the LIST between the sheet and its parent,
+ * while the compositor drew the sheet on top: the picture and the pointer disagreeing about which window is in front is
+ * the one defect that cannot be argued away.
  *
  * **"TOPMOST" HAS TO MEAN THE SAME THING HERE AS IT DOES TO THE COMPOSITOR, AND THAT IS THE WHOLE OF A BUG A PERSON
  * MET.** The compositor draws by LEVEL first and then by list order, and it SKIPS a surface the application has
@@ -834,6 +1035,12 @@ struct aws_surface *aws_surface_at(struct aws_server *server, int x, int y)
 			if (!surface->mapped || !surface->visible || surface->current_buffer == NULL) {
 				continue;
 			}
+			/* **A SHEET'S OWN LEVEL IS NOT A PLACE ANYTHING IS DRAWN.** It is drawn with its parent, so a pass over
+			 * its level would find nothing in it — and a sheet whose level is above its parent's would otherwise
+			 * cost the search an empty pass before the parent's. */
+			if (aws_surface_drawn_with_parent(surface)) {
+				continue;
+			}
 			if (have && surface->level >= lastLevel) {
 				continue;
 			}
@@ -852,43 +1059,29 @@ struct aws_surface *aws_surface_at(struct aws_server *server, int x, int y)
 		 * the pointer's focus belonged to the bar and the menu never heard the mouse. Within a level the walk is
 		 * reverse, which is the same "last mapped is on top" the compositor's inner loop uses. */
 		wl_list_for_each_reverse(surface, &server->surfaces, link) {
-			struct wl_shm_buffer *shm;
-			struct aws_dmabuf_buffer *dmabuf;
-			int width, height;
-
 			if (!surface->mapped || !surface->visible || surface->current_buffer == NULL) {
 				continue;
 			}
 			if (surface->level != level) {
 				continue;
 			}
-			/* **A WINDOW'S HIT RECTANGLE IS ITS BUFFER, WHICHEVER KIND IT IS.** A dma-buf window that the pointer
-			 * could not enter would be a window that never took the keyboard either, and the cause would be the
-			 * storage rather than anything about the window. */
-			shm = wl_shm_buffer_get(surface->current_buffer);
-			dmabuf = aws_dmabuf_buffer_from_resource(surface->current_buffer);
-			if (shm != NULL) {
-				width = wl_shm_buffer_get_width(shm);
-				height = wl_shm_buffer_get_height(shm);
-			} else if (dmabuf != NULL) {
-				width = dmabuf->width;
-				height = dmabuf->height;
-			} else {
+			/* **AND A SHEET IS MET WITH ITS PARENT.** It is drawn immediately above the parent, so the window the
+			 * pointer is over at this level is the sheet when the point is inside it — whatever the LIST says, which
+			 * is the whole reason this is asked here rather than left to the reverse walk: raising the sheet, raising
+			 * its parent, or raising a third window all reorder the list, and none of them can put a window between a
+			 * parent and its sheet on the glass. Asking the child FIRST is the same "topmost is met first" the walk
+			 * itself relies on. */
+			if (aws_surface_drawn_with_parent(surface)) {
 				continue;
 			}
-			/* **AND THE RECTANGLE IS IN LOGICAL PIXELS, WHICH IS THE BUFFER DIVIDED BY ITS SCALE.** Everything that
-			 * asks this function — the pointer, a click, the shell's placement — speaks logical pixels, and a 2x
-			 * client's 1280x800 buffer is a 640x400 window. Without the division a scaled window would take clicks
-			 * in a rectangle twice its own size, which is the sort of bug that reads as "the click went to the window
-			 * behind". A fractional scale is divided the same way and ROUNDED, because the logical space is whole
-			 * pixels and the buffer is what the client chose on the device grid. */
-			if (surface->buffer_scale != 1.0) {
-				double bscale = surface->buffer_scale > 0.0 ? surface->buffer_scale : 1.0;
+			{
+				struct aws_surface *sheet = sheet_at_point(server, surface, x, y);
 
-				width = (int)((double)width / bscale + 0.5);
-				height = (int)((double)height / bscale + 0.5);
+				if (sheet != NULL) {
+					return sheet;
+				}
 			}
-			if (x >= surface->x && x < surface->x + width && y >= surface->y && y < surface->y + height) {
+			if (surface_contains_point(surface, x, y)) {
 				return surface;
 			}
 		}

@@ -63,21 +63,57 @@ target_link_libraries(window-server-window-list-probe PRIVATE PkgConfig::WAYLAND
 # drag leaving its window cannot be photographed here — but the RULE that decides where a pointer event goes can be
 # asked directly, and `../src/seat.c` is compiled in as it ships. The two questions it asks of the rest of the server
 # are stubbed in the test: what is under a point, and how to tell a window where the pointer is.
-add_executable(window-server-seat-routing seat_routing.c "${CMAKE_CURRENT_SOURCE_DIR}/../src/seat.c")
+add_executable(window-server-seat-routing seat_routing.c "${CMAKE_CURRENT_SOURCE_DIR}/../src/seat.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/damage.c")
 target_include_directories(window-server-seat-routing PRIVATE "${_generated}" "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 target_link_libraries(window-server-seat-routing PRIVATE
   PkgConfig::WAYLAND_SERVER
   PkgConfig::XKBCOMMON)
 add_test(NAME window-server-seat-routing COMMAND window-server-seat-routing)
 
-# **AND THE POINTER THE COMPOSITOR DRAWS ITSELF, WHICH IS WHAT A DRM OUTPUT HAS AND NOTHING ELSE DOES.** The arrow's
-# raster and its placement are arithmetic about device pixels — a rounded box, a hotspot, a clipped blend — so they are
-# asked directly here; a headless session deliberately draws no cursor, which is why no screenshot could make the
-# claim. `../src/cursor.c` is compiled in as it ships.
-add_executable(window-server-cursor cursor.c "${CMAKE_CURRENT_SOURCE_DIR}/../src/cursor.c")
+# **AND THE SHEET'S PLACE IN THE COMPOSITE ORDER, ASKED OF THE WALK ITSELF.** "A sheet is always exactly one layer above
+# its parent, and nothing can be stacked between them" is a claim about `aws_output_walk`'s SEQUENCE, so `../src/output.c`
+# is compiled in as it ships and the walk is handed a recorder. The bug it exists for is the one adjacency in the LIST
+# could not prevent: raising the sheet on its own, a third window raised between the two, and an `NSAlert`'s panel at
+# `NSModalPanelWindowLevel` above a document at 0. The frame path and the screenshot in the same file need a renderer and
+# a backend, so those two symbols are stubbed in the test and named as stubs.
+add_executable(window-server-sheet-stack sheet_stack.c "${CMAKE_CURRENT_SOURCE_DIR}/../src/output.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/damage.c")
+target_include_directories(window-server-sheet-stack PRIVATE "${_generated}" "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(window-server-sheet-stack PRIVATE PkgConfig::WAYLAND_SERVER)
+add_test(NAME window-server-sheet-stack COMMAND window-server-sheet-stack)
+
+# **AND THE POINTER THE COMPOSITOR DRAWS ITSELF, WHICH IS WHAT A DRM OUTPUT HAS AND NOTHING ELSE DOES.** The image's
+# placement is arithmetic about device pixels — a rounded box, a hotspot, a clipped blend — so it is asked directly
+# here; a headless session deliberately draws no cursor, which is why no screenshot could make the claim. `../src/cursor.c`
+# and `../src/cursor-theme.c` are compiled in as they ship, and the vendored theme's directory is passed in so the
+# themed half is a real theme's real files rather than a fixture that agrees with the reader by construction.
+add_executable(window-server-cursor cursor.c
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/cursor.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/cursor-theme.c")
 target_include_directories(window-server-cursor PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 target_link_libraries(window-server-cursor PRIVATE PkgConfig::WAYLAND_SERVER)
-add_test(NAME window-server-cursor COMMAND window-server-cursor)
+add_test(NAME window-server-cursor COMMAND window-server-cursor
+  "${CMAKE_CURRENT_SOURCE_DIR}/../assets/cursors/Vimix")
+
+# **AND THE THEME READER ON ITS OWN**, which is the half no pointer test can fully see: the variant chosen for a size, the
+# hotspots the files carry, the premultiplied-to-straight conversion, an animated cursor's frames, and what a directory
+# that is not a theme answers. It reads the vendored Vimix theme, so the files this build installs are the files this
+# test is about.
+add_executable(window-server-cursor-theme cursor_theme.c
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/cursor-theme.c")
+target_include_directories(window-server-cursor-theme PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+add_test(NAME window-server-cursor-theme COMMAND window-server-cursor-theme
+  "${CMAKE_CURRENT_SOURCE_DIR}/../assets/cursors/Vimix")
+
+# **AND THE NESTED HALF, AGAINST A REAL X SERVER.** A nested output has the HOST draw its pointer, so the theme reaches
+# the glass as an X cursor and no frame this process writes contains it. The server is started twice — with the theme
+# and with a directory that is not one — and `AWS_CURSOR_DIAG` makes it say what it handed the host. SKIPS (77) on a
+# machine with no DISPLAY, like the dmabuf suite.
+add_test(NAME window-server-cursor-theme-nested
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-cursor-theme.sh"
+    "$<TARGET_FILE:window-server>" "${CMAKE_CURRENT_SOURCE_DIR}/../assets/cursors/Vimix")
+set_tests_properties(window-server-cursor-theme-nested PROPERTIES SKIP_RETURN_CODE 77)
 
 # **AND THE SYSTEM MENU'S IDENTITY AND MARKS, AS A UNIT TEST.** The detection fixtures, the resolver and every
 # coverage grid are checked without a display. `osdetect.c`, `systemicon.c`, the generated table and the generated
@@ -143,6 +179,15 @@ add_test(NAME window-server-headless
 	  "$<TARGET_FILE:window-server>" "$<TARGET_FILE:window-server-test-client>"
 	  "${PYTHON3}" "${CMAKE_CURRENT_SOURCE_DIR}/check.py")
 
+# **AND THE STRIP A CLIENT NAMES, AS A PICTURE AND AS A LINE OF TEXT.** The client poisons every pixel it does not
+# damage, so a compositor that recomposites the whole window is a green strip on magenta — and the server's own
+# `WINDOW_SERVER_DAMAGE_DIAG` has to account for the box it painted and for the one full redraw the map produced.
+# Three sessions: a partial commit, a commit that damages nothing (Wayland's whole-buffer rule), and a window move.
+add_test(NAME window-server-damage
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-damage.sh"
+	  "$<TARGET_FILE:window-server>" "$<TARGET_FILE:window-server-test-client>"
+	  "${PYTHON3}" "${CMAKE_CURRENT_SOURCE_DIR}/check_damage.py")
+
 # **AND THE WORK AREA AS A CLIENT SEES IT.** The headless suite above photographs windows; this one asks the server
 # what is LEFT of the screen after a client reserves a strip — the arithmetic a Dock depends on and the one thing a
 # frame cannot show.
@@ -196,7 +241,8 @@ add_test(NAME window-server-surface-lifetime
 # at 5, and 8 spells the same steps as `axis_value120` instead. Sending both spellings is a double count and sending a
 # v8 event to a v4 client is a protocol violation, so each bound version is driven separately and the exact sequence is
 # asserted. The seat is compiled in as it ships and the five `wl_pointer_send_*` doors are interposed.
-add_executable(window-server-pointer-axis pointer_axis.c "${CMAKE_CURRENT_SOURCE_DIR}/../src/seat.c")
+add_executable(window-server-pointer-axis pointer_axis.c "${CMAKE_CURRENT_SOURCE_DIR}/../src/seat.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/damage.c")
 target_include_directories(window-server-pointer-axis PRIVATE "${_generated}" "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 target_link_libraries(window-server-pointer-axis PRIVATE PkgConfig::WAYLAND_SERVER PkgConfig::XKBCOMMON)
 add_test(NAME window-server-pointer-axis COMMAND window-server-pointer-axis)

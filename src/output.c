@@ -47,7 +47,52 @@ static uint32_t aws_now_ms(void)
  * the composite order
  * --------------------------------------------------------------------------------------------------- */
 
-void aws_output_walk(struct aws_server *server, aws_output_emit_fn emit)
+/* **THE ONE QUESTION BOTH HALVES OF THE COMPOSITOR ASK ABOUT A SHEET.** See `server.h` for what it means; the body is
+ * three lines because the meaning is the interface: a sheet with a parent that is really on the screen has no place of
+ * its own in the order. */
+int aws_surface_drawn_with_parent(const struct aws_surface *surface)
+{
+	const struct aws_surface *parent;
+
+	if (surface == NULL) {
+		return 0;
+	}
+	parent = surface->sheet_parent;
+	if (parent == NULL || parent == surface) {
+		return 0;
+	}
+	return (parent->mapped && parent->visible && parent->current_buffer != NULL) ? 1 : 0;
+}
+
+/* **A SHEET IS DRAWN IMMEDIATELY ABOVE ITS PARENT, AND NOTHING CAN BE PUT BETWEEN THEM.** This is the one place the
+ * pair's order is decided, and it is decided by ASKING rather than by maintaining a list: `-orderFront:` on a sheet
+ * moves it to the top of the stack, a click on a third window moves that one above both, and a Dock's `activate_window`
+ * on the parent moves the parent — every one of those reorders `server->surfaces`, and every one of them can leave a
+ * window between a parent and its sheet if the list were the answer. It is not: a sheet whose parent is on the screen
+ * has NO PLACE OF ITS OWN, so it is skipped where the list put it and emitted here, the moment its parent has been —
+ * which makes "the sheet is the next thing above its parent" true by construction rather than by upkeep.
+ *
+ * A CHAIN IS BOUNDED. One sheet per window is the AppKit's rule and the server does not police it, so a client that
+ * attached a chain would be drawn as one; the depth cap is what stops a cycle (a client CAN name its own parent back)
+ * from turning a frame into a hang. */
+static void walk_emit_sheets(struct aws_server *server, struct aws_surface *parent, aws_output_emit_fn emit,
+			     uint32_t time, const struct aws_box *box, int depth)
+{
+	struct aws_surface *surface;
+
+	if (depth > 8) {
+		return;
+	}
+	wl_list_for_each(surface, &server->surfaces, link) {
+		if (surface->sheet_parent != parent || !surface->mapped || !surface->visible) {
+			continue;
+		}
+		emit(server, surface, time, box);
+		walk_emit_sheets(server, surface, emit, time, box, depth + 1);
+	}
+}
+
+void aws_output_walk(struct aws_server *server, aws_output_emit_fn emit, const struct aws_box *box)
 {
 	struct aws_surface *surface;
 	uint32_t time = aws_now_ms();
@@ -66,6 +111,13 @@ void aws_output_walk(struct aws_server *server, aws_output_emit_fn emit)
 			if (!surface->mapped) {
 				continue;
 			}
+			/* **AND A SHEET HAS NO LEVEL OF ITS OWN IN THE WALK, BECAUSE IT IS DRAWN WITH ITS PARENT.** Skipping it
+			 * here is what keeps a sheet at a higher level (an `NSAlert`'s panel is at `NSModalPanelWindowLevel`)
+			 * from costing an empty pass of its own — and, more importantly, from making the menu bar's row be drawn
+			 * before the pair it belongs above. */
+			if (aws_surface_drawn_with_parent(surface)) {
+				continue;
+			}
 			if (have && surface->level <= lastLevel) {
 				continue;
 			}
@@ -81,7 +133,7 @@ void aws_output_walk(struct aws_server *server, aws_output_emit_fn emit)
 		 * desktop, ordinary windows — and is covered by it; everything painted after (the application's own menu
 		 * window and the status items, at or above this level) sits IN it. */
 		if (!barDrawn && level >= AWS_MENU_BAR_LEVEL) {
-			emit(server, NULL, time);
+			emit(server, NULL, time, box);
 			barDrawn = 1;
 		}
 		wl_list_for_each(surface, &server->surfaces, link) {
@@ -90,6 +142,11 @@ void aws_output_walk(struct aws_server *server, aws_output_emit_fn emit)
 			 * menu left its panel on the glass, and the ones behind it accumulated until the run loop was repainting
 			 * a stack of dead menus every pass. Its buffer is left alone: a hidden window's last frame is still its
 			 * content, and the commit that replaces it is what gives it back (see `surface_commit`). */
+			/* **AND A SHEET IS NOT DRAWN IN ITS OWN PASS AT ALL** — it is emitted by the pass that draws its parent,
+			 * the moment the parent has been drawn. See `walk_emit_sheets`. */
+			if (aws_surface_drawn_with_parent(surface)) {
+				continue;
+			}
 			if (!surface->mapped || !surface->visible || surface->level != level) {
 				/* **A SURFACE WITH A BUFFER THAT IS BEING SKIPPED IS A CLIENT WAITING FOR EVER.** WHICH GUARD DID
 				 * IT is the question, and this names it — but only for a surface at THIS pass's own level, because
@@ -105,7 +162,8 @@ void aws_output_walk(struct aws_server *server, aws_output_emit_fn emit)
 				}
 				continue;
 			}
-			emit(server, surface, time);
+			emit(server, surface, time, box);
+			walk_emit_sheets(server, surface, emit, time, box, 0);
 		}
 		lastLevel = level;
 		have = 1;
@@ -113,7 +171,7 @@ void aws_output_walk(struct aws_server *server, aws_output_emit_fn emit)
 	/* **A SCREEN WITH NO WINDOW AT OR ABOVE THE BAR STILL HAS A BAR.** A desktop-only session has nothing at
 	 * `AWS_MENU_BAR_LEVEL`, so the walk above never reaches the draw. */
 	if (!barDrawn) {
-		emit(server, NULL, time);
+		emit(server, NULL, time, box);
 	}
 }
 
@@ -121,14 +179,76 @@ void aws_output_walk(struct aws_server *server, aws_output_emit_fn emit)
  * the frame, and who draws it
  * --------------------------------------------------------------------------------------------------- */
 
-void aws_output_render(struct aws_server *server)
+/* **A FRAME THAT PAINTS NOTHING STILL OWES THE CALLBACKS.** `wl_surface.frame` is a promise, and a client that attaches,
+ * commits and waits for one does not draw again until it arrives — so a frame skipped because nothing is damaged must
+ * still complete what the walk would have completed. The set is the walk's own condition (mapped, visible, a buffer),
+ * and it is spelled out here rather than by walking with a do-nothing emitter because the walk would also draw. */
+void aws_output_complete_frames(struct aws_server *server)
 {
+	struct aws_surface *surface;
+	uint32_t time = aws_now_ms();
+
+	wl_list_for_each(surface, &server->surfaces, link) {
+		if (surface->mapped && surface->visible && surface->current_buffer != NULL) {
+			aws_surface_frame_done(surface, time);
+		}
+	}
+}
+
+/* **WHAT THIS FRAME IS FOR, IN ONE LINE OF TEXT.** A damage bug is invisible in a screenshot of a static window — the
+ * window is right, the pixels around it are stale — and obvious in a line of text, so the diagnostic prints the box the
+ * frame painted and, for a full frame, the trigger that asked for it. It is compiled in and gated on the environment,
+ * like `AWS_RENDER_DEBUG`, because the alternative is a build nobody can reproduce a report against. */
+static void damage_report(const char *what, int surfaces, const struct aws_box *box, const char *reason)
+{
+	if (getenv("WINDOW_SERVER_DAMAGE_DIAG") == NULL) {
+		return;
+	}
+	if (strcmp(what, "full") == 0) {
+		fprintf(stderr, "damage: FULL (%s)\n", reason != NULL ? reason : "a render was requested");
+	} else if (strcmp(what, "box") == 0) {
+		fprintf(stderr, "damage: %d surface(s), box %dx%d at (%d,%d)\n", surfaces, box->width,
+			box->height, box->x, box->y);
+	} else {
+		fprintf(stderr, "damage: nothing to paint, no frame\n");
+	}
+}
+
+int aws_output_render(struct aws_server *server)
+{
+	struct aws_box box;
+	int full = 0;
+	const char *reason = NULL;
+	int surfaces;
+	int rendered = 1;
+
+	/* **THE LEDGERS ARE CONSUMED HERE, ONCE, WHATEVER HAPPENS NEXT.** A frame that is skipped does not keep the
+	 * rectangles for later: they described the buffer as it was committed, and a later frame's buffer is a different
+	 * picture. */
+	surfaces = aws_damage_frame_begin(server, &box, &full, &reason);
+	if (!full) {
+		aws_box_clip(&box, server->backend.width, server->backend.height);
+		if (aws_box_empty(&box)) {
+			rendered = 0;
+		}
+	}
+	if (!rendered) {
+		aws_output_complete_frames(server);
+		damage_report("nothing", 0, &box, reason);
+		return 0;
+	}
 	/* **THE RENDERER'S, AND NOTHING ELSE'S.** A server always has one — `aws_renderer_init` guarantees a CPU
 	 * renderer even when a GL context could not be made — so a NULL here is a lifecycle bug rather than a
-	 * configuration, and drawing nothing is the honest response to it. */
+	 * configuration, and drawing nothing is the honest response to it. **NULL MEANS THE WHOLE OUTPUT**, and a box means
+	 * only that box; no renderer may draw less than either. */
 	if (server->renderer != NULL && server->renderer->draw != NULL) {
-		server->renderer->draw(server);
+		server->renderer->draw(server, full ? NULL : &box);
 	}
+	damage_report(full ? "full" : "box", surfaces, &box, reason);
+	/* **THE FRAME IS SPENT, so the next one starts from nothing.** `damage_full` is a statement about ONE frame; leaving
+	 * it set would make every frame full forever, which is the bug this whole file exists to avoid. */
+	server->damage_full = 0;
+	server->damage_reason = NULL;
 	/* **AND NO BUFFER IS RELEASED HERE, BECAUSE A SURFACE'S CONTENT IS NOT THIS PASS'S TO GIVE UP.** This used to
 	 * release every surface's buffer after every composite, which reads as harmless and is not: a release is a
 	 * promise that the compositor has finished with those pixels, so the client repaints them in place — and the
@@ -142,6 +262,7 @@ void aws_output_render(struct aws_server *server)
 	 * what the screen is showing. A client that wants to paint while its last frame is still on the glass keeps a
 	 * second buffer for it — the swapchain every Wayland client has — which is what `AGWindowServer-Wayland.c`
 	 * now does. A release from here would be this pass taking a buffer it is still about to draw. */
+	return 1;
 }
 
 /* ---------------------------------------------------------------------------------------------------

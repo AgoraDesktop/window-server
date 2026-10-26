@@ -528,6 +528,7 @@ void aws_seat_pointer_leave(struct aws_server *server)
 	 * with no host pointer keeps its last frame — arrow and all — until something composites again. Leaving the
 	 * output is exactly such a thing. */
 	if (server->backend.owns_cursor) {
+		aws_damage_full(server, "the pointer left the output");
 		aws_server_schedule_render(server);
 	}
 }
@@ -575,6 +576,10 @@ void aws_seat_pointer_motion(struct aws_server *server, int x, int y)
 	 * no redraw is a pointer that appears stuck until a client happens to repaint. Scheduled BEFORE the focus test
 	 * below, because motion over an empty desktop has no surface to tell and is exactly the case that needed this. */
 	if (server->backend.owns_cursor) {
+		/* **THE OLD RECTANGLE IS THE TRAP.** A pointer that moves has to have the pixels where it WAS repainted from
+		 * whatever is underneath, and those pixels are not a rectangle this frame's surfaces damaged — so until the
+		 * seat remembers its own previous box (DAMAGE-PLAN.md §6.2, step 5), a motion is a full frame. */
+		aws_damage_full(server, "the pointer moved");
 		aws_server_schedule_render(server);
 	}
 	if (!server->pointer_inside) {

@@ -8,11 +8,13 @@
 
 #include "server.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 struct aws_server *aws_server_create(const char *backend_name, const char *input_name, const char *renderer_name,
-				     int width, int height, double scale, double ui_scale)
+				     int width, int height, double scale, double ui_scale,
+				     const char *cursor_theme, double cursor_size)
 {
 	struct aws_server *server = calloc(1, sizeof *server);
 
@@ -93,6 +95,14 @@ struct aws_server *aws_server_create(const char *backend_name, const char *input
 		free(server);
 		return NULL;
 	}
+	/* **AND THE POINTER'S ARTWORK LAST, BECAUSE BOTH SIDES OF THE DISPLAY HAVE TO EXIST TO TAKE IT.** The theme is the
+	 * source of the pointer's pixels for the composited path (DRM) and, through `backend.apply_cursor`, for the path
+	 * where a host draws it (nested X11) — so the backend has to have its window before the theme is handed over, and
+	 * the renderer has to exist before a change can be scheduled. A theme that is not there is NOT a failed server:
+	 * `aws_server_set_cursor_theme` says so and `cursor.c` draws Agora's own arrow, which is what every session
+	 * without an installed theme uses. */
+	server->cursor_size = (cursor_size > 0.0) ? cursor_size : AWS_CURSOR_DEFAULT_SIZE;
+	aws_server_set_cursor_theme(server, cursor_theme);
 	return server;
 }
 
@@ -119,13 +129,98 @@ void aws_server_destroy(struct aws_server *server)
 	 * state that has been released. */
 	wl_display_destroy(server->display);
 	aws_cursor_finish(server);
+	aws_cursor_theme_close(server->cursor_theme);
 	free(server->dmabuf_formats);
 	free(server);
 }
 
 void aws_server_schedule_render(struct aws_server *server)
 {
+	/* **EVERY CHANGE THAT IS NOT A CLIENT'S OWN PIXELS LANDS HERE, SO IT IS SAFE BY DEFAULT.** A geometry change, a menu
+	 * bar title, the pointer on an output that draws its own cursor, a settings change — none of them knows what was
+	 * under the pixels it moved, so the honest answer is the whole output. `aws_server_schedule_render_partial` is the
+	 * other form, and only `surface_commit` — which HAS the client's rectangles — is allowed to ask for it.
+	 *
+	 * THE REASON IS NOT OVERWRITTEN, so a trigger that names itself (`aws_damage_full(server, "a window moved")`) keeps
+	 * its name when the frame is asked for afterwards; a caller that says nothing gets the diagnostic's default. */
+	aws_damage_full(server, NULL);
 	server->render_pending = 1;
+}
+
+void aws_server_schedule_render_partial(struct aws_server *server)
+{
+	server->render_pending = 1;
+}
+
+/* **A CHANGE MADE DURING STARTUP DOES NOT NEED A FRAME, AND ASKING FOR ONE USED TO BREAK THE STARTUP DEADLINE.**
+ * `--idle-timeout` exists to end a server that never composites — no client, a client that never mapped — and the
+ * deadline is disarmed by the FIRST frame, so a setting applied between `aws_server_create` and the loop would
+ * composite one frame of nothing, disarm the deadline, and leave exactly the hang the deadline is for. MEASURED, as
+ * `window-server-dpi-override`, `-ui-scale` and `-idle-timeout` timing out at once after the theme started scheduling a
+ * render at startup. A change made while the loop IS running still asks for a frame: there a frame is the only way the
+ * change reaches the glass. */
+static void server_schedule_if_running(struct aws_server *server)
+{
+	if (server->running) {
+		aws_damage_full(server, "a setting changed");
+		aws_server_schedule_render(server);
+	}
+}
+
+/* **THE POINTER'S THEME IS A SETTING, NOT A BUILD FACT.** A session on a machine that installed the vendored theme gets
+ * the theme; a session pointed at another directory with `AGORA_CURSOR_THEME` or `--cursor-theme` gets that one; a
+ * session with neither, and no installed theme, gets the arrow `cursor.c` draws. Everything that could disagree about
+ * the change is handled in one place: the cached image is invalidated by bumping the generation, the backend is told
+ * to re-apply it where a host draws the pointer, and a frame is scheduled where the compositor does — so a change is
+ * on the glass without waiting for a client to repaint. */
+int aws_server_set_cursor_theme(struct aws_server *server, const char *directory)
+{
+	const char *path = (directory != NULL && directory[0] != '\0') ? directory : aws_cursor_theme_default_directory();
+	struct aws_cursor_theme *theme;
+
+	if (server == NULL) {
+		return -1;
+	}
+	aws_cursor_theme_close(server->cursor_theme);
+	/* THE FILE'S OWN ARROW IS READ AFTER THE POINTER IS FIRST ASKED FOR, not here: opening a theme is a directory check
+	 * and nothing more, so a theme with no `left_ptr` still falls back per draw rather than failing a whole session. */
+	theme = aws_cursor_theme_open(path);
+	server->cursor_theme = theme;
+	server->cursor_generation++;
+	if (server->backend.apply_cursor != NULL) {
+		server->backend.apply_cursor(server);
+	}
+	server_schedule_if_running(server);
+	if (theme == NULL) {
+		fprintf(stderr, "window-server: no cursor theme at %s — the pointer is Agora's drawn arrow\n", path);
+		return -1;
+	}
+	/* **AND THE THEME HAS TO HAVE THE SHAPE THE COMPOSITOR ASKS FOR.** Opening a theme is a directory check; whether it
+	 * contains an arrow is a different question, and a startup line that promised `left_ptr` from a theme without one
+	 * would be a claim nothing keeps. Asking here also means a broken theme is named at startup rather than at the first
+	 * pointer motion — and it caches the image the first frame will composite. */
+	if (aws_cursor_theme_pointer(server) == NULL) {
+		fprintf(stderr, "window-server: the cursor theme at %s has no %s for a %g-point pointer — the pointer is "
+				"Agora's drawn arrow\n", aws_cursor_theme_directory(theme), AWS_CURSOR_ARROW_NAME,
+			server->cursor_size);
+		return -1;
+	}
+	fprintf(stderr, "window-server: the pointer is %s from the cursor theme at %s (%g points)\n",
+		AWS_CURSOR_ARROW_NAME, aws_cursor_theme_directory(theme), server->cursor_size);
+	return 0;
+}
+
+void aws_server_set_cursor_size(struct aws_server *server, double points)
+{
+	if (server == NULL || !(points > 0.0) || points == server->cursor_size) {
+		return;
+	}
+	server->cursor_size = points;
+	server->cursor_generation++;
+	if (server->backend.apply_cursor != NULL) {
+		server->backend.apply_cursor(server);
+	}
+	server_schedule_if_running(server);
 }
 
 int aws_server_set_system_menu_icon(struct aws_server *server, const char *name)
@@ -137,7 +232,7 @@ int aws_server_set_system_menu_icon(struct aws_server *server, const char *name)
 	}
 	if (strcmp(name, "auto") == 0) {
 		server->system_menu_icon = aws_system_menu_icon_resolve(&server->os_identity);
-		server->render_pending = 1;
+		server_schedule_if_running(server);
 		return 0;
 	}
 	icon = aws_system_icon_by_name(name);
@@ -145,6 +240,6 @@ int aws_server_set_system_menu_icon(struct aws_server *server, const char *name)
 		return -1;
 	}
 	server->system_menu_icon = icon;
-	server->render_pending = 1;
+	server_schedule_if_running(server);
 	return 0;
 }

@@ -1,15 +1,28 @@
 /*
- * cursor.c — the arrow the compositor draws when nobody else supplies one.
+ * cursor.c — the pointer the compositor puts under the pointer's position.
  *
  * Copyright © 2026 Kyle J. Cardoza.
  * SPDX-FileCopyrightText: 2026 Kyle J. Cardoza
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * **THE SHAPE IS POINTS, NOT PIXELS.** An arrow rasterized on a 1x output and then magnified is a blocky arrow next
- * to device-resolution text, so the outline below is in POINTS and the raster is made for the output's own scale —
- * the same reason the menu bar's mark is rasterized at the size it is drawn. The scale here is FRACTIONAL (the
- * measured 1.332 of a 96-dpi panel), and the device box and the hotspot both ROUND, because a cursor that landed on
- * a half pixel would be a cursor drawn twice.
+ * **THE PIXELS ARE THE THEME'S, AND THE THEME IS THE DESKTOP'S DESIGN.** This file used to own the arrow: an outline
+ * in points, rasterized per scale. That was a compositor inventing its own pointer, and it is not what a cursor
+ * theme is for — a desktop is designed with its pointers, and the arrow someone put in the theme is the one they
+ * expect to see over their windows. So `aws_cursor_ensure` asks the theme (`cursor-theme.c`) for `left_ptr` at this
+ * output's size, copies its pixels and keeps its hotspot, and the drawn arrow below is what happens when there is no
+ * theme: a checkout without the vendored artwork still has a visible pointer, and that image is original to Agora.
+ *
+ * WHERE THE TWO DISPLAY PATHS GET IT. Both ask the same function. A DRM output has no host pointer, so the image is
+ * composited above every surface — by `aws_cursor_draw_cpu` here, or by the GL renderer uploading `aws_cursor_image`
+ * as a texture. A nested X11 output has a host pointer already, so the image is handed to the HOST through
+ * `aws_cursor_theme_pointer`, which is the same variant for the same scale; the host draws it inside this process's
+ * window, and no second pointer is composited there.
+ *
+ * **THE SHAPE THIS FILE DRAWS IS POINTS, NOT PIXELS.** An arrow rasterized on a 1x output and then magnified is a
+ * blocky arrow next to device-resolution text, so the fallback outline below is in POINTS and the raster is made for
+ * the output's own scale — the same reason the menu bar's mark is rasterized at the size it is drawn. The scale here
+ * is FRACTIONAL (the measured 1.332 of a 96-dpi panel), and the device box and the hotspot both ROUND, because a
+ * cursor that landed on a half pixel would be a cursor drawn twice.
  *
  * THE TWO-TONE LOOK IS TWO LAYERS, NOT TWO SHAPES. A black arrow alone disappears against a dark window and a white
  * outline alone is washed out on a light one, so the image is WHITE FILLED FIRST and BLACK DRAWN OVER IT at one
@@ -23,8 +36,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* THE ARROW, IN POINTS: the tip, down the left edge, the notch, the tail's outer edge, the tail's end, back up to
- * the body, and out to the right shoulder. 11 x 18 points is the size a desktop pointer has been since forever;
+/* THE FALLBACK ARROW, IN POINTS: the tip, down the left edge, the notch, the tail's outer edge, the tail's end, back
+ * up to the body, and out to the right shoulder. 11 x 18 points is the size a desktop pointer has been since forever;
  * what matters here is that the tip is INSIDE the first point, so the hotspot has room for its fringe. */
 static const double s_arrow[] = {
 	0.5, 0.5,
@@ -87,9 +100,10 @@ static uint32_t cursor_over(uint32_t destination, uint32_t source, uint32_t alph
 	return (out_alpha << 24) | (r << 16) | (g << 8) | b;
 }
 
-/* THE RASTER, FOR ONE SCALE. Everything here is device pixels except the polygon, which is looked up in points and
- * divided by the scale at the sample: that is what makes the fringe one DEVICE pixel wide at every scale. */
-static void cursor_rasterize(struct aws_cursor *cursor, double scale)
+/* THE FALLBACK'S RASTER, FOR ONE SCALE. Everything here is device pixels except the polygon, which is looked up in
+ * points and divided by the scale at the sample: that is what makes the fringe one DEVICE pixel wide at every
+ * scale. */
+static void cursor_rasterize_arrow(struct aws_cursor *cursor, double scale)
 {
 	int width = (int)(AWS_ARROW_WIDTH * scale + 0.5) + 1;
 	int height = (int)(AWS_ARROW_HEIGHT * scale + 0.5) + 1;
@@ -166,6 +180,47 @@ static void cursor_rasterize(struct aws_cursor *cursor, double scale)
 	cursor->pixels = pixels;
 }
 
+/* **THE THEME'S IMAGE, COPIED.** A copy rather than a borrowed pointer because the theme's artwork can be closed
+ * under a running server (a theme that changed, a session that ended) and the renderer may still be holding the
+ * previous frame's image. A cursor is at most 64×64, so the copy costs nothing that matters; the pixels arrive as
+ * straight alpha already, which is what every blend here expects. */
+static void cursor_copy_image(struct aws_cursor *cursor, const struct aws_cursor_image *image, double scale)
+{
+	size_t count = (size_t)image->width * (size_t)image->height;
+	uint32_t *pixels = malloc(count * sizeof *pixels);
+
+	if (pixels == NULL) {
+		return;
+	}
+	memcpy(pixels, image->pixels, count * sizeof *pixels);
+	cursor->scale = scale;
+	cursor->width = image->width;
+	cursor->height = image->height;
+	cursor->hotspot_x = image->hotspot_x;
+	cursor->hotspot_y = image->hotspot_y;
+	cursor->pixels = pixels;
+}
+
+/* THE THEME'S POINTER FOR THIS OUTPUT, OR NULL WHEN THERE IS NOTHING TO ASK. One place decides the size — the cursor's
+ * points times the output's scale — so the composited pointer and the nested host's pointer are never a variant
+ * apart. */
+static const struct aws_cursor_image *cursor_theme_image(struct aws_server *server, double scale)
+{
+	const struct aws_cursor_frames *frames;
+
+	if (server->cursor_theme == NULL) {
+		return NULL;
+	}
+	frames = aws_cursor_theme_frames(server->cursor_theme, AWS_CURSOR_ARROW_NAME,
+					 server->cursor_size * scale);
+	if (frames == NULL || frames->count == 0) {
+		return NULL;
+	}
+	/* THE FIRST FRAME: the compositor shows one shape and an arrow does not animate. The rest are decoded and kept for
+	 * the cursor-shape door that does not exist yet — see cursor-theme.h. */
+	return &frames->frames[0];
+}
+
 int aws_cursor_visible(struct aws_server *server)
 {
 	return server->backend.owns_cursor && server->pointer_inside;
@@ -174,16 +229,41 @@ int aws_cursor_visible(struct aws_server *server)
 void aws_cursor_ensure(struct aws_server *server)
 {
 	double scale = server->backend.scale;
+	const struct aws_cursor_image *image;
 
 	if (scale <= 0.0) {
 		scale = 1.0;
 	}
-	if (server->cursor.pixels != NULL && server->cursor.scale == scale) {
+	/* CACHED FOR THE SCALE AND FOR THE THEME SETTINGS, not for the scale alone: a pointer asked to be larger, or a
+	 * theme changed under a running server, has to re-make the image even though the output did not move. */
+	if (server->cursor.pixels != NULL && server->cursor.scale == scale &&
+	    server->cursor.generation == server->cursor_generation) {
 		return;
 	}
 	free(server->cursor.pixels);
 	memset(&server->cursor, 0, sizeof server->cursor);
-	cursor_rasterize(&server->cursor, scale);
+	image = cursor_theme_image(server, scale);
+	if (image != NULL) {
+		cursor_copy_image(&server->cursor, image, scale);
+	}
+	if (server->cursor.pixels == NULL) {
+		cursor_rasterize_arrow(&server->cursor, scale);
+	}
+	/* **EVERY IMAGE MADE IS A NEW NUMBER, NOT THE SETTINGS' NUMBER.** A renderer caches the image as a texture and a
+	 * change of SCALE re-makes it without any setting having changed — so the generation has to count images, not
+	 * settings, or a GL cursor would keep the texture it uploaded at the old scale. Bumping the server's counter here
+	 * is also what makes the cache test above hold afterwards (the two numbers are equal until something changes). */
+	server->cursor.generation = ++server->cursor_generation;
+}
+
+const struct aws_cursor_image *aws_cursor_theme_pointer(struct aws_server *server)
+{
+	double scale = server->backend.scale;
+
+	if (scale <= 0.0) {
+		scale = 1.0;
+	}
+	return cursor_theme_image(server, scale);
 }
 
 const struct aws_cursor *aws_cursor_image(struct aws_server *server)
@@ -196,6 +276,11 @@ const struct aws_cursor *aws_cursor_image(struct aws_server *server)
 }
 
 void aws_cursor_draw_cpu(struct aws_server *server)
+{
+	aws_cursor_draw_cpu_box(server, NULL);
+}
+
+void aws_cursor_draw_cpu_box(struct aws_server *server, const struct aws_box *box)
 {
 	struct aws_backend *backend = &server->backend;
 	const struct aws_cursor *cursor;
@@ -219,6 +304,12 @@ void aws_cursor_draw_cpu(struct aws_server *server)
 		if (y < 0 || y >= backend->height) {
 			continue;
 		}
+		/* **THE POINTER IS NOT EXEMPT FROM A PARTIAL FRAME.** Its pixels are blended, so painting them twice darkens
+		 * the antialiased edge; a frame whose box misses the pointer entirely must paint none of it, and one that
+		 * covers half of it paints that half. The rows and columns outside are already correct on the glass. */
+		if (box != NULL && (y < box->y || y >= box->y + box->height)) {
+			continue;
+		}
 		for (column = 0; column < cursor->width; column++) {
 			uint32_t pixel;
 			uint32_t alpha;
@@ -226,6 +317,9 @@ void aws_cursor_draw_cpu(struct aws_server *server)
 			uint32_t *destination;
 
 			if (x < 0 || x >= backend->width) {
+				continue;
+			}
+			if (box != NULL && (x < box->x || x >= box->x + box->width)) {
 				continue;
 			}
 			pixel = cursor->pixels[(size_t)row * (size_t)cursor->width + (size_t)column];

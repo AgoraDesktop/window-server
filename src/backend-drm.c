@@ -544,6 +544,7 @@ static void drm_resume(struct aws_server *server)
 	if (drm->source == NULL) {
 		drm->source = wl_event_loop_add_fd(server->loop, drm->fd, WL_EVENT_READABLE, drm_dispatch, server);
 	}
+	aws_damage_full(server, "the DRM output came back");
 	server->render_pending = 1;
 }
 
@@ -969,7 +970,9 @@ int aws_backend_drm_start(struct aws_server *server)
 
 	server->backend.name = "drm";
 	/* **THE POINTER IS OURS ON A SCANNER.** There is no host window here whose pointer the person can see, so the
-	 * compositor composites the arrow in cursor.c over every frame — on both renderers. */
+	 * compositor composites the pointer in cursor.c over every frame — on both renderers, and from the theme the
+	 * server loaded rather than from a shape it drew (`cursor-theme.c`). This flag is the whole of the difference
+	 * between the two display paths: the nested X11 backend has a host and hands the same image to it instead. */
 	server->backend.owns_cursor = 1;
 	server->backend.data = drm;
 	server->backend.pause = drm_pause;

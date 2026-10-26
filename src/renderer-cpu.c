@@ -29,7 +29,7 @@
 
 /* EVERY PIXEL, DRAWN BY THE CPU. The background is cleared first and the walk then paints the bar and the
  * surfaces over it, in the order the server decided on. */
-static void cpu_draw(struct aws_server *server);
+static void cpu_draw(struct aws_server *server, const struct aws_box *box);
 
 /* ---------------------------------------------------------------------------------------------------
  * the System menu's mark
@@ -60,7 +60,8 @@ static int cpu_device_edge(int logical, double scale)
 _Static_assert(AWS_SYSTEM_MENU_GLYPH_WIDTH == AWS_SYSTEM_MENU_GLYPH_HEIGHT,
 	       "the System menu's mark is a square box, and its coverage grid is square too");
 
-static void aws_output_draw_system_menu(struct aws_backend *backend, struct aws_system_icon *icon, double scale)
+static void aws_output_draw_system_menu(struct aws_backend *backend, struct aws_system_icon *icon, double scale,
+					const struct aws_box *clip)
 {
 	const uint8_t *coverage;
 	int row, column;
@@ -95,6 +96,9 @@ static void aws_output_draw_system_menu(struct aws_backend *backend, struct aws_
 		if (y < 0 || y >= backend->height) {
 			continue;
 		}
+		if (clip != NULL && (y < clip->y || y >= clip->y + clip->height)) {
+			continue;
+		}
 		for (column = 0; column < glyph; column++) {
 			const int x = glyph_left + column;
 			const int gx = column * grid / glyph;
@@ -102,6 +106,12 @@ static void aws_output_draw_system_menu(struct aws_backend *backend, struct aws_
 			uint32_t *pixel;
 
 			if (alpha == 0 || x < 0 || x >= backend->width) {
+				continue;
+			}
+			/* **A MARK IS BLENDED, SO IT IS NOT IDEMPOTENT AND THE BOX HAS TO CLIP IT.** Painting the same antialiased
+			 * edge twice darkens it; a partial frame that touches the bar's rows anywhere must paint the mark only where the
+			 * box says. */
+			if (clip != NULL && (x < clip->x || x >= clip->x + clip->width)) {
 				continue;
 			}
 			pixel = &backend->pixels[(size_t)y * (size_t)backend->width + (size_t)x];
@@ -157,17 +167,22 @@ static uint32_t aws_shadow_pixel(uint32_t destination, uint32_t alpha)
 }
 
 /* ONE ROW'S SPAN OF SHADOW — see the ring note in `aws_output_draw_shadow`, which is the only caller and the
- * reason the spans exist. */
+ * reason the spans exist. **`clip_top` IS THE FIRST ROW A SHADOW MAY PAINT IN, in DEVICE pixels**, and the caller is
+ * the one that knows which rules apply: the menu bar's rows for every window, and a sheet's own top edge as well. */
 static void shadow_span(struct aws_backend *output, int row, int from, int to,
-			int cx, int cy, int innerW, int innerH, int radius, int depth)
+			int cx, int cy, int innerW, int innerH, int radius, int depth, int clip_top,
+			const struct aws_box *clip)
 {
 	int dy;
 	int column;
 
-	/* **THE BAR'S OWN ROWS ARE DEVICE PIXELS, so the boundary is scaled here.** A shadow must never be painted up
-	 * across the bar, and the bar is `AWS_MENU_BAR_HEIGHT * scale` device rows tall. */
-	if (row < cpu_device_edge(AWS_MENU_BAR_HEIGHT, output->scale > 0 ? output->scale : 1.0)
-	    || row >= output->height) {
+	if (row < clip_top || row >= output->height) {
+		return;
+	}
+	/* **AND THE FRAME'S OWN BOX, WHICH IS A PARTIAL FRAME'S ONLY OTHER RULE.** A shadow is painted on what is behind the
+	 * window, and on a frame that repaints one strip the shadow's rows outside that strip are not this frame's to
+	 * touch — they already hold the shadow, drawn by the frame that put the window there. */
+	if (clip != NULL && (row < clip->y || row >= clip->y + clip->height)) {
 		return;
 	}
 	if (from < 0) {
@@ -175,6 +190,14 @@ static void shadow_span(struct aws_backend *output, int row, int from, int to,
 	}
 	if (to > output->width) {
 		to = output->width;
+	}
+	if (clip != NULL) {
+		if (from < clip->x) {
+			from = clip->x;
+		}
+		if (to > clip->x + clip->width) {
+			to = clip->x + clip->width;
+		}
 	}
 	dy = (row > cy ? row - cy : cy - row) - innerH;
 	if (dy < 0) {
@@ -214,8 +237,15 @@ static void shadow_span(struct aws_backend *output, int row, int from, int to,
  * take the radius off — negative inside the shape, positive outside, and the same expression at every corner. The
  * ALPHA then falls off as the square of the distance, which is what makes a hard edge read as a soft one. */
 /* **`depth` AND `radius` ARRIVE IN DEVICE PIXELS; the caller scaled them from their logical constants.** The
- * falloff itself is unchanged — what a 2x output owes is a shadow that reaches as far, by eye, as a 1x one does. */
-static void aws_output_draw_shadow(struct aws_backend *output, int x, int y, int w, int h, int radius, int depth)
+ * falloff itself is unchanged — what a 2x output owes is a shadow that reaches as far, by eye, as a 1x one does.
+ *
+ * **`clip_top` IS "NOTHING MAY BE PAINTED ABOVE THIS ROW", ALSO IN DEVICE PIXELS.** Two rules use it and they are the
+ * same sentence about different seams: nothing casts a shadow up across the MENU BAR (the bar is the server's own
+ * furniture and the topmost thing on the screen), and a SHEET casts nothing up across its parent's title bar — a
+ * sheet's top edge is that bar's bottom edge, so a shadow above it is a dark band under a title bar that is supposed
+ * to be a seam rather than a ledge. */
+static void aws_output_draw_shadow(struct aws_backend *output, int x, int y, int w, int h, int radius, int depth,
+				   int clip_top, const struct aws_box *clip)
 {
 	int left = x - depth, top = y - depth;
 	int right = x + w + depth, bottom = y + h + depth;
@@ -228,13 +258,16 @@ static void aws_output_draw_shadow(struct aws_backend *output, int x, int y, int
 		return;
 	}
 	for (row = top; row < bottom; row++) {
-		/* **AND NOTHING BEHIND THE MENU BAR CASTS A SHADOW ONTO IT.** The bar is the server's own furniture and the
-		 * topmost thing on the screen; a pop-down menu opens with its top edge AT the bar's bottom, so its shadow
-		 * would otherwise paint UPWARDS across the strip — a dark band above every open menu, which reads as a dirty
-		 * bar rather than as a shadow under a window. THE BAR'S OWN SHADOW FALLS BELOW THE STRIP and is unaffected by
-		 * this line, because its rectangle begins at the strip's own bottom edge. */
-		if (row < cpu_device_edge(AWS_MENU_BAR_HEIGHT, output->scale > 0 ? output->scale : 1.0)
-	    || row >= output->height) {
+		/* **AND NOTHING BEHIND THE MENU BAR — OR BEHIND A SHEET'S PARENT TITLE BAR — CASTS A SHADOW ONTO IT.** The bar
+		 * is the server's own furniture and the topmost thing on the screen; a pop-down menu opens with its top edge AT
+		 * the bar's bottom, so its shadow would otherwise paint UPWARDS across the strip — a dark band above every open
+		 * menu, which reads as a dirty bar rather than as a shadow under a window. THE BAR'S OWN SHADOW FALLS BELOW THE
+		 * STRIP and is unaffected by this line, because its rectangle begins at the strip's own bottom edge. The sheet's
+		 * half of the rule is `clip_top`'s, computed by the caller from the surface. */
+		if (row < clip_top || row >= output->height) {
+			continue;
+		}
+		if (clip != NULL && (row < clip->y || row >= clip->y + clip->height)) {
 			continue;
 		}
 		/* **THE SHADOW IS A RING, AND A ROW THROUGH THE FRAME PAINTS ONLY ITS TWO SIDES.** Every pixel a shadow can
@@ -249,10 +282,13 @@ static void aws_output_draw_shadow(struct aws_backend *output, int x, int y, int
 			int hole1 = x + w - radius;
 
 			if (row >= y && row < y + h && hole1 > hole0) {
-				shadow_span(output, row, left, hole0, cx, cy, innerW, innerH, radius, depth);
-				shadow_span(output, row, hole1, right, cx, cy, innerW, innerH, radius, depth);
+				shadow_span(output, row, left, hole0, cx, cy, innerW, innerH, radius, depth, clip_top,
+					    clip);
+				shadow_span(output, row, hole1, right, cx, cy, innerW, innerH, radius, depth, clip_top,
+					    clip);
 			} else {
-				shadow_span(output, row, left, right, cx, cy, innerW, innerH, radius, depth);
+				shadow_span(output, row, left, right, cx, cy, innerW, innerH, radius, depth, clip_top,
+					    clip);
 			}
 		}
 	}
@@ -294,6 +330,13 @@ static unsigned shape_coverage(const struct aws_backend *output, const struct aw
 	int sh = cpu_device_edge(surface->frame_height, scale);
 	int in_bar;
 	int hangs_from_bar;
+	/* **AND A SHEET'S TOP EDGE IS ITS PARENT'S TITLE BAR, WHICH IS THE SAME KIND OF SEAM.** The bar rule above is
+	 * geometry, because a menu's top edge and the menu bar have one number between them. A sheet's does not: the
+	 * compositor draws no title bar (the AppKit does), and two rounded rectangles whose edges meet look exactly like
+	 * two that belong to each other — so the application SAYS so (`set_sheet_parent`) and this is the one bit of it the
+	 * shape needs. Its top corners are square for the reason a menu's are: rounding them cuts notches out of the seam
+	 * it is hanging from, and its bottom corners stay round, which is the shape a sheet has. */
+	int hangs_from_titlebar;
 	double cx, cy;
 	double outside;
 	unsigned cover;
@@ -313,6 +356,7 @@ static unsigned shape_coverage(const struct aws_backend *output, const struct aw
 	 * rather than a fuzzy one because a fuzz of half a device pixel already catches a surface that is INSIDE the bar
 	 * — and one row inside the bar is a status item, whose corners are the bar's business and must stay square. */
 	hangs_from_bar = (surface->y >= 0) && (cpu_device_edge(surface->y, scale) == bar_height);
+	hangs_from_titlebar = hangs_from_bar || (surface->sheet_parent != NULL);
 	if (radius > width / 2) {
 		radius = width / 2;
 	}
@@ -330,13 +374,13 @@ static unsigned shape_coverage(const struct aws_backend *output, const struct aw
 	}
 	/* WHICH CORNER, AND MAY IT BE ROUNDED AT ALL. */
 	if (column < radius && row < radius) {
-		if (!(sx > 0 && sy > 0) || hangs_from_bar) {
+		if (!(sx > 0 && sy > 0) || hangs_from_titlebar) {
 			return 255;
 		}
 		cx = radius;
 		cy = radius;
 	} else if (column >= width - radius && row < radius) {
-		if (!(sx + width < output->width && sy > 0) || hangs_from_bar) {
+		if (!(sx + width < output->width && sy > 0) || hangs_from_titlebar) {
 			return 255;
 		}
 		cx = width - radius;
@@ -447,7 +491,7 @@ static uint32_t scaled_block_pixel(const uint8_t *base, size_t stride, int buffe
  *
  * THE FIELDS COME FROM THE `wl_shm_buffer` EVERY TIME rather than from a copy kept on the surface: the buffer
  * belongs to the client, and a copy would be a second place for its size and format to be true. */
-static void composite_surface(struct aws_backend *output, struct aws_surface *surface)
+static void composite_surface(struct aws_backend *output, struct aws_surface *surface, const struct aws_box *clip)
 {
 	struct wl_shm_buffer *shm = wl_shm_buffer_get(surface->current_buffer);
 	const uint8_t *base;
@@ -557,12 +601,26 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 		if (oy < 0 || oy >= output->height) {
 			continue;
 		}
+		/* **AND THE FRAME'S BOX, WHICH IS THE WHOLE OF WHAT A PARTIAL FRAME IS.** A row outside it is not this frame's to
+		 * touch — it holds the window's pixels from the frame that put them there, and repainting them here would be the
+		 * whole-window cost this work exists to avoid. */
+		if (clip != NULL && (oy < clip->y || oy >= clip->y + clip->height)) {
+			continue;
+		}
 		/* THE ROW'S SPAN, CLIPPED TO THE OUTPUT ONCE rather than tested per pixel. */
 		if (dx0 < 0) {
 			first = -dx0;
 		}
 		if (dx0 + last > output->width) {
 			last = output->width - dx0;
+		}
+		if (clip != NULL) {
+			if (first < clip->x - dx0) {
+				first = clip->x - dx0;
+			}
+			if (last > clip->x + clip->width - dx0) {
+				last = clip->x + clip->width - dx0;
+			}
 		}
 		if (first >= last) {
 			continue;
@@ -668,6 +726,9 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 			if (py < 0 || py >= output->height) {
 				continue;
 			}
+			if (clip != NULL && (py < clip->y || py >= clip->y + clip->height)) {
+				continue;
+			}
 			/* THE BOX IN THE BUFFER: the device row's own span, divided by the ratio. Computed from the DEVICE
 			 * coordinate rather than accumulated, so a fractional ratio cannot drift across a window. */
 			by0 = (double)(py - dy0) * client_scale / out_scale;
@@ -680,6 +741,9 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 				uint32_t *destination;
 
 				if (px < 0 || px >= output->width) {
+					continue;
+				}
+				if (clip != NULL && (px < clip->x || px >= clip->x + clip->width)) {
 					continue;
 				}
 				bx0 = (double)(px - dx0) * client_scale / out_scale;
@@ -716,26 +780,44 @@ static void composite_surface(struct aws_backend *output, struct aws_surface *su
 /* **THE BAR, DRAWN AT ITS OWN LEVEL** — the strip's fill, the SYSTEM menu at its left, and its shadow below.
  * Called from the level walk at `AWS_MENU_BAR_LEVEL`, so the desktop and ordinary windows are painted first and the
  * application's own menu window (at the same level, later in the list) is over it. */
-static void aws_output_draw_menu_bar(struct aws_server *server)
+static void aws_output_draw_menu_bar(struct aws_server *server, const struct aws_box *clip)
 {
 	struct aws_backend *backend = &server->backend;
 	int row, column;
 
 	double scale = aws_output_scale(server);
 	int bar_height = cpu_device_edge(AWS_MENU_BAR_HEIGHT, scale);	/* 24 logical rows are 36 device rows at 1.5 */
+	int first_column = 0, last_column = backend->width;
 
+	/* **THE BAR IS A WRITER LIKE ANY OTHER, SO THE FRAME'S BOX CLIPS IT TOO.** A partial frame that does not touch the
+	 * bar's rows paints none of them — which is what makes a strip in a window cost nothing in the bar. */
+	if (clip != NULL) {
+		if (clip->x > first_column) {
+			first_column = clip->x;
+		}
+		if (clip->x + clip->width < last_column) {
+			last_column = clip->x + clip->width;
+		}
+	}
 	for (row = 0; row < bar_height && row < backend->height; row++) {
-		for (column = 0; column < backend->width; column++) {
+		if (clip != NULL && (row < clip->y || row >= clip->y + clip->height)) {
+			continue;
+		}
+		for (column = first_column; column < last_column; column++) {
 			backend->pixels[row * backend->width + column] = AWS_MENU_BAR_COLOUR;
 		}
 	}
-	aws_output_draw_system_menu(backend, server->system_menu_icon, scale);
+	/* THE MARK IS INSIDE THE BAR'S ROWS, and the bar's rows are only painted when the box reaches them, so a frame that
+	 * misses the strip draws nothing here — the guard is the same one, asked once. */
+	if (clip == NULL || (clip->y < bar_height && clip->y + clip->height > 0)) {
+		aws_output_draw_system_menu(backend, server->system_menu_icon, scale, clip);
+	}
 	/* **AND THE BAR'S OWN SHADOW, WHICH FALLS BELOW IT ON WHATEVER IS UNDER IT.** The strip's rectangle is expanded
 	 * and the falloff computed the same way, and the sides that run off the top, the left and the right are dropped
 	 * by the bounds check — and `aws_output_draw_shadow` stops at the bar's bottom edge, so a pop-down menu's shadow
 	 * is never painted up across the bar. */
 	aws_output_draw_shadow(backend, 0, 0, backend->width, bar_height, 0,
-			       cpu_device_edge(AWS_SHADOW_DEPTH, scale));
+			       cpu_device_edge(AWS_SHADOW_DEPTH, scale), bar_height, clip);
 }
 
 /* ---------------------------------------------------------------------------------------------------
@@ -749,13 +831,52 @@ static void aws_output_draw_menu_bar(struct aws_server *server)
  * APPLICATION'S OWN MENU TITLES are different in every other way and identical here: both lie entirely inside the
  * bar's rows, and a shadow around either is a dark smudge INSIDE the bar. So the test is the GEOMETRY and not the
  * kind — the first version asked `status_length`, which caught the item and let the menu titles through. */
-static void cpu_emit(struct aws_server *server, struct aws_surface *surface, uint32_t time)
+static void cpu_emit(struct aws_server *server, struct aws_surface *surface, uint32_t time,
+		     const struct aws_box *box)
 {
 	struct aws_backend *backend = &server->backend;
 
 	if (surface == NULL) {
-		aws_output_draw_menu_bar(server);
+		aws_output_draw_menu_bar(server, box);
 		return;
+	}
+	{
+		/* **A SURFACE OUTSIDE THE FRAME STILL OWES ITS CALLBACK AND NOTHING ELSE.** Trap 1 of DAMAGE-PLAN.md §6: a client
+		 * that commits and waits for `frame` never draws again if the callback is skipped along with the pixels, so this
+		 * is a return AFTER the callback — never before it. */
+		if (box != NULL) {
+			struct aws_box footprint;
+			double scale = aws_output_scale(server);
+			int device_width = cpu_device_edge(surface->frame_width, scale);
+			int device_height = cpu_device_edge(surface->frame_height, scale);
+
+			footprint.x = cpu_device_edge(surface->x, scale);
+			footprint.y = cpu_device_edge(surface->y, scale);
+			if (device_width <= 0 || device_height <= 0) {
+				struct wl_shm_buffer *shm = surface->current_buffer != NULL
+					? wl_shm_buffer_get(surface->current_buffer) : NULL;
+
+				device_width = (shm != NULL) ? wl_shm_buffer_get_width(shm) : 0;
+				device_height = (shm != NULL) ? wl_shm_buffer_get_height(shm) : 0;
+			}
+			footprint.width = device_width;
+			footprint.height = device_height;
+			/* THE SHADOW IS PART OF THE FOOTPRINT: it is drawn outside the frame, and a box that only clips to the
+			 * window's own pixels would leave a shadow row unpainted for a window beside it. `AWS_SHADOW_DEPTH` is the
+			 * reach, in logical points, and it is scaled like everything else. */
+			if (surface->y + surface->frame_height > AWS_MENU_BAR_HEIGHT) {
+				int depth = cpu_device_edge(AWS_SHADOW_DEPTH, scale);
+
+				footprint.x -= depth;
+				footprint.y -= depth;
+				footprint.width += depth * 2;
+				footprint.height += depth * 2;
+			}
+			if (!aws_box_intersects(box, &footprint)) {
+				aws_surface_frame_done(surface, time);
+				return;
+			}
+		}
 	}
 	{
 		/* **THE SHADOW IS PLACED IN DEVICE PIXELS AND ITS BUDGETS ARE LOGICAL.** A window's frame is logical, so the
@@ -767,35 +888,64 @@ static void cpu_emit(struct aws_server *server, struct aws_surface *surface, uin
 		int shy = cpu_device_edge(surface->y, scale);
 
 		if (surface->y < 0 || surface->y + surface->frame_height > AWS_MENU_BAR_HEIGHT) {
+			/* **AND A SHEET'S SHADOW STOPS AT THE SEAM.** The sheet's top edge is tucked into its parent's title bar by
+			 * `sheet_seam` points (the client says so — see the protocol), and the rows above the BOTTOM of that tuck are
+			 * the bar's, so a shadow there is a shadow ON the title bar: the one thing a sheet may not touch. `shy` is the
+			 * sheet's own top edge in device pixels and the seam is added to it, rounded with it rather than separately, so
+			 * the two agree about where the row is. The bar's rows are the floor every window has. */
+			int clip_top = cpu_device_edge(AWS_MENU_BAR_HEIGHT, scale);
+
+			if (surface->sheet_parent != NULL) {
+				int seam = cpu_device_edge(surface->y + surface->sheet_seam, scale);
+
+				if (seam > clip_top) {
+					clip_top = seam;
+				}
+			}
 			/* THE EDGES ROUND, THE SPAN IS THE DIFFERENCE: the same rule the composite uses, so a window's
 			 * shadow and its pixels agree about where the window is at any scale. */
 			aws_output_draw_shadow(backend, shx, shy,
 					       cpu_device_edge(surface->x + surface->frame_width, scale) - shx,
 					       cpu_device_edge(surface->y + surface->frame_height, scale) - shy,
 					       cpu_device_edge(AWS_SHADOW_RADIUS, scale),
-					       cpu_device_edge(AWS_SHADOW_DEPTH, scale));
+					       cpu_device_edge(AWS_SHADOW_DEPTH, scale), clip_top, box);
 		}
 	}
-	composite_surface(backend, surface);
+	composite_surface(backend, surface, box);
 	/* AND THE FRAME CALLBACK GOES WITH THE COMPOSITE, NOT WITH THE COMMIT: the client may draw again only once its
 	 * picture is on screen. */
 	aws_surface_frame_done(surface, time);
 }
 
-static void cpu_draw(struct aws_server *server)
+static void cpu_draw(struct aws_server *server, const struct aws_box *box)
 {
 	struct aws_backend *backend = &server->backend;
 	size_t count = (size_t)backend->width * (size_t)backend->height;
 	size_t i;
 
-	for (i = 0; i < count; i++) {
-		backend->pixels[i] = AWS_BACKGROUND;
+	/* **THE BACKGROUND IS THE ONE WRITER THAT CLEARS RATHER THAN DRAWS, so a partial frame clears only its own rows.**
+	 * Everything behind a window on those rows is repainted by the walk, and everything outside them already holds the
+	 * last frame's picture — including the pixels a window's shadow painted. */
+	if (box == NULL) {
+		for (i = 0; i < count; i++) {
+			backend->pixels[i] = AWS_BACKGROUND;
+		}
+	} else {
+		int row;
+
+		for (row = box->y; row < box->y + box->height && row < backend->height; row++) {
+			size_t start = (size_t)row * (size_t)backend->width + (size_t)box->x;
+
+			for (i = 0; i < (size_t)box->width && box->x + (int)i < backend->width; i++) {
+				backend->pixels[start + i] = AWS_BACKGROUND;
+			}
+		}
 	}
-	aws_output_walk(server, cpu_emit);
+	aws_output_walk(server, cpu_emit, box);
 	/* **AND THE POINTER IS OVER EVERYTHING, INCLUDING THE MENU BAR.** It is drawn last because that is what "above"
 	 * means here: the walk has painted the desktop, the windows and the furniture in their own order, and a cursor is
 	 * the one thing with no level. A backend with a host pointer of its own draws nothing (see `backend.owns_cursor`). */
-	aws_cursor_draw_cpu(server);
+	aws_cursor_draw_cpu_box(server, box);
 }
 
 int aws_renderer_cpu_create(struct aws_server *server)

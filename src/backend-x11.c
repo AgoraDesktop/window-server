@@ -44,6 +44,11 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/extensions/XShm.h>
+/* **AND RENDER, SO THE HOST'S POINTER CAN BE THE THEME'S.** An X cursor from a 1-bit mask cannot carry the
+ * antialiased alpha a themed pointer is made of — it would be a jagged silhouette of the theme's arrow — so the
+ * pointer is made as an ARGB32 picture instead (`XRenderCreateCursor`), which is the only way an X11 client can hand
+ * the server a bitmap with an alpha channel. */
+#include <X11/extensions/Xrender.h>
 
 #include <sys/ipc.h>
 #include <sys/shm.h>
@@ -64,7 +69,147 @@ struct x11_state {
 	 * underneath itself. An Expose schedules a frame rather than presenting, but a drain is also reachable from
 	 * the descriptor callback and from startup, and one flag makes every path safe rather than one path argued. */
 	int draining;
+	/* **THE HOST'S CURSOR, WHEN THE THEME HAS ONE.** An X cursor is a server-side resource with its own lifetime, so
+	 * it is kept to be freed (and re-made when the theme or its size changes) rather than leaked once per change.
+	 * `None` (zero) means the window is showing whatever the host gave it. */
+	Cursor themed_cursor;
 };
+
+/* **THE THEME'S POINTER, HANDED TO THE HOST.** This is how a nested session gets the desktop's own cursor: the host
+ * draws the pointer inside this window — the compositor deliberately composites none there, because two pointers over
+ * one window is one the person did not ask for — but what the host draws is the theme's image, at the variant the DRM
+ * path would composite at this output's scale, with the theme's hotspot. `XUndefineCursor` puts the host's own cursor
+ * back when there is no theme, which is the honest picture of a session that has none.
+ *
+ * **THE PIXELS ARRIVE STRAIGHT ALPHA AND LEAVE PREMULTIPLIED**, because an XRender ARGB32 picture is premultiplied and
+ * the rest of Agora is not; this is the one place that conversion is made, so the theme decoder can stay in the
+ * representation both renderers blend. The depth-32 pixmap is only attempted once `XRenderFindStandardFormat` has
+ * answered for ARGB32: a server that can make an ARGB32 picture can make a depth-32 pixmap, and a server that cannot
+ * keeps its own pointer instead of taking the session down with a BadMatch. */
+static void x11_apply_cursor(struct aws_server *server)
+{
+	struct x11_state *x11 = server->backend.data;
+	const struct aws_cursor_image *image;
+	XRenderPictFormat *format;
+	XImage *pixels;
+	Pixmap pixmap;
+	Picture picture;
+	GC gc;
+	Cursor cursor;
+	uint32_t *premultiplied;
+	size_t count, i;
+	/* **THE ONE SEAM A SCREENSHOT CANNOT SEE.** A nested window's pointer is drawn by the HOST, so no frame this
+	 * process writes contains it and no pixel test can claim it is the theme's. This line is what a person (or a
+	 * test) can read to confirm the host was handed the theme's image rather than its own default — see
+	 * `tests/run-cursor-theme.sh`. */
+	int diag = getenv("AWS_CURSOR_DIAG") != NULL;
+
+	if (x11 == NULL) {
+		return;
+	}
+	if (x11->themed_cursor != 0) {
+		XFreeCursor(x11->display, x11->themed_cursor);
+		x11->themed_cursor = 0;
+	}
+	image = aws_cursor_theme_pointer(server);
+	if (image == NULL) {
+		XUndefineCursor(x11->display, x11->window);
+		XFlush(x11->display);
+		if (diag) {
+			fprintf(stderr, "  DIAG cursor: the host keeps its own cursor (no theme image for this output)\n");
+		}
+		return;
+	}
+	format = XRenderFindStandardFormat(x11->display, PictStandardARGB32);
+	if (format == NULL) {
+		XUndefineCursor(x11->display, x11->window);
+		XFlush(x11->display);
+		if (diag) {
+			fprintf(stderr, "  DIAG cursor: the X server has no ARGB32 format; the host keeps its own cursor\n");
+		}
+		return;
+	}
+	count = (size_t)image->width * (size_t)image->height;
+	premultiplied = malloc(count * sizeof *premultiplied);
+	if (premultiplied == NULL) {
+		return;
+	}
+	for (i = 0; i < count; i++) {
+		uint32_t pixel = image->pixels[i];
+		uint32_t alpha = pixel >> 24;
+
+		if (alpha == 255u) {
+			premultiplied[i] = pixel | 0xFF000000u;
+		} else if (alpha == 0u) {
+			premultiplied[i] = 0;
+		} else {
+			premultiplied[i] = (alpha << 24) |
+				(((((pixel >> 16) & 0xFFu) * alpha + 127u) / 255u) << 16) |
+				(((((pixel >> 8) & 0xFFu) * alpha + 127u) / 255u) << 8) |
+				(((pixel & 0xFFu) * alpha + 127u) / 255u);
+		}
+	}
+	pixmap = XCreatePixmap(x11->display, x11->window, (unsigned)image->width, (unsigned)image->height, 32);
+	picture = (pixmap != None) ? XRenderCreatePicture(x11->display, pixmap, format, 0, NULL) : None;
+	if (picture == None) {
+		if (pixmap != None) {
+			XFreePixmap(x11->display, pixmap);
+		}
+		free(premultiplied);
+		if (diag) {
+			fprintf(stderr, "  DIAG cursor: could not make an ARGB picture; the host keeps its own cursor\n");
+		}
+		return;
+	}
+	/* **A GC OF THE PIXMAP'S OWN DEPTH.** A GC carries the depth of the drawable it was made for, and the window's GC
+	 * is 24-bit where this pixmap is 32: using it here would be a BadMatch, and the Xlib default handler for that ends
+	 * the process. */
+	gc = XCreateGC(x11->display, pixmap, 0, NULL);
+	/* THE IMAGE POINTS AT THIS PROCESS'S BUFFER AND DOES NOT OWN IT, so `data` is cleared before the image is destroyed
+	 * — the same rule the frame buffer's XImage follows above. */
+	pixels = XCreateImage(x11->display, NULL, 32, ZPixmap, 0, (char *)(void *)premultiplied,
+			      (unsigned)image->width, (unsigned)image->height, 32, 0);
+	if (gc == NULL || pixels == NULL) {
+		/* **NOTHING IS DEFINED FROM AN EMPTY PICTURE.** A cursor made from a pixmap this process never filled would be a
+		 * pointer that is invisible over the whole window, which is worse than the host's own cursor — so a failure here
+		 * leaves the host's in place, out loud. */
+		if (pixels != NULL) {
+			pixels->data = NULL;
+			XDestroyImage(pixels);
+		}
+		if (gc != NULL) {
+			XFreeGC(x11->display, gc);
+		}
+		XRenderFreePicture(x11->display, picture);
+		XFreePixmap(x11->display, pixmap);
+		free(premultiplied);
+		if (diag) {
+			fprintf(stderr, "  DIAG cursor: could not fill the ARGB picture; the host keeps its own cursor\n");
+		}
+		return;
+	}
+	XPutImage(x11->display, pixmap, gc, pixels, 0, 0, 0, 0, (unsigned)image->width, (unsigned)image->height);
+	pixels->data = NULL;
+	XDestroyImage(pixels);
+	XFreeGC(x11->display, gc);
+	cursor = XRenderCreateCursor(x11->display, picture, (unsigned)image->hotspot_x, (unsigned)image->hotspot_y);
+	XRenderFreePicture(x11->display, picture);
+	XFreePixmap(x11->display, pixmap);
+	free(premultiplied);
+	if (cursor == None) {
+		if (diag) {
+			fprintf(stderr, "  DIAG cursor: XRenderCreateCursor failed; the host keeps its own cursor\n");
+		}
+		return;
+	}
+	x11->themed_cursor = cursor;
+	XDefineCursor(x11->display, x11->window, cursor);
+	XFlush(x11->display);
+	if (diag) {
+		fprintf(stderr, "  DIAG cursor: the host cursor is %dx%d from the theme, hotspot (%d,%d)\n",
+			image->width, image->height, image->hotspot_x, image->hotspot_y);
+	}
+}
 
 /* **A WALL-CLOCK MILLISECOND, SO A DIAGNOSTIC CAN BE LINED UP WITH ANOTHER PROCESS'S.** Two logs that each say
  * "the click happened" cannot be compared without a clock in both, and the question this answers — how long the
@@ -168,7 +313,10 @@ static void x11_drain_events(struct aws_server *server)
 		case Expose:
 			/* **AN EXPOSE ASKS FOR A FRAME, AND NOT FOR A COPY.** The CPU renderer's pixels are still there to put
 			 * again, but a GL renderer's frame lives in a swapchain whose back buffer is undefined after a swap — so
-			 * one answer that is right for both is "draw it again", which the render loop already knows how to do. */
+			 * one answer that is right for both is "draw it again", which the render loop already knows how to do.
+			 * **AND IT IS A FULL FRAME**: the host is telling this process that SOMEBODY ELSE has drawn over the
+			 * window, and what it lost is not something the damage ledgers ever named. */
+			aws_damage_full(server, "the host exposed the window and painted over it");
 			aws_server_schedule_render(server);
 			break;
 		case ClientMessage:
@@ -352,6 +500,13 @@ static void x11_stop(struct aws_server *server)
 		shmctl(x11->shm.shmid, IPC_RMID, NULL);
 		x11->shared = 0;
 	}
+	if (x11->themed_cursor != 0) {
+		/* THE CURSOR IS GIVEN BACK WITH THE WINDOW IT WAS DEFINED ON, not left to the connection's teardown: it is a
+		 * server-side resource made for this session, and the window still exists here to un-define it from. */
+		XUndefineCursor(x11->display, x11->window);
+		XFreeCursor(x11->display, x11->themed_cursor);
+		x11->themed_cursor = 0;
+	}
 	if (x11->gc != NULL) {
 		XFreeGC(x11->display, x11->gc);
 	}
@@ -531,6 +686,9 @@ int aws_backend_x11_start(struct aws_server *server)
 	server->backend.data = x11;
 	server->backend.present = x11_present;
 	server->backend.release_present = x11_release_present;
+	/* **AND WHERE A HOST DRAWS THE POINTER, THE THEME GOES TO THE HOST.** The server calls this once its theme is open
+	 * and again whenever the theme or its size changes; the window it defines the cursor on exists by then. */
+	server->backend.apply_cursor = x11_apply_cursor;
 	/* **AND THE DRAIN, WHICH EVERY PRESENT GOES THROUGH.** It is the backend's and not the present's on purpose:
 	 * the GL renderer replaces `present` with its own swap, and the queue a swap leaves behind is the same one. */
 	server->backend.drain = x11_drain_events;
