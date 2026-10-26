@@ -307,7 +307,12 @@ line of text.
   buffer. The `EGL_BUFFER_PRESERVED` query — and the caveat that the DRM path always drew the whole output — is gone.
   MEASURED while landing it: the shadow's own scissor used to *disable* the scissor test mid-pass, so the surface drawn
   after a shadow painted its whole quad; the frame's box and the shadow's row limit are now one intersection and the
-  test's poison caught it.
+  test's poison caught it. And a second one from the same place, caught in the nested demo rather than by a test: the
+  copy-out switched blending OFF and never put it back — blending is enabled once at startup, so from the second frame
+  every surface was drawn opaque, the wallpaper vanished under the desktop's transparent windows, and the menu bar went
+  black except where an application had painted its title. The copy writes alpha 1, so it needs no state at all. A
+  screenshot of the demo is the only thing that would have shown it: both renderers passed every pixel test that has one
+  window in it.
 - **THE CLIENT NO LONGER WIDENS ITS DAMAGE BY WHAT THE OTHER BUFFER IS MISSING.** `-cg_drawFrameDirty:` still COPIES the
   missing pixels (that is what keeps the buffer correct), but it no longer names them to the compositor when the copy
   succeeded: the copy writes the pixels the screen already shows. When the copy is refused the region is painted and

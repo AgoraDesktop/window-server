@@ -1342,7 +1342,11 @@ static void gl_draw(struct aws_server *server, const pixman_region32_t *damage)
 	glDisable(GL_SCISSOR_TEST);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glViewport(0, 0, gl->width, gl->height);
-	glDisable(GL_BLEND);
+	/* **AND THE COPY NEEDS NO STATE OF ITS OWN, WHICH IS A LESSON THIS PAID FOR.** It used to switch blending off and
+	 * leave it off — and blending is enabled once, at startup, so from the second frame every surface was drawn OPAQUE:
+	 * the desktop's wallpaper vanished under the transparent windows drawn over it and the menu bar went black except
+	 * where an application had painted its title. The blit writes alpha 1, and `SRC_ALPHA, ONE_MINUS_SRC_ALPHA` with
+	 * alpha 1 is an exact copy, so the state is left exactly as the scene left it. */
 	gl_blit_frame(gl);
 	/* **A SCREENSHOT'S BUFFER IS MADE WHEN IT IS FIRST WANTED, NOT WHEN THE CONTEXT IS.** `--screenshot` is parsed
 	 * after the server (and so after this renderer) is created, so a buffer allocated at init time would be one
