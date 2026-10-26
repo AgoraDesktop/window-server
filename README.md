@@ -195,6 +195,13 @@ That makes two obligations for anything else that speaks to this compositor:
   damage rectangle to what that buffer is missing (`_cg_paintMissing` in `NSWindow.h`), and a client that ignored
   this would leave stale strips behind.
 
+**AND THE CLIENT NOW TELLS THIS COMPOSITOR WHICH RECTANGLES IT CHANGED — WHICH THIS COMPOSITOR DOES NOT YET READ.**
+`AGWindowDamage` in `libagora-app`'s seam names them in buffer pixels on every commit (a strip repaint reports one
+rectangle of 400 pixels out of 66 600 in `appkit-partial-damage`), and `surface_damage()` here is still the deliberate
+no-op quoted below: a frame recomposites the whole output. [`DAMAGE-PLAN.md`](DAMAGE-PLAN.md) is the handoff for the
+half that makes the rectangles pay — per-surface damage, a clipped composite in both renderers, and the full-redraw
+triggers that keep a partial frame from leaving a stale pixel.
+
 ### 3. Input travels the whole way
 
 The seat is driven by the nested backend, and the input was sent STRAIGHT TO THE WINDOW (`XSendEvent`) rather
