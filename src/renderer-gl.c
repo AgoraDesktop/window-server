@@ -86,6 +86,12 @@ static const char *const texture_source =
 	"uniform float u_opaque;\n"
 	"uniform float u_coverage;\n"
 	"uniform vec4 u_ink;\n"
+	/* **THE CHANNEL ORDER IS A PROPERTY OF THE TEXTURE, NOT OF THIS SHADER.** A shared-memory surface is uploaded
+	 * from `ARGB8888` BYTES, which are B,G,R,A in memory, so its red arrives in `.b` and the swap below is what puts
+	 * it back. A dma-buf is not uploaded at all: EGL maps its DRM format onto GL's channels, so its red is already in
+	 * `.r` and swapping it is a page whose reds are blue. MEASURED exactly that way — a GPU-composited window with
+	 * `#ff0000` arriving as `(0,0,255)` — and this uniform is the fix. */
+	"uniform float u_bgr;\n"
 	"vec4 sample_box(vec2 uv) {\n"
 	"    if (u_box.x <= 0.0) { return texture2D(u_tex, uv); }\n"
 	"    return 0.25 * (texture2D(u_tex, uv + vec2(-u_box.x, -u_box.y)) +\n"
@@ -102,7 +108,7 @@ static const char *const texture_source =
 	"        rgb = u_ink.rgb;\n"
 	"        a = t.r;\n"
 	"    } else {\n"
-	"        rgb = vec3(t.b, t.g, t.r);\n"
+	"        rgb = (u_bgr > 0.5) ? vec3(t.b, t.g, t.r) : t.rgb;\n"
 	"        a = mix(t.a, 1.0, u_opaque);\n"
 	"    }\n"
 	"    vec2 c = local - u_rect.zw * 0.5;\n"
@@ -248,6 +254,7 @@ struct gl_program {
 	GLint u_opaque;
 	GLint u_coverage;
 	GLint u_ink;
+	GLint u_bgr;
 	GLint u_alpha;
 	GLint u_depth;
 };
@@ -386,6 +393,8 @@ static int link_program(struct gl_program *program, const char *fragment_source)
 	program->u_opaque = glGetUniformLocation(program->id, "u_opaque");
 	program->u_coverage = glGetUniformLocation(program->id, "u_coverage");
 	program->u_ink = glGetUniformLocation(program->id, "u_ink");
+	/* -1 for the programs whose shader has no such uniform, and `glUniform1f(-1, ...)` is a documented no-op. */
+	program->u_bgr = glGetUniformLocation(program->id, "u_bgr");
 	program->u_alpha = glGetUniformLocation(program->id, "u_alpha");
 	program->u_depth = glGetUniformLocation(program->id, "u_depth");
 	return 0;
@@ -451,7 +460,7 @@ static void gl_textured(struct gl_state *gl, struct gl_program *program, GLenum 
 			float x, float y, float w, float h, float texture_w, float texture_h,
 			float box_x, float box_y,
 			float radius, float tl, float tr, float bl, float br, int coverage, int opaque,
-			uint32_t ink)
+			uint32_t ink, int bgr)
 {
 	float v[8];
 	float r, g, b;
@@ -470,6 +479,7 @@ static void gl_textured(struct gl_state *gl, struct gl_program *program, GLenum 
 	glUniform4f(program->u_round, tl, tr, bl, br);
 	glUniform1f(program->u_opaque, opaque ? 1.0f : 0.0f);
 	glUniform1f(program->u_coverage, coverage ? 1.0f : 0.0f);
+	glUniform1f(program->u_bgr, bgr ? 1.0f : 0.0f);
 	glUniform4f(program->u_ink, r, g, b, 1.0f);
 	glUniform1i(program->u_tex, 0);
 	glActiveTexture(GL_TEXTURE0);
@@ -931,7 +941,7 @@ static void gl_draw_menu_bar(struct aws_server *server)
 		    glyph_left, glyph_top, glyph, glyph,
 		    (float)grid, (float)grid,
 		    0.0f, 0.0f,
-		    0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1, 0, AWS_SYSTEM_MENU_GLYPH_COLOUR);
+		    0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1, 0, AWS_SYSTEM_MENU_GLYPH_COLOUR, 1);
 	/* **AND THE BAR'S OWN SHADOW, WHICH FALLS BELOW THE STRIP.** Radius zero: the bar's corners are square, and a
 	 * shadow with a radius under a square bar painted a smudge INSIDE its own corners. MEASURED in the CPU
 	 * renderer, and this is the same number. */
@@ -1120,9 +1130,10 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 		upload_client_buffer(gl, shm, texture_w, texture_h, stride);
 		gl_box_for((float)texture_w, (float)texture_h, quad_w, quad_h, &box_x, &box_y);
 		texture = gl->client_texture;
+		/* A SHARED-MEMORY SURFACE: uploaded from ARGB8888 bytes, so the shader swaps. */
 		gl_textured(gl, &gl->texture, GL_TEXTURE_2D, texture, quad_x, quad_y,
 			    quad_w, quad_h, quad_w, quad_h, box_x, box_y, radius, tl, tr, bl, br, 0,
-			    !transparent, 0);
+			    !transparent, 0, 1);
 	} else {
 		struct gl_import *import = dmabuf->render;
 		float box_x, box_y;
@@ -1130,10 +1141,12 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 		/* THE dma-buf IS THE WHOLE BUFFER, so its own size is the texture's and the quad is the clipped frame:
 		 * a buffer larger than its window is squeezed here exactly as the shm path squeezes it above. */
 		gl_box_for((float)dmabuf->width, (float)dmabuf->height, quad_w, quad_h, &box_x, &box_y);
+		/* **A dma-buf IS ALREADY IN GL'S ORDER, SO IT IS NOT SWAPPED.** EGL did the mapping, and this is the one line
+		 * that makes a GPU-composited window the right colour. */
 		gl_textured(gl, import->external ? &gl->texture_external : &gl->texture,
 			    import->external ? GL_TEXTURE_EXTERNAL_OES : GL_TEXTURE_2D, texture,
 			    quad_x, quad_y, quad_w, quad_h, quad_w, quad_h, box_x, box_y,
-			    radius, tl, tr, bl, br, 0, !transparent, 0);
+			    radius, tl, tr, bl, br, 0, !transparent, 0, 0);
 	}
 }
 
@@ -1295,7 +1308,7 @@ static void gl_draw_rect(struct aws_server *server, const struct aws_box *box)
 			gl_textured(gl, &gl->cursor, GL_TEXTURE_2D, gl->cursor_texture, x, y,
 				    (float)cursor->width, (float)cursor->height,
 				    (float)cursor->width, (float)cursor->height,
-				    0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0);
+				    0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0, 1);
 		}
 	}
 }
