@@ -256,8 +256,14 @@ else()
   message(STATUS "window-server: gl renderer: off (AWS_WITH_GL=OFF or no X11/DRM backend)")
 endif()
 
-enable_testing()
-add_subdirectory(tests)
+# **THE TESTS ARE A DEVELOPMENT ARTEFACT, AND A RELEASE DOES NOT BUILD THEM.** `include(CTest)` is what defines
+# `BUILD_TESTING` — ON when a configure says nothing, which is what a developer's build wants — and turns testing on with
+# it; the subdirectory is added only when it is on, so `-DBUILD_TESTING=OFF`, which is what the release driver passes,
+# configures and compiles no test executable at all.
+include(CTest)
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
 
 # ---------------------------------------------------------------------------
 # Install rules: the program, and the protocol it owns
