@@ -99,6 +99,20 @@ int aws_cursor_device_box(struct aws_server *server, int x, int y, struct aws_bo
 	return 1;
 }
 
+/* **AND THE SHAPE THE POINTER TAKES OVER WHAT IT IS ON.** `agora_window.set_cursor` makes the cursor name the WINDOW's, so
+ * the focus change is what applies it — the call is `aws_cursor_follow_focus`, which resolves the focused surface's name
+ * and does nothing when it has not changed. The resolution itself (theme lookup, the blank `none`, the default's
+ * fallback) is `cursor.c`'s and is checked by the cursor suite; what this file records is the SEAT's half: which surface's
+ * name was in force at each change, and that the answer is the default when the pointer is over nothing. */
+static const char *s_shape_name;   /* the name the seat applied last; NULL for the default */
+static int s_shape_applies;
+
+void aws_cursor_follow_focus(struct aws_server *server)
+{
+	s_shape_name = (server->pointer_focus != NULL) ? server->pointer_focus->cursor_name : NULL;
+	s_shape_applies++;
+}
+
 static int s_failed;
 
 static void check(int ok, const char *what)
@@ -124,6 +138,8 @@ static void reset(struct aws_server *server)
 	server->pointer_x = 100;
 	server->pointer_y = 100;
 	s_under_pointer = NULL;
+	s_shape_name = NULL;
+	s_shape_applies = 0;
 }
 
 int main(void)
@@ -265,6 +281,28 @@ int main(void)
 	aws_seat_pointer_motion(&server, 140, 120);
 	check(server.damage.width == 0 && server.damage.height == 0 && s_partial_renders == 0,
 	      "and a host-drawn pointer damages nothing, because none of its pixels are ours");
+
+	/* 13. **AND THE POINTER'S SHAPE IS THE WINDOW'S.** `agora_window.set_cursor` stores an Xcursor name on the surface, so
+	 * the seat's half of the claim is that the name in force is the one belonging to the window the pointer ended up
+	 * over — not the one it was over, and not a shape the seat invented. A window that never asked has no name, and the
+	 * answer there is the default. */
+	reset(&server);
+	server.display = display;
+	s_a.cursor_name = "pointer";
+	s_b.cursor_name = "text";
+	s_under_pointer = &s_a;
+	aws_seat_pointer_motion(&server, 100, 100);
+	check(s_shape_name != NULL && strcmp(s_shape_name, "pointer") == 0,
+	      "moving onto a window that asked for a shape applies THAT window's name");
+	s_under_pointer = &s_b;
+	aws_seat_pointer_motion(&server, 120, 100);
+	check(s_shape_name != NULL && strcmp(s_shape_name, "text") == 0,
+	      "and moving onto the neighbour applies the neighbour's, which is why the shape is per window");
+	s_under_pointer = NULL;
+	aws_seat_pointer_motion(&server, 300, 300);
+	check(s_shape_name == NULL, "while over no window at all the default is in force");
+	s_a.cursor_name = NULL;
+	s_b.cursor_name = NULL;
 
 	wl_display_destroy(display);
 	printf("seat_routing: %d case(s) failed\n", s_failed);

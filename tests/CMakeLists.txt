@@ -98,6 +98,20 @@ target_link_libraries(window-server-cursor PRIVATE PkgConfig::WAYLAND_SERVER)
 add_test(NAME window-server-cursor COMMAND window-server-cursor
   "${CMAKE_CURRENT_SOURCE_DIR}/../assets/cursors/Vimix")
 
+# **AND THE SHAPE A WINDOW NAMES FOR THE POINTER, WHICH IS THE FIRST THING IN THIS PROTOCOL ABOUT THE POINTER AT ALL.**
+# `set_cursor` is one string and the compositor resolves it against the theme it already loaded, so the claim runs from
+# the request to the artwork and needs no display: the probe maps a window and names four shapes plus an un-nameable one,
+# and the server's `AWS_CURSOR_DIAG` line says what each resolved to. The pointer itself is drawn by whichever side owns
+# it — the host in a nested session, this process on DRM — which is why the assertion is the resolution and not a pixel.
+add_executable(window-server-cursor-name-probe cursor_name.c "${_generated}/agora-shell-protocol.c")
+add_dependencies(window-server-cursor-name-probe agora-shell-bindings)
+target_include_directories(window-server-cursor-name-probe PRIVATE "${_generated}")
+target_link_libraries(window-server-cursor-name-probe PRIVATE PkgConfig::WAYLAND_CLIENT)
+add_test(NAME window-server-cursor-name
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-cursor-name.sh"
+    "$<TARGET_FILE:window-server>" "$<TARGET_FILE:window-server-cursor-name-probe>"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../assets/cursors/Vimix")
+
 # **AND THE THEME READER ON ITS OWN**, which is the half no pointer test can fully see: the variant chosen for a size, the
 # hotspots the files carry, the premultiplied-to-straight conversion, an animated cursor's frames, and what a directory
 # that is not a theme answers. It reads the vendored Vimix theme, so the files this build installs are the files this

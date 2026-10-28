@@ -331,6 +331,12 @@ static void pointer_set_focus(struct aws_server *server, struct aws_surface *sur
 	if (surface != NULL) {
 		pointer_send_enter(server, surface);
 	}
+	/* **AND THE POINTER'S SHAPE FOLLOWS WHAT IT IS OVER.** `agora_window.set_cursor` names a shape PER WINDOW, so the
+	 * focus change is the moment it takes effect — this is the one place every way of changing what is under the
+	 * pointer meets (a motion, a surface mapped or raised under a resting hand, a window that changed its own mind).
+	 * The call does nothing when the name has not changed, which is what keeps a drag across three windows from
+	 * costing three requests. */
+	aws_cursor_follow_focus(server);
 }
 
 /* **WHERE A POINTER EVENT GOES, AND WHY IT IS ONE FUNCTION.** Three answers in order, and the order is the whole

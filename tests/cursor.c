@@ -34,6 +34,18 @@ static void check(int ok, const char *what)
 	}
 }
 
+/* **AND THE ONE THING A SHAPE CHANGE ASKS OF THE REST OF THE SERVER.** A backend that composites its own pointer has to
+ * repaint, because the old shape's pixels are still on the glass, so `aws_cursor_set_shape` schedules a frame. This file
+ * has no frame loop and no display — the claim under test is which image a name resolves to — so the request is counted
+ * and nothing else. */
+static int s_renders_scheduled;
+
+void aws_server_schedule_render(struct aws_server *server)
+{
+	(void)server;
+	s_renders_scheduled++;
+}
+
 #define BACKGROUND 0xFF204060u
 
 /* A SERVER WITH A FRAMEBUFFER AND NOTHING ELSE, which is the whole of what the cursor asks of it. */
@@ -257,10 +269,70 @@ int main(int argc, char **argv)
 	      "a 48-point pointer takes the theme's 64-pixel variant");
 	check(server.cursor.hotspot_x == 8 && server.cursor.hotspot_y == 8, "and that variant's hotspot");
 
-	/* 12. **AND WITHOUT A THEME THE DRAWN ARROW COMES BACK**, which is what a checkout with the artwork removed, or a
+	/* **AND THE SHAPE A WINDOW ASKS FOR, WHICH IS THE WHOLE OF `agora_window.set_cursor`'s SERVER HALF.** Three names,
+	 * three different answers, all from the same theme and the same scale: a name the theme HAS is that cursor's artwork
+	 * and hotspot; `none` is the compositor's own transparent pixel, which draws nothing at all; and a name the theme does
+	 * NOT have is the DEFAULT rather than a failure — an application that asks for a shape this desktop's theme does not
+	 * carry still gets a pointer. */
+	{
+		const struct aws_cursor_frames *text_frames;
+		unsigned before;
+
+		/* the theme the cases above opened belongs to them, and `reset` clears the pointer */
+		aws_cursor_theme_close(server.cursor_theme);
+		reset(&server, 1.33203125, 128, 128);
+		server.cursor_theme = aws_cursor_theme_open(theme_directory);
+		check(server.cursor_theme != NULL, "the vendored Vimix theme opens for the shape cases");
+		/* the default, before any window has said anything */
+		check(strcmp(aws_cursor_shape(&server), AWS_CURSOR_ARROW_NAME) == 0,
+		      "a session whose windows never asked draws the default arrow");
+		text_frames = (server.cursor_theme != NULL)
+				      ? aws_cursor_theme_frames(server.cursor_theme, "text", 24.0 * 1.33203125)
+				      : NULL;
+		aws_cursor_set_shape(&server, "text");
+		check(strcmp(aws_cursor_shape(&server), "text") == 0, "a window's name is the shape in force");
+		aws_cursor_ensure(&server);
+		check(text_frames != NULL && server.cursor.width == text_frames->frames[0].width &&
+			      server.cursor.height == text_frames->frames[0].height &&
+			      server.cursor.hotspot_x == text_frames->frames[0].hotspot_x &&
+			      server.cursor.hotspot_y == text_frames->frames[0].hotspot_y,
+		      "and the image, its size and its hotspot are the THEME's `text`, not the arrow's");
+		check(s_renders_scheduled == 1, "a shape change asks for a frame, because the old one is on the glass");
+
+		/* THE SAME NAME AGAIN IS NOT A CHANGE: that is what keeps a motion from costing a request and a redraw. */
+		before = server.cursor_generation;
+		aws_cursor_set_shape(&server, "text");
+		check(server.cursor_generation == before && s_renders_scheduled == 1,
+		      "and the SAME name again does nothing at all — no new image, no frame");
+
+		/* `none` IS A SHAPE: a pixel that is not there. */
+		reset(&server, 1.33203125, 128, 128);
+		server.cursor_theme = aws_cursor_theme_open(theme_directory);
+		aws_cursor_set_shape(&server, AWS_CURSOR_NONE_NAME);
+		aws_cursor_ensure(&server);
+		check(server.cursor.width == 1 && server.cursor.height == 1, "`none` is a single pixel");
+		check(server.cursor.pixels != NULL && (server.cursor.pixels[0] >> 24) == 0,
+		      "and it is transparent, so `cursor: none` hides the pointer instead of showing an arrow");
+		aws_cursor_draw_cpu(&server);
+		check(at(&server, 10, 10) == BACKGROUND, "which draws nothing over the frame where the pointer is");
+
+		/* AND A NAME THE THEME DOES NOT HAVE FALLS BACK TO THE DEFAULT, NOT TO A FAILURE. */
+		aws_cursor_set_shape(&server, "agora-no-such-cursor");
+		aws_cursor_ensure(&server);
+		check(server.cursor.width == 32 && server.cursor.height == 32 && server.cursor.hotspot_x == 4,
+		      "a name the theme has not got gives the theme's DEFAULT arrow, which is still a pointer");
+
+		/* THE ESCAPE HATCH FOR A NAME NOTHING COULD HAVE INSTALLED. */
+		aws_cursor_set_shape(&server, "");
+		check(strcmp(aws_cursor_shape(&server), AWS_CURSOR_ARROW_NAME) == 0,
+		      "and the empty string a client sends for \"no opinion\" is the default by name");
+
+		finish(&server);
+	}
+
+	/* 13. **AND WITHOUT A THEME THE DRAWN ARROW COMES BACK**, which is what a checkout with the artwork removed, or a
 	 * path that is not a theme, has to look like: still a pointer, and Agora's own. */
-	aws_cursor_theme_close(server.cursor_theme);
-	server.cursor_theme = NULL;
+	reset(&server, 1.33203125, 96, 96);
 	server.cursor_generation++;
 	aws_cursor_ensure(&server);
 	check(server.cursor.width == 16 && server.cursor.height == 25,

@@ -25,9 +25,11 @@
  * original to Agora, so a checkout without the GPL theme's artwork is still a desktop with a visible pointer.
  *
  * WHAT IT IS NOT: an implementation of `wl_pointer.set_cursor`. A client's cursor surface is still accepted and
- * ignored (see `pointer_set_cursor` in seat.c) — that is the protocol feature, and this is the safety net that makes
- * the shipping output usable without it. When that door opens, the shape it names is a selection in the theme that is
- * already loaded here.
+ * ignored (see `pointer_set_cursor` in seat.c) — that is the protocol feature, and it carries the client's own PIXELS.
+ * WHAT THIS FILE DOES IMPLEMENT IS THE OTHER ANSWER, `agora_window.set_cursor`: a NAME, resolved against the theme that
+ * is already loaded here, kept per window and applied when the window under the pointer changes (see
+ * `aws_cursor_follow_focus`). A compositor-owned pointer with a shape the window names is the whole of it; a client's
+ * own bitmap is not, and nothing above this line pretends otherwise.
  */
 
 #ifndef AGORA_WINDOW_SERVER_CURSOR_H
@@ -44,6 +46,15 @@ struct aws_server;
  * size: its 24-nominal artwork is 32 pixels, which is 24 points on a 96-dpi panel. */
 #define AWS_CURSOR_ARROW_NAME "left_ptr"
 #define AWS_CURSOR_DEFAULT_SIZE 24.0
+/* **THE ONE SHAPE THAT IS NOT A THEME ENTRY.** `agora_window.set_cursor`'s `none` means the pointer is not drawn at all —
+ * the answer for a video player, or a page that paints its own pointer — and no freedesktop theme carries a name for it,
+ * because an invisible cursor is not artwork. The compositor makes one: a single transparent pixel, which blends to
+ * nothing over every background and needs no second code path in either renderer. */
+#define AWS_CURSOR_NONE_NAME "none"
+/* THE LONGEST SHAPE NAME KEPT. Every name the Xcursor vocabulary has is far shorter, so a longer one is a client sending
+ * something that cannot be a theme entry; it is treated as a name the theme does not have rather than truncated into a
+ * DIFFERENT name that happens to exist. */
+#define AWS_CURSOR_NAME_MAX 64
 /* THE LARGEST SIZE A SESSION MAY ASK FOR. The vendored theme's biggest arrow is 64 pixels; a size beyond this one is a
  * number the artwork cannot honour (the largest variant would be used anyway), so it is refused where it is set rather
  * than silently capped. */
@@ -108,5 +119,38 @@ const struct aws_cursor_image *aws_cursor_theme_pointer(struct aws_server *serve
 
 /* Give the raster back. Called from the server's own destruction. */
 void aws_cursor_finish(struct aws_server *server);
+
+/* ==================================================================================================
+ * THE POINTER'S SHAPE, WHICH IS THE WINDOW'S TO NAME
+ * ================================================================================================== */
+
+/* **PUT THE POINTER'S SHAPE INTO FORCE, BY NAME.** `name` is an Xcursor name (`text`, `pointer`, `nwse-resize`) resolved
+ * against the loaded theme at the output's own scale; NULL or the empty string means the default (`left_ptr`), and
+ * `AWS_CURSOR_NONE_NAME` means the pointer is not drawn. A name the theme does not have is the DEFAULT — a theme that
+ * carries `left_ptr` but not `help` still shows its own arrow — and `aws_cursor_report_shape` is where that is said out
+ * loud, at the request that carried the name.
+ *
+ * A NAME THAT HAS NOT CHANGED DOES NOTHING AT ALL: the composited image is re-made only when the shape, the scale or the
+ * theme actually moved, and a backend whose host draws the pointer is told to re-apply it only then. That is what makes
+ * this a change-of-shape door rather than a per-motion one. */
+void aws_cursor_set_shape(struct aws_server *server, const char *name);
+
+/* **THE SHAPE THE WINDOW UNDER THE POINTER ASKS FOR.** `agora_window.set_cursor` stores a name per window
+ * (`struct aws_surface`'s `cursor_name`) because a pointer's shape belongs to what it is over, so this is what both the
+ * seat calls when the focus moves and the request handler calls when a window changes its own mind. A pointer over no
+ * window — the desktop — takes the default, and so does a window that never asked. */
+void aws_cursor_follow_focus(struct aws_server *server);
+
+/* THE NAME IN FORCE, for a diagnostic that has to say what the pointer is rather than what a window asked for. Never
+ * NULL: the default's name when nothing has been set. */
+const char *aws_cursor_shape(const struct aws_server *server);
+
+/* **WHAT A REQUESTED NAME RESOLVES TO, SAID OUT LOUD — ONCE, WHERE IT WAS ASKED FOR.** A nested session's pointer is drawn
+ * by the HOST, so no frame this process writes contains it and no screenshot can show that `agora_window.set_cursor`
+ * reached the theme; `AWS_CURSOR_DIAG` is the only instrument. Reporting it here — at the request, with the window's own
+ * number — is also what lets the test run HEADLESS: the claim being checked is "the server resolved this window's name",
+ * which needs no display at all, and the host's half is `backend-x11.c`'s own line. A name the theme does not have says so
+ * in as many words, which is the difference between a fallback and a silent substitution. */
+void aws_cursor_report_shape(struct aws_server *server, int window_id, const char *name);
 
 #endif /* AGORA_WINDOW_SERVER_CURSOR_H */

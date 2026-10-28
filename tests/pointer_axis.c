@@ -86,6 +86,14 @@ int aws_cursor_device_box(struct aws_server *server, int x, int y, struct aws_bo
 	return 0;
 }
 
+/* **AND THE ONE THE SEAT ASKS WHEN THE POINTER CHANGES WINDOW.** `agora_window.set_cursor` makes the shape the window's,
+ * so the focus change is what applies it (`aws_cursor_follow_focus` -> `aws_cursor_set_shape`); this file is about the
+ * wheel and has no theme, so the symbol only has to exist. */
+void aws_cursor_follow_focus(struct aws_server *server)
+{
+	(void)server;
+}
+
 /* ============================================================================================ *
  * THE WIRE, INTERPOSED AT THE ONE FUNCTION EVERY EVENT GOES THROUGH.                           *
  *                                                                                                *

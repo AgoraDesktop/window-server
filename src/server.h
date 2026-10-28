@@ -41,8 +41,9 @@
  *     cursor; a DRM output has only these pixels, so `cursor.c` composites a pointer above every surface and
  *     `backend.owns_cursor` says which backends need it. **THE POINTER'S PIXELS ARE A CURSOR THEME'S** — the vendored
  *     Vimix theme, or `AGORA_CURSOR_THEME` — read by `cursor-theme.c`; the nested X11 backend hands the same image to
- *     the host as the window's cursor, so both display paths show the theme rather than a shape Agora invented. A
- *     client's cursor surface is still not implemented.
+ *     the host as the window's cursor, so both display paths show the theme rather than a shape Agora invented. **AND
+ *     WHICH OF THE THEME'S SHAPES IS THE WINDOW'S TO SAY** (`agora_window.set_cursor`): a name per window, applied when
+ *     the window under the pointer changes. A client's own cursor SURFACE is still not implemented.
  *   - NO POLICY ABOUT WINDOWS, AND EXACTLY ONE ABOUT THE SCREEN. Placement, stacking and sizing are the
  *     APPLICATION's: no cascade, no tiling, and a frame is acted on as given. What the server does decide is
  *     what the SCREEN reserves for the furniture it owns — a different kind of question, because an application
@@ -220,6 +221,13 @@ struct aws_surface {
 	 * under it. The shape uses it for one thing: a shadow may not be painted on those rows, because they are the title
 	 * bar's. Zero is a sheet placed flush with the bar's bottom edge. */
 	int sheet_seam;
+	/* **AND THE SHAPE THE POINTER TAKES WHILE IT IS OVER THIS WINDOW.** An Xcursor name from
+	 * `agora_window.set_cursor` — `text`, `pointer`, `nwse-resize`, `none` — resolved by the compositor against its own
+	 * theme and applied only when this window is the one under the pointer (`aws_cursor_follow_focus`). NULL until the
+	 * client asks, which is the same thing as "the default": a window with no opinion shows the theme's arrow. It is
+	 * deliberately per WINDOW and not per seat, because the answer is a function of the view under the pointer and two
+	 * windows of one application can disagree — see the protocol's request. Owned by this struct; freed with it. */
+	char *cursor_name;
 
 	int x;					/* where the compositor has put it, in output coordinates */
 	int y;
@@ -554,6 +562,12 @@ struct aws_server {
 	struct aws_cursor_theme *cursor_theme;
 	double cursor_size;
 	unsigned cursor_generation;
+	/* **AND THE SHAPE IN FORCE, WHICH IS THE NAME AND NOT THE IMAGE.** `agora_window.set_cursor` names a cursor in the
+	 * theme's vocabulary and the compositor resolves it — so this is what the pointer is drawn with right now, kept here
+	 * rather than on a window because the window under the pointer is what changes when the pointer moves and the image
+	 * has to survive that. Empty means "never set", which `aws_cursor_shape` answers with the default; `none` means the
+	 * pointer is not drawn. See `aws_cursor_set_shape`. */
+	char cursor_name[AWS_CURSOR_NAME_MAX];
 	/* AN AXIS HAS BEEN SENT SINCE THE LAST FRAME, which is what makes `axis_source` once per frame rather than
 	 * once per axis — the protocol asks for it in the frame the axis events belong to, and repeating it for the
 	 * second axis of one gesture would be a lie about how many gestures there were. */

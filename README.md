@@ -669,14 +669,20 @@ theme exercises it. A machine that cannot ship GPL-3.0 artwork deletes `assets/c
 theme directory with no `left_ptr` gets the same per draw; a headless screenshot gets no pointer at all, because a
 compositor-owned pointer is a fact about an output nobody is looking at.
 
-What is *not* implemented is a client's cursor shape: `wl_pointer.set_cursor` is still accepted and ignored, so an
-I-beam over a text field is still an arrow, from the theme. When that door opens, the shape it names is a selection in
-the theme that is already loaded — the animated cursors' frames are decoded for it (`wait` is 23 frames of 30 ms) and
-frame zero is what the compositor draws today.
+What is *not* implemented is a client's cursor PIXELS: `wl_pointer.set_cursor` is still accepted and ignored, so an
+application cannot send the compositor a bitmap of its own pointer. **ITS SHAPE IS IMPLEMENTED, AND THAT IS THE OTHER
+ANSWER:** `agora_window.set_cursor` (protocol version 11, §8) carries an Xcursor NAME — `text`, `pointer`, `nwse-resize`,
+`none` — which the compositor resolves against the theme it already loaded, at the output's own scale, and applies when
+the window under the pointer changes. So an I-beam over a text field is now the theme's I-beam, and a page that shows no
+pointer at all shows none. A name the theme does not carry falls back to the default once, when the shape changes, rather
+than silently per motion, and `AWS_CURSOR_DIAG=1` says which of the two happened. The animated cursors' frames are still
+decoded and unused (`wait` is 23 frames of 30 ms): frame zero is what the compositor draws today, and an X11 host cursor
+cannot animate at all.
 
-The three suites are `window-server-cursor` (the drawn fallback and the themed image, as arithmetic over device
-pixels), `window-server-cursor-theme` (the reader against the real Vimix files: variant selection, both kinds of
-hotspot, the premultiplied-to-straight conversion, an animated cursor's frames, and what a directory that is not a
+The four suites are `window-server-cursor` (the drawn fallback, the themed image and the shape a name resolves to, as
+arithmetic over device pixels), `window-server-cursor-name` (`set_cursor` from a real client to the theme's artwork, with
+no display at all), `window-server-cursor-theme` (the reader against the real Vimix files: variant selection, both kinds
+of hotspot, the premultiplied-to-straight conversion, an animated cursor's frames, and what a directory that is not a
 theme answers), and `window-server-cursor-theme-nested` (a real X server, `AWS_CURSOR_DIAG=1`, and the host cursor the
 server handed it — a seam no screenshot can show, and one that SKIPS without a `DISPLAY`).
 
@@ -714,8 +720,10 @@ that is written down is a decision and one that is not is a surprise.
   are mutually exclusive — both feed one seat, and a device read twice is a pointer that moves at double speed
   — and the default is libinput when it can start, the nested window otherwise. See below for the one thing
   that still blocks libinput on this machine.
-- **The pointer's PIXELS are a cursor theme's; a client's cursor SHAPE is not implemented.** `wl_pointer.set_cursor`
-  is still accepted and does nothing, so an I-beam over a text field is the theme's arrow (§5b). The theme is read by
+- **The pointer's PIXELS are a cursor theme's; its SHAPE is the window's to name.** A client's own cursor bitmap
+  (`wl_pointer.set_cursor`) is still accepted and does nothing, but `agora_window.set_cursor` carries the shape an
+  application wants as a NAME resolved against the theme (§5b), per window and applied when the window under the pointer
+  changes — so an I-beam over a text field is the theme's I-beam and `none` hides the pointer. The theme is read by
   `src/cursor-theme.c` and drawn by `src/cursor.c`: composited above every surface on a backend that has no host pointer
   (DRM), and handed to the host as the window's X cursor where one exists (nested X11) — so a DRM output has the theme's
   pointer from the first frame, a nested window has the same one drawn by the host, and a headless screenshot stays
@@ -789,13 +797,17 @@ compositor with an opinion about items would be the same mistake a special case 
 cannot deliver (a window that has gone, or a client bound below version 6) is answered EMPTY NOW rather than left for
 a timeout to say later. `tests/window_list.c` asserts the whole round trip, including both of those answers.
 
-**THE SHELL GLOBAL IS AT VERSION 10.** Version 3 added the window list and the two requests on somebody else's
+**THE SHELL GLOBAL IS AT VERSION 11.** Version 3 added the window list and the two requests on somebody else's
 window, 4 carried `set_activatable`, 5 added `reopen_window` and `take_focus`, and 6 is the tile's menu — four
 requests and two events, and no change to how windows are placed. 7 is the selection, 8 the badge, and 9 the display's
 fractional scale. **10 is the sheet**: `agora_window.set_sheet_parent` names another window of the same client, and what
 the server does with the pair is the three things above — square top corners, a shadow that stops at the seam, and a
 stack in which the sheet follows the window it hangs from. It is the first statement this protocol has made about TWO
-windows, and it exists because neither fact can be read off the frames.
+windows, and it exists because neither fact can be read off the frames. **11 is the pointer's shape**:
+`agora_window.set_cursor` is one string per window — an Xcursor name the compositor resolves against its theme — and the
+reason it is per window rather than per seat is that the answer is a function of the view under the pointer, which a
+seat has no views of. `none` is a shape and not an empty name: a page that paints its own pointer must not have ours
+under it.
 
 What is still absent on this side, named rather than left to be discovered: no minimized state, no session (so
 nothing emits `close` on shutdown), and no cross-process data device — which is what a drop on the Dock's Trash

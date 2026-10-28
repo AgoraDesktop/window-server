@@ -203,6 +203,7 @@ static void surface_destroy_resource(struct wl_resource *resource)
 	free(surface->title);
 	free(surface->app_id);
 	free(surface->badge);
+	free(surface->cursor_name);
 	/* **OUT OF THE LIST FIRST, THEN FORGOTTEN, THEN RE-DECIDED — AND THE ORDER IS THE WHOLE OF IT.** A focus
 	 * reassignment asks "who is topmost now?" by walking `server->surfaces`, and this surface is still the
 	 * TOPMOST MAPPED CANDIDATE at this point. Telling the seat first — which is what this function used to do —

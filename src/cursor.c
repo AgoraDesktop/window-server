@@ -33,6 +33,7 @@
 #include "server.h"
 #include "cursor.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -201,24 +202,156 @@ static void cursor_copy_image(struct aws_cursor *cursor, const struct aws_cursor
 	cursor->pixels = pixels;
 }
 
-/* THE THEME'S POINTER FOR THIS OUTPUT, OR NULL WHEN THERE IS NOTHING TO ASK. One place decides the size — the cursor's
- * points times the output's scale — so the composited pointer and the nested host's pointer are never a variant
- * apart. */
-static const struct aws_cursor_image *cursor_theme_image(struct aws_server *server, double scale)
+/* **THE SHAPE IN FORCE, WHICH IS `agora_window.set_cursor`'s NAME.** Empty until a window names one, which is why the
+ * default is answered here rather than written into the server at startup: a session with no client and a session
+ * whose windows never asked draw the same arrow. */
+const char *aws_cursor_shape(const struct aws_server *server)
+{
+	if (server == NULL || server->cursor_name[0] == '\0') {
+		return AWS_CURSOR_ARROW_NAME;
+	}
+	return server->cursor_name;
+}
+
+/* THE BLANK CURSOR: `none`, as ONE TRANSPARENT PIXEL. It is an image rather than a flag so that nothing downstream has to
+ * know about it — a transparent pixel blends to nothing in the CPU and GL paths, and an X cursor made from it is invisible
+ * on the host — and it is one pixel because the pointer's damage box is its image, so hiding the pointer costs a pixel
+ * and not a rectangle. */
+static const uint32_t s_blank_pixels[1] = { 0u };
+static const struct aws_cursor_image s_blank_image = {
+	1,			/* nominal size */
+	1,			/* width */
+	1,			/* height */
+	0,			/* hotspot x */
+	0,			/* hotspot y */
+	0,			/* delay ms */
+	s_blank_pixels
+};
+
+/* ONE LOOKUP BY NAME, WITH THE TWO FALLBACKS THE PROTOCOL NAMES. `none` is the compositor's own blank pixel and never
+ * reaches the theme; a name the theme does not have is the DEFAULT, which is a theme entry and not Agora's drawn arrow —
+ * a theme that has `left_ptr` but not `help` can still show its own arrow. NULL is "there is no theme image at all", which
+ * is what makes `aws_cursor_ensure` fall back to the arrow this file draws.
+ *
+ * `known` answers a different question from the image, and the diagnostic needs both: whether the THEME had the name that
+ * was asked for. A cursor that resolved through the fallback still has an image, and a client whose name was quietly
+ * replaced deserves to be told which of the two happened. NULL when nobody is asking. */
+static const struct aws_cursor_image *cursor_lookup(struct aws_server *server, const char *name, double scale,
+				    int *known)
 {
 	const struct aws_cursor_frames *frames;
 
+	if (known != NULL) {
+		*known = 0;
+	}
+	if (strcmp(name, AWS_CURSOR_NONE_NAME) == 0) {
+		if (known != NULL) {
+			*known = 1;
+		}
+		return &s_blank_image;
+	}
 	if (server->cursor_theme == NULL) {
 		return NULL;
 	}
-	frames = aws_cursor_theme_frames(server->cursor_theme, AWS_CURSOR_ARROW_NAME,
-					 server->cursor_size * scale);
-	if (frames == NULL || frames->count == 0) {
-		return NULL;
+	/* THE FIRST FRAME: the compositor shows one shape and an arrow does not animate. The rest are decoded and kept for the
+	 * animated half of a theme — the X11 host cannot animate an X cursor at all — see cursor-theme.h. */
+	frames = aws_cursor_theme_frames(server->cursor_theme, name, server->cursor_size * scale);
+	if (frames != NULL && frames->count > 0) {
+		if (known != NULL) {
+			*known = 1;
+		}
+		return &frames->frames[0];
 	}
-	/* THE FIRST FRAME: the compositor shows one shape and an arrow does not animate. The rest are decoded and kept for
-	 * the cursor-shape door that does not exist yet — see cursor-theme.h. */
-	return &frames->frames[0];
+	if (strcmp(name, AWS_CURSOR_ARROW_NAME) != 0) {
+		frames = aws_cursor_theme_frames(server->cursor_theme, AWS_CURSOR_ARROW_NAME,
+						 server->cursor_size * scale);
+		if (frames != NULL && frames->count > 0) {
+			return &frames->frames[0];
+		}
+	}
+	return NULL;
+}
+
+/* **THE THEME'S POINTER FOR THIS OUTPUT, OR NULL WHEN THERE IS NOTHING TO ASK.** One place decides the size — the
+ * cursor's points times the output's scale — so the composited pointer and the nested host's pointer are never a variant
+ * apart, and one place decides the SHAPE — the name `agora_window.set_cursor` put in force. */
+static const struct aws_cursor_image *cursor_shape_image(struct aws_server *server, double scale)
+{
+	return cursor_lookup(server, aws_cursor_shape(server), scale, NULL);
+}
+
+/* **AND THE TWO THINGS A SHAPE CHANGE COSTS.** The cached raster is invalidated by bumping the generation — the same door
+ * a theme or a size change uses, so `aws_cursor_ensure` re-makes the image and a renderer's texture is re-uploaded — and
+ * the picture is repainted, because on a backend that composites its own pointer the old shape's pixels are still on the
+ * glass. The whole output is damaged rather than the pointer's boxes: the box arithmetic is a function of the image that
+ * is being replaced, so "where it was" is not a rectangle this file can still compute. A shape change is a handful per
+ * second at the very most, and the alternative is a stale arrow. */
+void aws_cursor_set_shape(struct aws_server *server, const char *name)
+{
+	const char *wanted = (name != NULL && name[0] != '\0') ? name : AWS_CURSOR_ARROW_NAME;
+
+	if (server == NULL || strcmp(server->cursor_name, wanted) == 0) {
+		return;
+	}
+	if (strlen(wanted) >= sizeof server->cursor_name) {
+		/* A NAME NOTHING COULD HAVE INSTALLED is treated as the default rather than truncated into a name that might
+		 * exist; `aws_cursor_report_shape` is where that is said out loud, at the request that carried it. */
+		return;
+	}
+	snprintf(server->cursor_name, sizeof server->cursor_name, "%s", wanted);
+	server->cursor_generation++;
+	if (server->backend.apply_cursor != NULL) {
+		server->backend.apply_cursor(server);
+	}
+	/* ONLY A BACKEND THAT COMPOSITES THE POINTER NEEDS A FRAME: where a host draws it, `apply_cursor` above has already
+	 * handed the host the new shape and a redraw would paint pixels nobody is waiting for. */
+	if (server->backend.owns_cursor) {
+		aws_server_schedule_render(server);
+	}
+}
+
+void aws_cursor_report_shape(struct aws_server *server, int window_id, const char *name)
+{
+	const char *wanted = (name != NULL && name[0] != '\0') ? name : AWS_CURSOR_ARROW_NAME;
+	const struct aws_cursor_image *image;
+	double scale;
+	int known = 0;
+
+	if (server == NULL || getenv("AWS_CURSOR_DIAG") == NULL) {
+		return;
+	}
+	if (strlen(wanted) >= sizeof server->cursor_name) {
+		fprintf(stderr, "  DIAG cursor: window %d asked for a shape name longer than %d bytes; refused\n",
+			window_id, (int)sizeof server->cursor_name - 1);
+		return;
+	}
+	scale = server->backend.scale > 0.0 ? server->backend.scale : 1.0;
+	image = cursor_lookup(server, wanted, scale, &known);
+	if (strcmp(wanted, AWS_CURSOR_NONE_NAME) == 0) {
+		fprintf(stderr, "  DIAG cursor: window %d asks for no pointer at all (`none`)\n", window_id);
+	} else if (known && image != NULL) {
+		fprintf(stderr, "  DIAG cursor: window %d asks for %s, which the theme has at %dx%d, hotspot (%d,%d)\n",
+			window_id, wanted, image->width, image->height, image->hotspot_x, image->hotspot_y);
+	} else if (image != NULL) {
+		fprintf(stderr, "  DIAG cursor: window %d asks for %s, which the theme has not got — the default is shown\n",
+			window_id, wanted);
+	} else {
+		fprintf(stderr, "  DIAG cursor: window %d asks for %s, and there is no theme to resolve it against\n",
+			window_id, wanted);
+	}
+}
+
+void aws_cursor_follow_focus(struct aws_server *server)
+{
+	struct aws_surface *focus;
+
+	if (server == NULL) {
+		return;
+	}
+	focus = server->pointer_focus;
+	/* THE WINDOW'S OWN NAME, and the default when the pointer is over no window at all — a desk with no window under the
+	 * hand has no shape to ask for, and the theme's arrow is what the compositor shows there. */
+	aws_cursor_set_shape(server, focus != NULL ? focus->cursor_name : NULL);
 }
 
 int aws_cursor_visible(struct aws_server *server)
@@ -242,7 +375,7 @@ void aws_cursor_ensure(struct aws_server *server)
 	}
 	free(server->cursor.pixels);
 	memset(&server->cursor, 0, sizeof server->cursor);
-	image = cursor_theme_image(server, scale);
+	image = cursor_shape_image(server, scale);
 	if (image != NULL) {
 		cursor_copy_image(&server->cursor, image, scale);
 	}
@@ -263,7 +396,7 @@ const struct aws_cursor_image *aws_cursor_theme_pointer(struct aws_server *serve
 	if (scale <= 0.0) {
 		scale = 1.0;
 	}
-	return cursor_theme_image(server, scale);
+	return cursor_shape_image(server, scale);
 }
 
 const struct aws_cursor *aws_cursor_image(struct aws_server *server)

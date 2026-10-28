@@ -689,6 +689,46 @@ static void window_set_pointer_capture(struct wl_client *client, struct wl_resou
 	aws_seat_pointer_recheck(surface->server);
 }
 
+/* **THE POINTER'S SHAPE, KEPT PER WINDOW AND APPLIED WHEN THIS WINDOW IS UNDER THE POINTER.** See the protocol's
+ * `set_cursor`: an Xcursor name resolved against the compositor's own theme, the empty string for the default and
+ * `none` for a pointer that is not drawn. The name is stored rather than resolved here because the resolution belongs to
+ * `cursor.c` — it needs the output's scale and the loaded theme — and because a window that is not under the pointer
+ * must be able to say what it WOULD show: a motion into it later is what makes the answer visible.
+ *
+ * **THE ONE THING THIS DOES NOW IS APPLY IT IF IT IS ALREADY UNDER THE POINTER.** A view under a resting hand can change
+ * its cursor — a page that finishes loading a link, a split view that ends a drag — and without this the change would
+ * wait for the next motion, which is exactly the bug the AppKit's `-invalidateCursorRectsForView:` exists to prevent one
+ * layer up. `aws_cursor_follow_focus` answers for the focused window and does nothing when the name has not changed, so a
+ * window that repeats itself costs a `strcmp`. */
+static void window_set_cursor(struct wl_client *client, struct wl_resource *resource, const char *name)
+{
+	struct aws_surface *surface = wl_resource_get_user_data(resource);
+	char *copy;
+
+	(void)client;
+	if (surface == NULL) {
+		return;
+	}
+	/* A NAME NOTHING COULD HAVE INSTALLED IS REFUSED HERE rather than stored and truncated into a different name later, so
+	 * the shape already in force STANDS — that is the window's last good answer and not a worse one than the default. The
+	 * diagnostic names the window, so a person reading the log knows WHICH client sent it. */
+	if (name != NULL && strlen(name) >= AWS_CURSOR_NAME_MAX) {
+		aws_cursor_report_shape(surface->server, (int)surface->id, name);
+		return;
+	}
+	copy = strdup(name != NULL ? name : "");
+	if (copy == NULL) {
+		wl_client_post_no_memory(wl_resource_get_client(resource));
+		return;
+	}
+	free(surface->cursor_name);
+	surface->cursor_name = copy;
+	aws_cursor_report_shape(surface->server, (int)surface->id, name);
+	if (surface->server->pointer_focus == surface) {
+		aws_cursor_follow_focus(surface->server);
+	}
+}
+
 static const struct agora_window_interface agora_window_implementation = {
 	window_set_frame,
 	window_set_status_item,
@@ -711,6 +751,7 @@ static const struct agora_window_interface agora_window_implementation = {
 	window_set_badge,
 	window_set_buffer_scale_fixed,
 	window_set_sheet_parent,
+	window_set_cursor,
 };
 
 static void agora_window_destroy_resource(struct wl_resource *resource)
@@ -724,6 +765,15 @@ static void agora_window_destroy_resource(struct wl_resource *resource)
 	if (surface != NULL) {
 		surface->agora_window = NULL;
 		aws_shell_release_reserve(surface);
+		/* **AND THE POINTER'S SHAPE GOES WITH THE ROLE, BECAUSE THE ROLE IS WHO ASKED FOR IT.** A window whose name went
+		 * with its object would otherwise keep showing its own last cursor over a surface that no longer has an opinion —
+		 * and the default is the honest answer for a surface with no role. Applied only if this WAS the window under the
+		 * pointer: elsewhere nothing was being shown and the next focus change asks again. */
+		free(surface->cursor_name);
+		surface->cursor_name = NULL;
+		if (surface->server != NULL && surface->server->pointer_focus == surface) {
+			aws_cursor_follow_focus(surface->server);
+		}
 	}
 }
 
