@@ -431,6 +431,22 @@ static void keyboard_send_modifiers(struct aws_server *server)
 	}
 }
 
+/* **ONE LINE PER FOCUS DECISION, BEHIND THE ENVIRONMENT VARIABLE THIS TREE ALREADY USES FOR THE SAME REASON.**
+ * Which window has the keyboard decides which application's menu bar is on the screen, and a report of a bar that
+ * "disappears" is a report about this function and its callers — where the two facts that decide it (the level and
+ * whether the window may activate) are only visible here. */
+static void seat_diag_focus(const char *what, struct aws_surface *from, struct aws_surface *to)
+{
+	if (getenv("AWS_SEAT_DIAG") == NULL) {
+		return;
+	}
+	fprintf(stderr, "  DIAG seat: %s %u (level %d v%d a%d) -> %u (level %d v%d a%d)\n", what,
+		from != NULL ? from->id : 0u, from != NULL ? from->level : 0,
+		from != NULL ? from->visible : 0, from != NULL ? from->activatable : 0,
+		to != NULL ? to->id : 0u, to != NULL ? to->level : 0,
+		to != NULL ? to->visible : 0, to != NULL ? to->activatable : 0);
+}
+
 void aws_seat_set_keyboard_focus(struct aws_server *server, struct aws_surface *surface)
 {
 	struct aws_keyboard *keyboard;
@@ -443,11 +459,13 @@ void aws_seat_set_keyboard_focus(struct aws_server *server, struct aws_surface *
 	 * function. The focus is left EXACTLY where it was: a click on the Dock must not deactivate the application a
 	 * person is working in. */
 	if (surface != NULL && !surface->activatable) {
+		seat_diag_focus("refused (not activatable)", server->keyboard_focus, surface);
 		return;
 	}
 	if (server->keyboard_focus == surface) {
 		return;
 	}
+	seat_diag_focus("focus", server->keyboard_focus, surface);
 	wl_array_init(&keys);
 	if (server->keyboard_focus != NULL) {
 		struct aws_keyboard *k;
@@ -516,6 +534,13 @@ void aws_seat_reassign_keyboard_focus(struct aws_server *server)
 	 * window that had the keyboard is gone or hidden — or was just made non-activatable under it. */
 	if (focus != NULL && focus->mapped && focus->visible && focus->current_buffer != NULL && focus->activatable) {
 		return;
+	}
+	if (getenv("AWS_SEAT_DIAG") != NULL) {
+		fprintf(stderr, "  DIAG seat: reassign: %u mapped %d visible %d buffer %d activatable %d\n",
+			focus != NULL ? focus->id : 0u, focus != NULL ? focus->mapped : 0,
+			focus != NULL ? focus->visible : 0,
+			focus != NULL && focus->current_buffer != NULL ? 1 : 0,
+			focus != NULL ? focus->activatable : 0);
 	}
 	aws_seat_set_keyboard_focus(server, topmost_surface(server));
 }

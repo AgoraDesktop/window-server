@@ -16,8 +16,13 @@
  * compositor has said the surface may be shown.
  *
  *   client [--width W] [--height H] [--frames N] [--hold] [--colour RRGGBB] [--image PATH]
- *          [--x X] [--y Y] [--level L] [--status-length N] [--dmabuf]
+ *          [--x X] [--y Y] [--level L] [--status-length N] [--dmabuf] [--no-app-id]
  *          [--buffer-scale N] [--quadrants]
+ *
+ * **`--no-app-id` IS THE WALLPAPER'S OTHER HALF.** A window that names an application id (`agora_window_set_app_id`)
+ * is an application to everything downstream: `NSWorkspace -runningApplications` is built from those ids, so the Dock
+ * grows a tile for it — and a tile whose Quit is a request this raw client never hears. Decoration at the desktop's
+ * level is not an application, so it says so, and no tile is made.
  *
  * **`--buffer-scale` IS THE HIDPI CLIENT'S HALF OF `wl_surface`.** It allocates a buffer N times the frame, tells the
  * surface so with `set_buffer_scale`, and leaves the compositor to place it as the frame it described. `--quadrants`
@@ -78,6 +83,7 @@ struct client {
 	struct agora_window *window;
 	int frame_x, frame_y;
 	int level;			/* the NSWindow level to ask for, so two clients can be ordered */
+	int no_app_id;		/* decoration: never an application, so the Dock makes no tile for it */
 	struct wl_buffer *buffer;
 	uint32_t *pixels;
 
@@ -761,6 +767,8 @@ int main(int argc, char **argv)
 			client.frame_y = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--level") == 0 && i + 1 < argc) {
 			client.level = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "--no-app-id") == 0) {
+			client.no_app_id = 1;
 		} else if (strcmp(argv[i], "--buffer-scale") == 0 && i + 1 < argc) {
 			client.buffer_scale = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--offer") == 0 && i + 1 < argc) {
@@ -895,7 +903,9 @@ int main(int argc, char **argv)
 	}
 	agora_window_set_level(client.window, client.level);
 	agora_window_set_title(client.window, "window server test client");
-	agora_window_set_app_id(client.window, "io.github.agoradesktop.test-client");
+	if (!client.no_app_id) {
+		agora_window_set_app_id(client.window, "io.github.agoradesktop.test-client");
+	}
 
 	if (client.image_path != NULL && load_jpeg(&client, client.image_path) != 0) {
 		fprintf(stderr, "client: falling back to the flat colour\n");
