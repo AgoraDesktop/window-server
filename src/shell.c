@@ -966,6 +966,13 @@ static void shell_quit_window(struct wl_client *client, struct wl_resource *reso
 	if (surface == NULL || surface->agora_window == NULL) {
 		return;
 	}
+	/* **AN EVENT NOBODY DECLARED MUST NOT BE SENT**, which is the rule `reopen_window` states below and this door owed:
+	 * the window belongs to a client that may have bound the shell below 12, and `quit` is 12's. Wayland treats an event
+	 * newer than the receiving resource's version as a PROTOCOL ERROR on that connection — the application is killed
+	 * rather than left un-quit — so a shell at 13 talking to a client at 11 has to say nothing here. */
+	if (wl_resource_get_version(surface->agora_window) < 12) {
+		return;
+	}
 	agora_window_send_quit(surface->agora_window);
 }
 
