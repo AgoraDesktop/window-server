@@ -815,6 +815,27 @@ int main(void)
 		return 1;
 	}
 
+	/* **AND A LIST BOUND LATE IS TOLD WHAT IS ALREADY THERE, WITHOUT WAITING FOR A CHANGE.** The bind answers with the
+	 * snapshot as it stands (see `shell_get_window_list`), and the empty case above exercises that with no windows to
+	 * report. This is the same guarantee where it matters: a LAUNCHER that has just started binds and must learn what is
+	 * running, because an empty model is not a state a caller can tell from "nothing is running" — MEASURED, a cold
+	 * `-openURL:` started a second copy of an application that was already on the glass. Nothing changes between the
+	 * ask and the snapshot here, so the rows can only have come from the bind. */
+	{
+		int before = state.snapshots;
+		struct agora_window_list *late = agora_shell_get_window_list(state.shell);
+
+		agora_window_list_add_listener(late, &list_listener, &state);
+		if (settle(&state) != 0) {
+			return 1;
+		}
+		if (state.snapshots == before || find(&state, id_a) == NULL) {
+			fail(&state, "a list bound late was told nothing until the next window changed");
+		} else {
+			printf("ok: a list bound late is sent the windows that already exist\n");
+		}
+	}
+
 	/* **AND THE LIST SHRINKS WHEN A WINDOW GOES.** The surface is destroyed with the role still on it, which is
 	 * the path both the reservation and the list have to survive. */
 	wl_surface_destroy(surface_b);
