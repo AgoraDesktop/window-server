@@ -556,9 +556,18 @@ void aws_seat_reassign_keyboard_focus(struct aws_server *server)
 	struct aws_surface *focus = server->keyboard_focus;
 
 	/* STILL VALID, SO NOTHING TO DO. This is what makes it safe to call after any change: it only acts when the
-	 * window that had the keyboard is gone or hidden — or was just made non-activatable under it. */
-	if (focus != NULL && focus->mapped && focus->visible && focus->current_buffer != NULL &&
-	    (focus->activatable || server->keyboard_focus_deliberate)) {
+	 * window that had the keyboard is gone or hidden — or was just made non-activatable under it.
+	 *
+	 * **A DELIBERATE FOCUS DOES NOT NEED ITS WINDOW ON THE GLASS YET, BECAUSE THE ENTER IS WHAT PUTS IT THERE.** The
+	 * bar an application is activated by is HIDDEN at that moment: an application shows its menus when it LEARNS it is
+	 * the active one, and the enter this focus sends is the message that tells it. A reassign running in between —
+	 * another client hiding or showing a window in the same pass, which is Workspace's own bar going away when the
+	 * keyboard leaves it — found a focused window that was not visible and handed the keyboard back to the desktop
+	 * before the application could ever show the bar it had just been given. MEASURED in a live session, a tile click
+	 * on Forge after its only window closed: `focus 1 -> 9 (level 24 v0 a0)`, then the reassign, then `focus 9 -> 1`.
+	 * The visible test belongs to a CLICK's focus, which is a window a person can already see. */
+	if (focus != NULL && focus->mapped && focus->current_buffer != NULL &&
+	    (server->keyboard_focus_deliberate || (focus->visible && focus->activatable))) {
 		return;
 	}
 	if (getenv("AWS_SEAT_DIAG") != NULL) {

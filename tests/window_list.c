@@ -709,6 +709,39 @@ int main(void)
 		printf("ok: and an ordinary activation takes it back again\n");
 	}
 
+	/* **AND THE WAIVER SURVIVES A REASSIGN THAT RUNS WHILE THE BAR IS STILL HIDDEN, WHICH IS THE ONE THAT HAPPENS.**
+	 * The case above is the client's own show, and by then the window is visible. The one a live session produces is
+	 * somebody ELSE's window changing in the same pass — Workspace's bar going away because the keyboard just left
+	 * it — and at that instant the activated application has not painted its bar yet, so the window it was just given
+	 * is HIDDEN. A reassignment that insisted on `visible` handed the keyboard straight back to the desktop and the
+	 * menus never appeared. MEASURED, a tile click on Forge after its only window closed. */
+	agora_window_set_visible(window_b, 0);	/* the bar of an application nobody has activated yet */
+	agora_shell_activate_application(state.shell, id_b);
+	if (settle(&state) != 0) {
+		return 1;
+	}
+	agora_window_set_visible(window_a, 0);	/* another application's window goes away in the same pass */
+	if (settle(&state) != 0) {
+		return 1;
+	}
+	row = find(&state, id_b);
+	if (row == NULL || row->active != 1) {
+		fail(&state, "a reassign while the activated application's bar was still hidden took the keyboard back");
+	} else {
+		printf("ok: a hidden bar keeps the activation across another window's change\n");
+	}
+	agora_window_set_visible(window_b, 1);
+	agora_window_set_visible(window_a, 1);
+	if (settle(&state) != 0) {
+		return 1;
+	}
+	row = find(&state, id_b);
+	if (row == NULL || row->active != 1) {
+		fail(&state, "the bar lost the keyboard when it and another window were shown again");
+	} else {
+		printf("ok: and showing both windows again leaves it there\n");
+	}
+
 	/* AND SAID BACK ON, IT ACTIVATES NORMALLY — the door is a state, not a one-way door. */
 	agora_window_set_activatable(window_b, 1);
 	agora_shell_activate_window(state.shell, id_b);

@@ -817,7 +817,10 @@ activation**: `activate_application` gives an application the keyboard through a
 place the "a bar never takes the keyboard from a click" rule is waived — because a tile click on an application with
 nothing but its menu bar is a decision about which application is in front, not a decision about where the pointer
 went. The keyboard really moves, so the application that had it is told it lost it, and exactly one application is
-active afterwards.
+active afterwards. **The window it names may still be HIDDEN**, and that is the ordinary case rather than an edge one:
+an application shows its menus when it learns it is active, and the keyboard enter is how it learns. So the waiver also
+survives a focus reassignment — another client hiding or showing a window in the same pass — while the bar it named has
+not been painted yet.
 
 What is still absent on this side, named rather than left to be discovered: no minimized state, no session (so
 nothing emits `close` on shutdown), and no cross-process data device — which is what a drop on the Dock's Trash
