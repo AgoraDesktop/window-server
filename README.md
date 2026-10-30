@@ -780,8 +780,10 @@ moves no pixels. **And a window may say that clicking it must not activate its a
 
 **WHAT A DOCK ASKS, AND WHAT IT CAN DO ABOUT THE ANSWER, IS NOW THE PROTOCOL'S OWN.** `get_window_list` is the
 snapshot a shell draws from (and the one thing an ordinary application never asks for), `activate_window` and
-`close_window` are the click and the Quit, and `reopen_window` is the click that has nothing to raise — the
-application is asked to show a window and decides what that means. `tests/window_list.c` is the proof of all four,
+`close_window` are the click and the Quit, `reopen_window` is the click that has nothing to raise — the application
+is asked to show a window and decides what that means — and `quit_window` asks the APPLICATION to terminate, which is
+the one thing `close_window` cannot express: an application whose windows are furniture closes them and goes on
+drawing, so a Dock could not replace the desktop. `tests/window_list.c` is the proof of all five,
 because it is a shell and two applications in one process, which is the only way to write those assertions without
 a race. **And the other side of the same question is `agora_window.take_focus`**: an application saying "this one of
 MINE is key", which is `-makeKeyWindow` — focus without a raise, and only ever about a window the caller owns.
@@ -797,7 +799,7 @@ compositor with an opinion about items would be the same mistake a special case 
 cannot deliver (a window that has gone, or a client bound below version 6) is answered EMPTY NOW rather than left for
 a timeout to say later. `tests/window_list.c` asserts the whole round trip, including both of those answers.
 
-**THE SHELL GLOBAL IS AT VERSION 11.** Version 3 added the window list and the two requests on somebody else's
+**THE SHELL GLOBAL IS AT VERSION 12.** Version 3 added the window list and the two requests on somebody else's
 window, 4 carried `set_activatable`, 5 added `reopen_window` and `take_focus`, and 6 is the tile's menu — four
 requests and two events, and no change to how windows are placed. 7 is the selection, 8 the badge, and 9 the display's
 fractional scale. **10 is the sheet**: `agora_window.set_sheet_parent` names another window of the same client, and what
@@ -807,7 +809,8 @@ windows, and it exists because neither fact can be read off the frames. **11 is 
 `agora_window.set_cursor` is one string per window — an Xcursor name the compositor resolves against its theme — and the
 reason it is per window rather than per seat is that the answer is a function of the view under the pointer, which a
 seat has no views of. `none` is a shape and not an empty name: a page that paints its own pointer must not have ours
-under it.
+under it. **12 is the quit**: `quit_window` is the question a tile's Restart asks, and `agora_window.quit` is it
+arriving at a window of the application — the address, not the subject, exactly as `reopen` is.
 
 What is still absent on this side, named rather than left to be discovered: no minimized state, no session (so
 nothing emits `close` on shutdown), and no cross-process data device — which is what a drop on the Dock's Trash

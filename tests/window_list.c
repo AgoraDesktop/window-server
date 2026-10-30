@@ -65,6 +65,7 @@ struct state {
 
 	int closes;		/* `agora_window.close` events any of this probe's windows received */
 	int reopens;		/* `agora_window.reopen` events — the question a tile asks with nothing to raise */
+	int quits;		/* `agora_window.quit` events — the question a Dock's Restart asks */
 
 	/* ---- AND THE TILE'S MENU ------------------------------------------------------------------------
 	 * The probe is both ends of the round trip: it is the DOCK when it asks `get_dock_menu` through its own
@@ -181,6 +182,17 @@ static void window_reopen(void *data, struct agora_window *window)
  * reaches the dock and that the same window later hears which of its items was chosen. */
 static const char *const PROBE_MENU = "[{\"title\":\"Probe Item\",\"enabled\":true,\"state\":0,\"id\":1}]";
 
+/* **AND THE ASK THAT REPLACES AN APPLICATION**, which is a different question from `close` and must arrive as its own
+ * event: `close_window` asks the WINDOWS and leaves the rest to the application, and an application whose windows are
+ * furniture never goes — which is exactly what a Dock's Restart cannot live with. */
+static void window_quit(void *data, struct agora_window *window)
+{
+	struct state *state = data;
+
+	(void)window;
+	state->quits++;
+}
+
 static void window_dock_menu_requested(void *data, struct agora_window *window)
 {
 	struct state *state = data;
@@ -199,7 +211,7 @@ static void window_dock_menu_action(void *data, struct agora_window *window, int
 }
 
 /* IN THE PROTOCOL'S OWN ORDER: `close`, `work_area_changed`, `pointer_global`, `reopen`, `dock_menu_requested`,
- * `dock_menu_action`. */
+ * `dock_menu_action`, `quit`. */
 static const struct agora_window_listener window_listener = {
 	window_close,
 	window_work_area_changed,
@@ -207,6 +219,7 @@ static const struct agora_window_listener window_listener = {
 	window_reopen,
 	window_dock_menu_requested,
 	window_dock_menu_action,
+	window_quit,
 };
 
 /* AND THE DOCK'S SIDE OF IT: the answer arrives on the `agora_dock_menu` the ask made. */
@@ -238,7 +251,13 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
 	} else if (strcmp(interface, wl_shm_interface.name) == 0) {
 		state->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
 	} else if (strcmp(interface, agora_shell_interface.name) == 0) {
-		state->shell = wl_registry_bind(registry, name, &agora_shell_interface, version < 8 ? version : 8);
+		/* **THE PROBE BINDS THE NEWEST VERSION IT KNOWS, BECAUSE AN OLDER ONE CANNOT ASK ITS QUESTIONS.** A window
+		 * object inherits the shell's version, so binding at 8 (which was enough for the tile's menu) would make
+		 * every window a version-8 window — and `quit_window`, `set_buffer_scale_fixed`, `set_sheet_parent` and
+		 * `set_cursor` are all later than that. A request or event above the object's version is a protocol error,
+		 * so the probe's reach and the protocol's are the same number. */
+		state->shell = wl_registry_bind(registry, name, &agora_shell_interface,
+						version < 12 ? version : 12);
 	}
 }
 
@@ -590,15 +609,31 @@ int main(void)
 		printf("ok: close_window asked, and the window is the application's to close\n");
 	}
 
+	/* **AND THE ASK THAT ENDS AN APPLICATION RATHER THAN ITS WINDOWS.** A Dock's Restart has to be able to say "quit"
+	 * and mean the application: Workspace's desktop is furniture, so closing it leaves the process drawing the
+	 * desktop and the application cannot be replaced. */
+	agora_shell_quit_window(state.shell, id_b);
+	if (settle(&state) != 0) {
+		return 1;
+	}
+	if (state.quits != 1) {
+		fail(&state, "quit_window did not deliver agora_window.quit to B");
+	} else if (find(&state, id_b) == NULL) {
+		fail(&state, "quit_window destroyed the window instead of asking the application");
+	} else {
+		printf("ok: quit_window asked the APPLICATION, which decides\n");
+	}
+
 	/* **AND AN ID NOBODY ANSWERS IS IGNORED.** A Dock clicking a tile as its window closes is ordinary; a protocol
 	 * error there would kill the Dock over one stale tile. */
 	agora_shell_activate_window(state.shell, id_b + 1000);
 	agora_shell_close_window(state.shell, id_b + 1000);
 	agora_shell_reopen_window(state.shell, id_b + 1000);
+	agora_shell_quit_window(state.shell, id_b + 1000);
 	if (settle(&state) != 0) {
 		return 1;
 	}
-	if (state.closes != 1 || state.reopens != 1) {
+	if (state.closes != 1 || state.reopens != 1 || state.quits != 1) {
 		fail(&state, "an unknown id was answered by SOME window");
 	} else {
 		printf("ok: unknown ids are ignored rather than errors\n");

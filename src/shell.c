@@ -929,6 +929,23 @@ static void shell_close_window(struct wl_client *client, struct wl_resource *res
 	agora_window_send_close(surface->agora_window);
 }
 
+/* **AND THE ONE THAT ASKS THE APPLICATION TO GO — the second question a Dock tile's menu needs.** `close_window` asks
+ * each WINDOW to close and the application decides, which is right for a Quit row and cannot express "replace the
+ * desktop": Workspace's windows are furniture, so closing them changes nothing about the process. This is the other
+ * question (⌘Q), asked of the application through a window of its own — the window is the ADDRESS, exactly as
+ * `reopen_window`'s is — and it is the application's termination path that answers. */
+static void shell_quit_window(struct wl_client *client, struct wl_resource *resource, uint32_t id)
+{
+	struct aws_server *server = wl_resource_get_user_data(resource);
+	struct aws_surface *surface = surface_for_id(server, id);
+
+	(void)client;
+	if (surface == NULL || surface->agora_window == NULL) {
+		return;
+	}
+	agora_window_send_quit(surface->agora_window);
+}
+
 /* **THE OTHER HALF OF A CLICK THAT HAS NOTHING TO RAISE.** `activate_window` moves a window; this asks the
  * application behind one to show something. The window is the ADDRESS and not the subject — both sides know each
  * other by window ids and by nothing else — so what gets opened is the application's answer, not ours. */
@@ -1265,6 +1282,7 @@ static const struct agora_shell_interface agora_shell_implementation = {
 	shell_set_selection,
 	shell_clear_selection,
 	shell_request_selection,
+	shell_quit_window,
 };
 
 static void bind_agora_shell(struct wl_client *client, void *data, uint32_t version, uint32_t id)
