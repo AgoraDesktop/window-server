@@ -555,6 +555,14 @@ struct aws_server {
 	 * "show my menu bar" runs a reassignment, finds its bar non-activatable, and hands the keyboard back to
 	 * whoever it came from — which is exactly what was measured with a windowless application. */
 	int keyboard_focus_deliberate;
+	/* **AND WHETHER THE WINDOW A SHELL NAMED IS STILL WAITING TO BE SHOWN.** A Dock's tile click names a window of the
+	 * application being brought forward, and the application shows that window in answer — the keyboard enter is how it
+	 * learns it is active. Between the two the window is HIDDEN, so a reassignment triggered by another client in that
+	 * same pass would find it "not a place to give the keyboard" and hand it back: MEASURED as Forge's open panel
+	 * appearing for one frame and the previous application returning. This is the narrower half of the flag above and
+	 * is deliberately SEPARATE from it: a window named by a tile click still has to be activatable (`activate_window`
+	 * refuses one that is not), while the shell's own `activate_application` waives that too. */
+	int keyboard_focus_waits_for_show;
 	int pointer_x;				/* the pointer, in OUTPUT coordinates */
 	int pointer_y;
 	int pointer_inside;			/* the pointer is inside the output at all */
@@ -939,6 +947,11 @@ void aws_seat_set_keyboard_focus(struct aws_server *server, struct aws_surface *
  * it, so exactly one application is active and the one that had it is told it lost it), which is what makes this the
  * same decision a click makes rather than a second notion of "active" beside it. */
 void aws_seat_activate_application(struct aws_server *server, struct aws_surface *surface);
+/* **AND THE ONE A TILE CLICK ON A WINDOW ASKS FOR.** The window must be one a click could focus — a window that says
+ * `set_activatable 0` is still refused — but it may be OFF THE GLASS, because the application shows it in answer to the
+ * keyboard enter this sends. That is what keeps "bring the application forward" from being undone by the reassignment
+ * another client's show or hide runs in the same pass. */
+void aws_seat_activate_window(struct aws_server *server, struct aws_surface *surface);
 
 /* THE SURFACE AT A POINT, topmost first — the compositor's own hit test, and the thing focus is decided by. */
 struct aws_surface *aws_surface_at(struct aws_server *server, int x, int y);

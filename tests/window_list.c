@@ -755,6 +755,66 @@ int main(void)
 		printf("ok: and it takes it again once it is activatable\n");
 	}
 
+	/* **AND A TILE CLICK NAMES A WINDOW THE APPLICATION HAS NOT SHOWN YET.** Bringing an application forward from the
+	 * background is exactly that: the window is off the glass, the click hands it the keyboard, and the application
+	 * shows it in answer to the enter — so a reassignment running in between (another client hiding or showing a window
+	 * in the same pass) must not take the keyboard back to where it came from. MEASURED: Forge's open panel appeared for
+	 * one frame and the previous application returned. A window that REFUSES a click is still refused by this door; that
+	 * is the case above, and the last one here says the narrower waiver did not become the wide one. */
+	agora_window_set_visible(window_b, 0);		/* the application is in the background and ordered it out */
+	agora_shell_activate_window(state.shell, id_a);	/* somebody else is in front */
+	if (settle(&state) != 0) {
+		return 1;
+	}
+	agora_shell_activate_window(state.shell, id_b);	/* the tile click names the hidden window */
+	if (settle(&state) != 0) {
+		return 1;
+	}
+	row = find(&state, id_b);
+	if (row == NULL || row->active != 1) {
+		fail(&state, "a tile click could not hand the keyboard to a window the application had not shown yet");
+	} else {
+		printf("ok: a tile click hands the keyboard to a window that is still hidden\n");
+	}
+	agora_window_set_visible(window_a, 0);		/* another client's change, in the same pass */
+	if (settle(&state) != 0) {
+		return 1;
+	}
+	row = find(&state, id_b);
+	if (row == NULL || row->active != 1) {
+		fail(&state, "a reassign while the named window was still hidden took the keyboard back");
+	} else {
+		printf("ok: and another window's change does not take it back\n");
+	}
+	/* **AND THE NARROWER WAIVER IS STILL NARROW.** A window named and then made non-activatable gives the keyboard
+	 * back, which is the rule that a client saying "a click must not focus me" keeps even against a tile click. A is
+	 * shown first so there is somewhere for it to go. */
+	agora_window_set_visible(window_a, 1);
+	if (settle(&state) != 0) {
+		return 1;
+	}
+	row = find(&state, id_b);
+	if (row == NULL || row->active != 1) {
+		fail(&state, "showing the other window took the keyboard from the one the tile click named");
+	} else {
+		printf("ok: and showing another window leaves it where the click put it\n");
+	}
+	agora_window_set_activatable(window_b, 0);
+	if (settle(&state) != 0) {
+		return 1;
+	}
+	row = find(&state, id_a);
+	if (row == NULL || row->active != 1) {
+		fail(&state, "a window named by a tile click kept the keyboard after it stopped being activatable");
+	} else {
+		printf("ok: and it still gives the keyboard back when it stops being activatable\n");
+	}
+	agora_window_set_activatable(window_b, 1);
+	agora_window_set_visible(window_b, 1);
+	if (settle(&state) != 0) {
+		return 1;
+	}
+
 	/* **AND THE LIST SHRINKS WHEN A WINDOW GOES.** The surface is destroyed with the role still on it, which is
 	 * the path both the reservation and the list have to survive. */
 	wl_surface_destroy(surface_b);

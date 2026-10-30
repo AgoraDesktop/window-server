@@ -233,6 +233,31 @@ int main(void)
 	aws_seat_pointer_button(&server, 0x110, 0);
 	check(server.pointer_grab == &s_grab, "and its release does not give it away");
 
+	/* 8b. **AND A PRESS DURING A MENU DOES NOT MOVE THE KEYBOARD EITHER.** The fallback is what a tracking menu holds,
+	 * so a press that lands while it is held is the DISMISSAL — the click that closes the menu — and not a decision
+	 * about which application is in front. Handing the keyboard to whatever it landed on made closing a menu activate
+	 * somebody: MEASURED, a click on another application's window while File was open left THAT application in front
+	 * with the menu gone. A click with no menu up still focuses what it landed on, which is the case below. */
+	reset(&server);
+	server.display = display;
+	memset(&s_b, 0, sizeof s_b);
+	s_b.activatable = 1;
+	server.pointer_grab = &s_grab;
+	s_under_pointer = &s_b;
+	aws_seat_pointer_button(&server, 0x110, 1);
+	check(server.keyboard_focus == NULL,
+	      "a press that lands while a MENU holds the fallback does NOT move the keyboard");
+	aws_seat_pointer_button(&server, 0x110, 0);
+
+	reset(&server);
+	server.display = display;
+	s_under_pointer = &s_b;
+	aws_seat_pointer_button(&server, 0x110, 1);
+	check(server.keyboard_focus == &s_b,
+	      "and with no menu up the same press DOES give the keyboard to what it landed on");
+	aws_seat_pointer_button(&server, 0x110, 0);
+	s_b.activatable = 0;	/* the cases below are about surfaces that refuse a click */
+
 	/* 9. **A DESTROYED WINDOW GIVES EVERYTHING BACK.** The window being dragged can be destroyed mid-drag; a capture
 	 * that outlived it would leave the desktop with no pointer at all. */
 	reset(&server);

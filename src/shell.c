@@ -906,9 +906,12 @@ static void shell_activate_window(struct wl_client *client, struct wl_resource *
 	}
 	/* **RAISE AND FOCUS TOGETHER, WHICH IS THE PAIR A CLICK ON THE WINDOW ITSELF WOULD HAVE MADE.** `raise` is
 	 * only the stacking half and the focus is the server's to decide, so a Dock click is expressed here as the
-	 * pair — which is what makes the application's own menu bar follow. */
+	 * pair — which is what makes the application's own menu bar follow. AND THE FOCUS IS THE SHELL'S DECISION, so
+	 * it survives the window not being on the glass yet: an application brought forward from the background shows
+	 * its window in answer to the enter, and a reassignment in the same pass must not take the keyboard back to the
+	 * application a person just left — MEASURED as Forge's open panel showing for one frame and leaving again. */
 	surface_bring_to_front(server, surface);
-	aws_seat_set_keyboard_focus(server, surface);
+	aws_seat_activate_window(server, surface);
 	aws_damage_full(server, "a dock activated a window");
 	aws_server_schedule_render(server);
 	aws_seat_pointer_recheck(server);

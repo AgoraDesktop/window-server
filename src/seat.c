@@ -396,6 +396,7 @@ void aws_seat_surface_gone(struct aws_server *server, struct aws_surface *surfac
 	if (server->keyboard_focus == surface) {
 		server->keyboard_focus = NULL;
 		server->keyboard_focus_deliberate = 0;
+		server->keyboard_focus_waits_for_show = 0;
 	}
 	/* AND THE POINTER FALLBACK TOO, or a destroyed menu would go on being the surface a desktop click is
 	 * delivered to. */
@@ -461,8 +462,16 @@ static void seat_diag_focus(const char *what, struct aws_surface *from, struct a
  * click on such an application has to make it the active application — the Mac's answer is that its menus appear and
  * nothing else does — so the shell names that application's bar and says "this one, on purpose". A click on the same bar
  * is still refused, because a click is not a decision about which application is in front; it is a decision about where
- * the pointer went. */
-static void seat_set_keyboard_focus(struct aws_server *server, struct aws_surface *surface, int deliberate)
+ * the pointer went.
+ *
+ * **AND `waits_for_show` IS THE NARROWER HALF, WHICH A TILE CLICK ON A WINDOW DOES SAY.** A Dock naming one of an
+ * application's windows is the same kind of decision, but not the same waiver: the window must still be one a person
+ * could have clicked (`activate_window` refuses the rest), and what it has to survive is being OFF THE GLASS — the
+ * application shows it when the enter tells it it is active. Kept as a separate flag rather than folded into
+ * `deliberate`, because a window that then says `set_activatable 0` must still give the keyboard back, and the
+ * waiver above must not (`tests/window_list.c` asserts both). */
+static void seat_set_keyboard_focus(struct aws_server *server, struct aws_surface *surface, int deliberate,
+				    int waits_for_show)
 {
 	struct aws_keyboard *keyboard;
 	uint32_t serial = wl_display_next_serial(server->display);
@@ -495,6 +504,7 @@ static void seat_set_keyboard_focus(struct aws_server *server, struct aws_surfac
 	}
 	server->keyboard_focus = surface;
 	server->keyboard_focus_deliberate = deliberate;
+	server->keyboard_focus_waits_for_show = waits_for_show;
 	if (surface != NULL) {
 		wl_list_for_each(keyboard, &server->keyboards, link) {
 			if (same_client(keyboard->resource, surface->resource)) {
@@ -511,7 +521,20 @@ static void seat_set_keyboard_focus(struct aws_server *server, struct aws_surfac
 
 void aws_seat_set_keyboard_focus(struct aws_server *server, struct aws_surface *surface)
 {
-	seat_set_keyboard_focus(server, surface, 0);
+	seat_set_keyboard_focus(server, surface, 0, 0);
+}
+
+/* **AND THE ONE A TILE CLICK ASKS FOR.** It is `set_keyboard_focus` with one thing added: the window it names may not
+ * be on the glass yet, because the application shows it in answer to the enter this sends. See
+ * `keyboard_focus_waits_for_show`. A window that refuses a click is STILL refused here — `activate_application` is the
+ * only door that waives that, and a tile click on an ordinary window has no business doing so. */
+void aws_seat_activate_window(struct aws_server *server, struct aws_surface *surface)
+{
+	if (surface != NULL && !surface->activatable) {
+		seat_diag_focus("refused (not activatable)", server->keyboard_focus, surface);
+		return;
+	}
+	seat_set_keyboard_focus(server, surface, 0, 1);
 }
 
 /* **AND THE ONE A SHELL ASKS FOR, WHICH IS AN APPLICATION BEING MADE THE ACTIVE ONE.** The surface named is the
@@ -520,7 +543,7 @@ void aws_seat_set_keyboard_focus(struct aws_server *server, struct aws_surface *
  * makes exactly one application active: the one that had the keyboard is told it lost it, in the same breath. */
 void aws_seat_activate_application(struct aws_server *server, struct aws_surface *surface)
 {
-	seat_set_keyboard_focus(server, surface, 1);
+	seat_set_keyboard_focus(server, surface, 1, 1);
 }
 
 /* **THE TOPMOST WINDOW, BY THE SAME RULE THE COMPOSITOR STACKS BY: the highest LEVEL, and within a level the
@@ -565,9 +588,16 @@ void aws_seat_reassign_keyboard_focus(struct aws_server *server)
 	 * keyboard leaves it — found a focused window that was not visible and handed the keyboard back to the desktop
 	 * before the application could ever show the bar it had just been given. MEASURED in a live session, a tile click
 	 * on Forge after its only window closed: `focus 1 -> 9 (level 24 v0 a0)`, then the reassign, then `focus 9 -> 1`.
-	 * The visible test belongs to a CLICK's focus, which is a window a person can already see. */
+	 * The visible test belongs to a CLICK's focus, which is a window a person can already see.
+	 *
+	 * **AND THE NARROWER WAIVER IS THE ONE A TILE CLICK ON A WINDOW NEEDS, WITH THE ACTIVATABLE TEST LEFT IN.** A window
+	 * named by `activate_window` may be off the glass — the application shows it in answer to the enter — but a window
+	 * that says `set_activatable 0` while it holds the keyboard must still give it back, which is why the flag is
+	 * SEPARATE from `deliberate`. MEASURED: Forge's open panel, hidden because Forge was in the background, given the
+	 * keyboard by a tile click and handed straight back, so the panel showed for one frame. */
 	if (focus != NULL && focus->mapped && focus->current_buffer != NULL &&
-	    (server->keyboard_focus_deliberate || (focus->visible && focus->activatable))) {
+	    (server->keyboard_focus_deliberate ||
+	     (focus->activatable && (focus->visible || server->keyboard_focus_waits_for_show)))) {
 		return;
 	}
 	if (getenv("AWS_SEAT_DIAG") != NULL) {
@@ -745,7 +775,15 @@ void aws_seat_pointer_button(struct aws_server *server, uint32_t evdev_button, i
 	 * equivalents, nowhere for a keystroke to go. The Mac's answer is that the click activates whoever IS in front
 	 * (its file manager, which this tier has not got); the honest version of it here is to leave the focus exactly where
 	 * it was. */
-	if (pressed && surface != NULL) {
+	/* **A PRESS IS NOT A DECISION ABOUT WHICH APPLICATION IS IN FRONT WHILE A MENU IS TRACKING.** A menu takes the
+	 * pointer's fallback for as long as it is up (`window_set_pointer_grab`), so a press during one is the DISMISSAL —
+	 * the click that closes the menu — and nothing else. Handing the keyboard to whatever it landed on made closing a
+	 * menu activate somebody: MEASURED, a click on another application's window while File was open left THAT
+	 * application in front with the menu gone, which is the opposite of the Mac's answer — the click closes the menu
+	 * and the application that opened it stays in front. The rule is the one this file already states for a Dock: a gesture
+	 * that is not choosing where to type does not move the keyboard. The surface still HEARS the press — that is how
+	 * the menu learns the click was somewhere else and dismisses itself. */
+	if (pressed && surface != NULL && server->pointer_grab == NULL) {
 		aws_seat_set_keyboard_focus(server, surface);
 	}
 	if (surface == NULL) {
