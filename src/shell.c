@@ -929,6 +929,26 @@ static void shell_close_window(struct wl_client *client, struct wl_resource *res
 	agora_window_send_close(surface->agora_window);
 }
 
+/* **AND THE ONE THAT MAKES AN APPLICATION THE ACTIVE ONE WHEN IT HAS NO WINDOW TO WORK IN.** `activate_window` raises a
+ * window and gives it the keyboard; an application whose only window is its MENU BAR cannot be activated that way,
+ * because a bar never takes the keyboard from a click. A Dock tile click is not a click on the bar, though: it is a
+ * decision about which application is in front, and this is that decision. The window is the ADDRESS, exactly as
+ * `reopen_window`'s and `quit_window`'s are. */
+static void shell_activate_application(struct wl_client *client, struct wl_resource *resource, uint32_t id)
+{
+	struct aws_server *server = wl_resource_get_user_data(resource);
+	struct aws_surface *surface = surface_for_id(server, id);
+
+	(void)client;
+	if (surface == NULL) {
+		return;
+	}
+	aws_seat_activate_application(server, surface);
+	aws_damage_full(server, "a shell activated an application");
+	aws_server_schedule_render(server);
+	aws_seat_pointer_recheck(server);
+}
+
 /* **AND THE ONE THAT ASKS THE APPLICATION TO GO — the second question a Dock tile's menu needs.** `close_window` asks
  * each WINDOW to close and the application decides, which is right for a Quit row and cannot express "replace the
  * desktop": Workspace's windows are furniture, so closing them changes nothing about the process. This is the other
@@ -1283,6 +1303,7 @@ static const struct agora_shell_interface agora_shell_implementation = {
 	shell_clear_selection,
 	shell_request_selection,
 	shell_quit_window,
+	shell_activate_application,
 };
 
 static void bind_agora_shell(struct wl_client *client, void *data, uint32_t version, uint32_t id)

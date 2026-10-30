@@ -395,6 +395,7 @@ void aws_seat_surface_gone(struct aws_server *server, struct aws_surface *surfac
 	}
 	if (server->keyboard_focus == surface) {
 		server->keyboard_focus = NULL;
+		server->keyboard_focus_deliberate = 0;
 	}
 	/* AND THE POINTER FALLBACK TOO, or a destroyed menu would go on being the surface a desktop click is
 	 * delivered to. */
@@ -447,18 +448,27 @@ static void seat_diag_focus(const char *what, struct aws_surface *from, struct a
 		to != NULL ? to->visible : 0, to != NULL ? to->activatable : 0);
 }
 
-void aws_seat_set_keyboard_focus(struct aws_server *server, struct aws_surface *surface)
+/* **ONE FOCUS DECISION, AND THE ONE RULE THAT MAY BE WAIVED.** Every door that gives the keyboard comes through here:
+ * the click, the initial focus on map, the reassignment after a window goes away, an application's own `take_focus`,
+ * and — the one that is allowed to waive the rule — a SHELL that is activating an application on purpose.
+ *
+ * **A WINDOW THAT MAY NOT ACTIVATE NEVER TAKES THE KEYBOARD, WHICHEVER DOOR ASKED.** The check is here once rather than
+ * in five callers that could disagree — the same reason the pointer's routing is one function. The focus is left
+ * EXACTLY where it was: a click on the Dock must not deactivate the application a person is working in.
+ *
+ * **`deliberate` IS THE SHELL'S WORD, AND ONLY A SHELL CAN SAY IT.** An application with no window a person can work in
+ * still has its MENU BAR, and that bar is a window the client said must never take the keyboard by a click. A Dock tile
+ * click on such an application has to make it the active application — the Mac's answer is that its menus appear and
+ * nothing else does — so the shell names that application's bar and says "this one, on purpose". A click on the same bar
+ * is still refused, because a click is not a decision about which application is in front; it is a decision about where
+ * the pointer went. */
+static void seat_set_keyboard_focus(struct aws_server *server, struct aws_surface *surface, int deliberate)
 {
 	struct aws_keyboard *keyboard;
 	uint32_t serial = wl_display_next_serial(server->display);
 	struct wl_array keys;
 
-	/* **A WINDOW THAT MAY NOT ACTIVATE NEVER TAKES THE KEYBOARD, WHICHEVER DOOR ASKED.** The click path, the
-	 * initial-focus rule on map and the reassignment after a window goes away all come through here, so the check is
-	 * here once rather than in three callers that could disagree — the same reason the pointer's routing is one
-	 * function. The focus is left EXACTLY where it was: a click on the Dock must not deactivate the application a
-	 * person is working in. */
-	if (surface != NULL && !surface->activatable) {
+	if (surface != NULL && !surface->activatable && !deliberate) {
 		seat_diag_focus("refused (not activatable)", server->keyboard_focus, surface);
 		return;
 	}
@@ -484,6 +494,7 @@ void aws_seat_set_keyboard_focus(struct aws_server *server, struct aws_surface *
 		}
 	}
 	server->keyboard_focus = surface;
+	server->keyboard_focus_deliberate = deliberate;
 	if (surface != NULL) {
 		wl_list_for_each(keyboard, &server->keyboards, link) {
 			if (same_client(keyboard->resource, surface->resource)) {
@@ -496,6 +507,20 @@ void aws_seat_set_keyboard_focus(struct aws_server *server, struct aws_surface *
 	 * notion of "frontmost" the tree has. It comes after the array is released, so nothing that walks the list can
 	 * see half a keyboard. */
 	aws_shell_window_list_changed(server);
+}
+
+void aws_seat_set_keyboard_focus(struct aws_server *server, struct aws_surface *surface)
+{
+	seat_set_keyboard_focus(server, surface, 0);
+}
+
+/* **AND THE ONE A SHELL ASKS FOR, WHICH IS AN APPLICATION BEING MADE THE ACTIVE ONE.** The surface named is the
+ * application's own — its menu bar when it has no window a person can work in — and the waiver is the whole of the
+ * difference: the leave/enter pair, the focus, and the window list all run exactly as they do for a click. That is what
+ * makes exactly one application active: the one that had the keyboard is told it lost it, in the same breath. */
+void aws_seat_activate_application(struct aws_server *server, struct aws_surface *surface)
+{
+	seat_set_keyboard_focus(server, surface, 1);
 }
 
 /* **THE TOPMOST WINDOW, BY THE SAME RULE THE COMPOSITOR STACKS BY: the highest LEVEL, and within a level the
@@ -532,7 +557,8 @@ void aws_seat_reassign_keyboard_focus(struct aws_server *server)
 
 	/* STILL VALID, SO NOTHING TO DO. This is what makes it safe to call after any change: it only acts when the
 	 * window that had the keyboard is gone or hidden — or was just made non-activatable under it. */
-	if (focus != NULL && focus->mapped && focus->visible && focus->current_buffer != NULL && focus->activatable) {
+	if (focus != NULL && focus->mapped && focus->visible && focus->current_buffer != NULL &&
+	    (focus->activatable || server->keyboard_focus_deliberate)) {
 		return;
 	}
 	if (getenv("AWS_SEAT_DIAG") != NULL) {

@@ -548,6 +548,13 @@ struct aws_server {
 	struct aws_surface *pointer_capture;	/* the surface that takes the pointer WHEREVER it is, or NULL */
 	uint32_t pointer_buttons;		/* the pointer's buttons that are down, as a bit per evdev code */
 	struct aws_surface *keyboard_focus;	/* the surface the keyboard goes to, or NULL */
+	/* **AND WHETHER A SHELL PUT IT THERE ON PURPOSE.** A window that says `set_activatable 0` never takes the
+	 * keyboard from a click, and the reassignment that gives the keyboard somewhere after a window goes away
+	 * treats it as "not a place to give it" for the same reason. `activate_application` is the one door that
+	 * overrules that, so the seat has to REMEMBER it was overruled: without this the application's own next
+	 * "show my menu bar" runs a reassignment, finds its bar non-activatable, and hands the keyboard back to
+	 * whoever it came from — which is exactly what was measured with a windowless application. */
+	int keyboard_focus_deliberate;
 	int pointer_x;				/* the pointer, in OUTPUT coordinates */
 	int pointer_y;
 	int pointer_inside;			/* the pointer is inside the output at all */
@@ -926,6 +933,12 @@ int aws_input_host_start(struct aws_server *server);
 /* GIVE THE KEYBOARD TO A SURFACE (or to nothing, with NULL). The compositor's focus POLICY lives in one place,
  * and this is the door it uses — a new window takes the focus and a click moves it. */
 void aws_seat_set_keyboard_focus(struct aws_server *server, struct aws_surface *surface);
+/* **AND THE ONE A SHELL ASKS FOR: MAKE THIS APPLICATION THE ACTIVE ONE.** It is `set_keyboard_focus` with the
+ * "never by a click" rule waived, and the only caller that may waive it is `agora_shell.activate_application` — a Dock
+ * clicking the tile of an application that has nothing but its menu bar. The keyboard really does move (the bar takes
+ * it, so exactly one application is active and the one that had it is told it lost it), which is what makes this the
+ * same decision a click makes rather than a second notion of "active" beside it. */
+void aws_seat_activate_application(struct aws_server *server, struct aws_surface *surface);
 
 /* THE SURFACE AT A POINT, topmost first — the compositor's own hit test, and the thing focus is decided by. */
 struct aws_surface *aws_surface_at(struct aws_server *server, int x, int y);

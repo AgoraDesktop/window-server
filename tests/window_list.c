@@ -254,10 +254,10 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
 		/* **THE PROBE BINDS THE NEWEST VERSION IT KNOWS, BECAUSE AN OLDER ONE CANNOT ASK ITS QUESTIONS.** A window
 		 * object inherits the shell's version, so binding at 8 (which was enough for the tile's menu) would make
 		 * every window a version-8 window — and `quit_window`, `set_buffer_scale_fixed`, `set_sheet_parent` and
-		 * `set_cursor` are all later than that. A request or event above the object's version is a protocol error,
-		 * so the probe's reach and the protocol's are the same number. */
+		 * `set_cursor`, `quit_window` and `activate_application` are all later than that. A request or event above
+		 * the object's version is a protocol error, so the probe's reach and the protocol's are the same number. */
 		state->shell = wl_registry_bind(registry, name, &agora_shell_interface,
-						version < 12 ? version : 12);
+						version < 13 ? version : 13);
 	}
 }
 
@@ -663,6 +663,52 @@ int main(void)
 	} else {
 		printf("ok: and activate_window cannot give it the keyboard either\n");
 	}
+	/* **AND A SHELL CAN ASK FOR IT ON PURPOSE, WHICH IS THE ONE THING A CLICK MAY NOT DO.** An application whose only
+	 * window is its MENU BAR is activated by exactly this: the bar is a window a click must never give the keyboard to
+	 * (the case above), and a Dock tile click on that application still has to make it the active one. The keyboard really
+	 * moves — A gives it up — so exactly one application is in front afterwards. */
+	agora_shell_activate_application(state.shell, id_b);
+	if (settle(&state) != 0) {
+		return 1;
+	}
+	row = find(&state, id_b);
+	if (row == NULL || row->active != 1) {
+		fail(&state, "activate_application could not activate a window that refuses a click");
+	} else if ((row = find(&state, id_a)) != NULL && row->active != 0) {
+		fail(&state, "activate_application left the application that had the keyboard active as well");
+	} else {
+		printf("ok: activate_application activates an application whose window refuses a click\n");
+	}
+	/* **AND THE SEAT REMEMBERS THE WAIVER, OR THE APPLICATION'S OWN NEXT SHOW UNDOES IT.** An application that has just
+	 * been activated paints its menu bar, and its `set_visible` runs the reassignment — which used to treat a focused
+	 * but non-activatable window as "not a place to give the keyboard" and hand it straight back, MEASURED with a
+	 * windowless application in a live session. Re-showing the bar is that same call, from a client's side, without a
+	 * second window to reach for. */
+	agora_window_set_visible(window_b, 1);
+	if (settle(&state) != 0) {
+		return 1;
+	}
+	row = find(&state, id_b);
+	if (row == NULL || row->active != 1) {
+		fail(&state, "showing the activated application's bar took the keyboard back from it");
+	} else {
+		printf("ok: and the application's own show does not undo it\n");
+	}
+
+	/* **AND THE WAIVER IS THE SHELL'S ALONE, NOT A STATE THE WINDOW KEEPS.** Activating A the ordinary way takes the
+	 * keyboard back, which is what makes this "which application is in front" rather than a second notion of active
+	 * beside the keyboard. And B is still the window a click may not touch, as the case above says. */
+	agora_shell_activate_window(state.shell, id_a);
+	if (settle(&state) != 0) {
+		return 1;
+	}
+	row = find(&state, id_a);
+	if (row == NULL || row->active != 1) {
+		fail(&state, "the application activated on purpose would not give the keyboard back");
+	} else {
+		printf("ok: and an ordinary activation takes it back again\n");
+	}
+
 	/* AND SAID BACK ON, IT ACTIVATES NORMALLY — the door is a state, not a one-way door. */
 	agora_window_set_activatable(window_b, 1);
 	agora_shell_activate_window(state.shell, id_b);
