@@ -64,6 +64,42 @@ void aws_shell_window_list_changed(struct aws_server *server)
 	(void)server;
 }
 
+/* **AND THE DRAG'S TWO, WHICH THE SEAT ASKS ON A PATH THIS FILE DOES NOT DRIVE.** A unit test has no bound shells and no
+ * drag owner, so the lookup answers nothing and the clear is a no-op — the same shape as the other stand-ins above. */
+struct wl_resource *aws_shell_binding_for_client(struct aws_server *server, struct wl_client *client)
+{
+	(void)server; (void)client;
+	return NULL;
+}
+
+void aws_shell_drag_clear(struct aws_server *server)
+{
+	(void)server;
+}
+
+/* **AND THE FIVE EVENTS, WHICH THE SEAT ASKS FOR ON A PATH WITH NO DRAG IN FLIGHT.** A drag owner of nil means none of
+ * them is reached, but the symbols have to exist for the file to link — the same reason the other stand-ins are here. */
+void aws_shell_send_drag_enter(struct aws_server *server, struct aws_surface *surface, int x, int y)
+{
+	(void)server; (void)surface; (void)x; (void)y;
+}
+void aws_shell_send_drag_motion(struct aws_server *server, struct aws_surface *surface, int x, int y)
+{
+	(void)server; (void)surface; (void)x; (void)y;
+}
+void aws_shell_send_drag_leave(struct aws_server *server, struct aws_surface *surface)
+{
+	(void)server; (void)surface;
+}
+void aws_shell_send_drag_drop(struct aws_server *server, struct aws_surface *surface, int x, int y)
+{
+	(void)server; (void)surface; (void)x; (void)y;
+}
+void aws_shell_send_drag_finished(struct aws_server *server)
+{
+	(void)server;
+}
+
 void aws_server_schedule_render(struct aws_server *server)
 {
 	(void)server;

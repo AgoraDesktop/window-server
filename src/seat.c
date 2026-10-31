@@ -705,6 +705,9 @@ void aws_seat_pointer_motion(struct aws_server *server, int x, int y)
 	 * it WAS repainted from whatever is underneath, and those pixels are not a rectangle this frame's surfaces damaged —
 	 * so both boxes go into the frame, and a motion is a pointer-sized frame rather than a screen-sized one. */
 	pointer_damage(server, was_inside, was_x, was_y, 1, x, y);
+	/* **THE DRAG IS TRACKED BEFORE THE FOCUS IS, AND IT IGNORES THE CAPTURE** — see `aws_seat_drag_track`: a drag reaches
+	 * another client because the pointer is over it, not because that client holds anything. */
+	aws_seat_drag_track(server, x, y);
 	if (!server->pointer_inside) {
 		return;
 	}
@@ -813,7 +816,72 @@ void aws_seat_pointer_button(struct aws_server *server, uint32_t evdev_button, i
 			server->pointer_capture = NULL;
 			aws_seat_pointer_recheck(server);
 		}
+		/* **AND A DRAG ENDS ON THE LAST RELEASE, AFTER IT HAS BEEN DELIVERED.** The destination's `drag_drop` names the
+		 * point the hand let go at, and the source's `drag_finished` comes after it, so a source that commits an order on
+		 * the answer cannot run before the destination has heard about the drop. */
+		if (server->pointer_buttons == 0 && server->drag_owner != NULL) {
+			aws_seat_drag_finish(server);
+		}
 	}
+}
+
+/* --------------------------------------------------------------------------------------------- *
+ * THE DRAG'S GESTURE: WHERE IT IS, AND WHEN IT ENDS.                                            *
+ *                                                                                                *
+ * **THE SOURCE IS NOT TOLD WHERE ITS OWN WINDOWS ARE.** A drag that a person begins in one view and finishes on another
+ * window of the SAME application is that application's own business — it is the local `NSDraggingSession`, and its
+ * destination lookup already walks its own windows. What the server adds is the reach ACROSS clients: another client's
+ * surface under the pointer hears `drag_enter`, `drag_motion`, `drag_leave` and `drag_drop`, in its own surface
+ * coordinates, which is what a view hit-tests with.
+ *
+ * **AND THE CAPTURE DOES NOT DECIDE THIS ONE.** A source captures the pointer for the length of its gesture so its own
+ * window keeps hearing the hand; the drag's routing is by where the pointer IS, not by who captured it, or a drag could
+ * never cross a process boundary.
+ * --------------------------------------------------------------------------------------------- */
+
+/* **ONE QUESTION PER MOTION: IS THE DRAG OVER SOMEBODY ELSE'S SURFACE?** The answer is nil for the source's own surfaces,
+ * for the desktop and when there is no drag, and a change of answer is one `drag_leave` and one `drag_enter`. */
+void aws_seat_drag_track(struct aws_server *server, int x, int y)
+{
+	struct aws_surface *under;
+	struct aws_surface *destination = NULL;
+
+	if (server == NULL || server->drag_owner == NULL) {
+		return;
+	}
+	under = aws_surface_at(server, x, y);
+	if (under != NULL && under->resource != NULL
+	    && wl_resource_get_client(under->resource) != wl_resource_get_client(server->drag_owner)) {
+		destination = under;
+	}
+	if (destination == server->drag_surface) {
+		if (destination != NULL) {
+			aws_shell_send_drag_motion(server, destination, x, y);
+		}
+		return;
+	}
+	if (server->drag_surface != NULL) {
+		aws_shell_send_drag_leave(server, server->drag_surface);
+	}
+	server->drag_surface = destination;
+	if (destination != NULL) {
+		aws_shell_send_drag_enter(server, destination, x, y);
+	}
+}
+
+/* **AND THE RELEASE IS THE DROP, THEN THE SOURCE'S ANSWER.** The destination hears `drag_drop` where the hand let go and
+ * answers by asking for a type; the source hears `drag_finished` either way, because the gesture is over whatever the
+ * destination decides to do with it. */
+void aws_seat_drag_finish(struct aws_server *server)
+{
+	if (server == NULL || server->drag_owner == NULL) {
+		return;
+	}
+	if (server->drag_surface != NULL) {
+		aws_shell_send_drag_drop(server, server->drag_surface, server->pointer_x, server->pointer_y);
+	}
+	aws_shell_send_drag_finished(server);
+	aws_shell_drag_clear(server);
 }
 
 /* **HOW LONG AN AXIS HAS TO BE QUIET BEFORE ITS SCROLL IS OVER.** The protocol names the event and not the number:

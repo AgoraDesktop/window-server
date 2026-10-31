@@ -1242,6 +1242,19 @@ static void shell_clear_selection(struct wl_client *client, struct wl_resource *
 	if (server->selection_owner == resource) {
 		selection_replace(server, NULL, NULL, 0);
 	}
+	/* AND A DRAG DIES WITH THE CLIENT THAT STARTED IT: there is nobody left to serve its payload, so the claim goes and
+	 * the destination's insertion mark with it. */
+	if (server->drag_owner == resource) {
+		if (server->drag_surface != NULL) {
+			struct wl_resource *binding = aws_shell_binding_for_client(
+				server, wl_resource_get_client(server->drag_surface->resource));
+
+			if (binding != NULL) {
+				agora_shell_send_drag_leave(binding);
+			}
+		}
+		aws_shell_drag_clear(server);
+	}
 }
 
 /* **A REQUEST IS ANSWERED WITH AN FD, OR WITH A REASON, AND NEVER WITH SILENCE.** The pipe is created here and its two
@@ -1275,6 +1288,244 @@ static void shell_request_selection(struct wl_client *client, struct wl_resource
 	/* OUR COPIES GO, AND ONLY OURS: libwayland has duplicated both into the messages. */
 	close(fds[0]);
 	close(fds[1]);
+}
+
+/* --------------------------------------------------------------------------------------------- *
+ * THE DRAG'S CLAIM, ITS TYPES, AND ITS PAYLOAD.                                               *
+ *                                                                                                *
+ * **IT IS `set_selection`'S SHAPE WITH A DIFFERENT SUBJECT**, and the encodings are the same for the same reason: the
+ * type array is NUL-terminated strings back to back, because an `array` is opaque to Wayland and a `char **` would send
+ * this process's pointers. The payload travels as an fd between the two clients, so the server keeps no bytes — and the
+ * drag OWNS ITS TYPES rather than borrowing the selection's, because a drag must not disturb what is on the clipboard.
+ * --------------------------------------------------------------------------------------------- */
+
+/* THE TYPES OF AN `array` ARGUMENT, WHICH TWO REQUESTS NOW READ. An empty type is not a type, and a list longer than the
+ * claim's own storage is truncated rather than refused: the first thirty-two types are what a drag can offer. */
+static int fn_types_from_array(struct wl_array *types, char **list, int limit)
+{
+	const char *cursor = (const char *)types->data;
+	const char *end = cursor + types->size;
+	int count = 0;
+
+	while (cursor < end && count < limit) {
+		size_t length = strnlen(cursor, (size_t)(end - cursor));
+
+		if (length == 0) {
+			break;
+		}
+		list[count++] = (char *)cursor;
+		cursor += length + 1;
+	}
+	return count;
+}
+
+void aws_shell_drag_clear(struct aws_server *server)
+{
+	int i;
+
+	if (server == NULL) {
+		return;
+	}
+	for (i = 0; i < server->drag_type_count; i++) {
+		free(server->drag_types[i]);
+		server->drag_types[i] = NULL;
+	}
+	server->drag_type_count = 0;
+	server->drag_owner = NULL;
+	server->drag_surface = NULL;
+}
+
+static void shell_start_drag(struct wl_client *client, struct wl_resource *resource, uint32_t serial,
+			     struct wl_array *types)
+{
+	struct aws_server *server = wl_resource_get_user_data(resource);
+	char *list[32];
+	int count;
+	int i;
+
+	(void)client;
+	(void)serial;
+	if (server == NULL || types == NULL) {
+		return;
+	}
+	/* A DRAG REPLACES A DRAG: a second gesture while one is in flight is the same client starting over, which is what a
+	 * source does when its own destination refused the first. */
+	aws_shell_drag_clear(server);
+	count = fn_types_from_array(types, list, (int)(sizeof list / sizeof list[0]));
+	for (i = 0; i < count; i++) {
+		server->drag_types[i] = strdup(list[i]);
+		if (server->drag_types[i] != NULL) {
+			server->drag_type_count++;
+		}
+	}
+	server->drag_owner = resource;
+}
+
+static void shell_cancel_drag(struct wl_client *client, struct wl_resource *resource)
+{
+	struct aws_server *server = wl_resource_get_user_data(resource);
+
+	(void)client;
+	if (server == NULL) {
+		return;
+	}
+	/* THE DESTINATION IS TOLD THE POINTER LEFT, so a strip that drew an insertion mark takes it away; the source is not
+	 * told anything, because it is the one that asked. */
+	if (server->drag_surface != NULL) {
+		struct wl_resource *binding = aws_shell_binding_for_client(
+			server, wl_resource_get_client(server->drag_surface->resource));
+
+		if (binding != NULL) {
+			agora_shell_send_drag_leave(binding);
+		}
+	}
+	aws_shell_drag_clear(server);
+}
+
+/* **THE DESTINATION ASKS FOR A TYPE AND GETS AN FD**, exactly as `request_selection` does: the pipe is created here, its
+ * two ends are posted one to each client, and the server holds neither. A request the drag cannot serve is answered with
+ * a reason — never by silence, which is the rule the selection's refusals already keep. */
+static void shell_request_drag_data(struct wl_client *client, struct wl_resource *resource, const char *mime_type)
+{
+	struct aws_server *server = wl_resource_get_user_data(resource);
+	int fds[2];
+	int i;
+	int offers = 0;
+
+	(void)client;
+	if (server == NULL || mime_type == NULL) {
+		return;
+	}
+	if (server->drag_owner == NULL) {
+		agora_shell_send_drag_refused(resource, mime_type, AGORA_SHELL_SELECTION_REFUSAL_NO_OWNER);
+		return;
+	}
+	for (i = 0; i < server->drag_type_count; i++) {
+		if (server->drag_types[i] != NULL && strcmp(server->drag_types[i], mime_type) == 0) {
+			offers = 1;
+		}
+	}
+	if (!offers) {
+		agora_shell_send_drag_refused(resource, mime_type, AGORA_SHELL_SELECTION_REFUSAL_WRONG_TYPE);
+		return;
+	}
+	if (pipe2(fds, O_CLOEXEC) != 0) {
+		wl_client_post_no_memory(client);
+		return;
+	}
+	agora_shell_send_drag_data_requested(server->drag_owner, mime_type, fds[1]);
+	agora_shell_send_drag_data(resource, mime_type, fds[0]);
+	close(fds[0]);
+	close(fds[1]);
+}
+
+/* --------------------------------------------------------------------------------------------- *
+ * AND THE FIVE WIRE DOORS THE SEAT ASKS FOR.                                                            *
+ *                                                                                                *
+ * The seat says WHICH SURFACE and WHERE; this file says which resource that client's events go to, and how the protocol
+ * spells them. The split is what lets a unit test of the seat interpose the five, which the generated `static inline`
+ * senders cannot be.
+ * --------------------------------------------------------------------------------------------- */
+
+static void fn_announce_types(struct aws_server *server, struct wl_resource *binding, struct aws_surface *surface,
+			      int x, int y)
+{
+	struct wl_array types;
+	int i;
+
+	wl_array_init(&types);
+	for (i = 0; i < server->drag_type_count; i++) {
+		size_t length = strlen(server->drag_types[i]) + 1;
+		char *slot = wl_array_add(&types, length);
+
+		if (slot != NULL) {
+			memcpy(slot, server->drag_types[i], length);
+		}
+	}
+	agora_shell_send_drag_enter(binding, surface->id, x - surface->x, y - surface->y, &types);
+	wl_array_release(&types);
+}
+
+void aws_shell_send_drag_enter(struct aws_server *server, struct aws_surface *surface, int x, int y)
+{
+	struct wl_resource *binding;
+
+	if (server == NULL || surface == NULL || surface->resource == NULL) {
+		return;
+	}
+	binding = aws_shell_binding_for_client(server, wl_resource_get_client(surface->resource));
+	if (binding != NULL) {
+		fn_announce_types(server, binding, surface, x, y);
+	}
+}
+
+void aws_shell_send_drag_motion(struct aws_server *server, struct aws_surface *surface, int x, int y)
+{
+	struct wl_resource *binding;
+
+	if (server == NULL || surface == NULL || surface->resource == NULL) {
+		return;
+	}
+	binding = aws_shell_binding_for_client(server, wl_resource_get_client(surface->resource));
+	if (binding != NULL) {
+		agora_shell_send_drag_motion(binding, x - surface->x, y - surface->y);
+	}
+}
+
+void aws_shell_send_drag_leave(struct aws_server *server, struct aws_surface *surface)
+{
+	struct wl_resource *binding;
+
+	if (server == NULL || surface == NULL || surface->resource == NULL) {
+		return;
+	}
+	binding = aws_shell_binding_for_client(server, wl_resource_get_client(surface->resource));
+	if (binding != NULL) {
+		agora_shell_send_drag_leave(binding);
+	}
+}
+
+void aws_shell_send_drag_drop(struct aws_server *server, struct aws_surface *surface, int x, int y)
+{
+	struct wl_resource *binding;
+
+	if (server == NULL || surface == NULL || surface->resource == NULL) {
+		return;
+	}
+	binding = aws_shell_binding_for_client(server, wl_resource_get_client(surface->resource));
+	if (binding != NULL) {
+		agora_shell_send_drag_drop(binding, x - surface->x, y - surface->y);
+	}
+}
+
+void aws_shell_send_drag_finished(struct aws_server *server)
+{
+	struct wl_resource *binding;
+
+	if (server == NULL || server->drag_owner == NULL) {
+		return;
+	}
+	binding = aws_shell_binding_for_client(server, wl_resource_get_client(server->drag_owner));
+	if (binding != NULL) {
+		agora_shell_send_drag_finished(binding);
+	}
+}
+
+/* **AND THE BINDING A CLIENT'S DRAG EVENTS GO TO.** A drag event concerns a client, not a window, so the list of bound
+ * shells is what finds it — the same list the selection is announced through. */
+struct wl_resource *aws_shell_binding_for_client(struct aws_server *server, struct wl_client *client)
+{
+	struct aws_shell_binding *binding;
+
+	if (server == NULL || client == NULL) {
+		return NULL;
+	}
+	wl_list_for_each(binding, &server->shell_bindings, link) {
+		if (wl_resource_get_client(binding->resource) == client) {
+			return binding->resource;
+		}
+	}
+	return NULL;
 }
 
 /* **A SHELL RESOURCE GOING AWAY TAKES TWO THINGS WITH IT**: its place in the broadcast list, and the selection if it was
@@ -1314,6 +1565,9 @@ static const struct agora_shell_interface agora_shell_implementation = {
 	shell_request_selection,
 	shell_quit_window,
 	shell_activate_application,
+	shell_start_drag,
+	shell_cancel_drag,
+	shell_request_drag_data,
 };
 
 static void bind_agora_shell(struct wl_client *client, void *data, uint32_t version, uint32_t id)

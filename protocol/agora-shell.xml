@@ -36,7 +36,7 @@
     Copyright © 2026 Kyle J. Cardoza.
   </copyright>
 
-  <interface name="agora_shell" version="13">
+  <interface name="agora_shell" version="14">
     <description summary="the window server's own window management">
       One global. It hands out the three objects above it: a window, which is what a surface becomes, an output,
       which is where the work area comes from, and a window list, which is what a shell component asks for.
@@ -357,6 +357,101 @@
       </description>
       <arg name="id" type="uint" summary="any window of the application, from the window list"/>
     </request>
+
+    <request name="start_drag" since="14">
+      <description summary="this client is dragging, and these are the types it can serve">
+        **A DRAG IS NOT A COPY, SO IT IS NOT THE SELECTION.** A person dragging a file has copied nothing, and a drag
+        that went through the clipboard would take the clipboard away from them for the length of the gesture. This is
+        therefore its own claim with its own types — the same shape as `set_selection`, a different subject — and the
+        payload travels the same way: the server keeps no bytes, and a destination asks for a type and gets an fd
+        (`drag_data_requested` to this client, `drag_data` to the destination).
+
+        **THE SOURCE HANDLES ITS OWN WINDOWS**, as an application does on the Mac: the server routes the drag to other
+        clients' surfaces only, so a drag begun in one view and finished on another window of the SAME application is
+        that application's business and reaches `drag_enter` nowhere. A drag over a surface of another client gets
+        `drag_enter`, `drag_motion` per motion, `drag_leave` when the pointer leaves, and `drag_drop` on the release —
+        in the DESTINATION's own surface coordinates, which is what a view needs to hit-test with.
+
+        `serial` is the press that began the drag, for a client that wants to correlate it; the server does not read it.
+      </description>
+      <arg name="serial" type="uint"/>
+      <arg name="types" type="array" summary="MIME types this client can serve, each NUL-terminated, back to back"/>
+    </request>
+
+    <request name="cancel_drag" since="14">
+      <description summary="this client is no longer dragging">
+        The gesture was abandoned (Escape, a refusal) before a release. The destination, if there is one, hears
+        `drag_leave` and no drop.
+      </description>
+    </request>
+
+    <request name="request_drag_data" since="14">
+      <description summary="give me a readable fd for this type of the drag">
+        The destination's half of the payload: the server creates a pipe, hands the write end to the drag's owner
+        (`drag_data_requested`) and the read end to the asker (`drag_data`). Nothing passes through the server. A
+        request that cannot be served is answered with `drag_refused`, never by silence.
+      </description>
+      <arg name="mime_type" type="string" summary="the type wanted, exactly as it was offered"/>
+    </request>
+
+    <event name="drag_enter" since="14">
+      <description summary="a drag from another client is over one of your windows">
+        `window` is the id the window list uses, so a client finds the window it owns without a proxy for it. The
+        coordinates are in that window's surface space.
+      </description>
+      <arg name="window" type="uint"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="types" type="array"/>
+    </event>
+
+    <event name="drag_motion" since="14">
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </event>
+
+    <event name="drag_leave" since="14"/>
+
+    <event name="drag_drop" since="14">
+      <description summary="the release happened over this window">
+        The destination answers by asking for the type it wants (`request_drag_data`); the source hears
+        `drag_finished` either way, because the gesture is over whatever the destination decides.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </event>
+
+    <event name="drag_finished" since="14">
+      <description summary="the drag this client started is over">
+        Sent to the source when the gesture ends — a release, a cancel, or the drag's owner going away is not told
+        because it is gone.
+      </description>
+    </event>
+
+    <event name="drag_data_requested" since="14">
+      <description summary="a destination wants this type: write it into this fd">
+        Sent to the drag's owner. Write the payload and close the descriptor; EOF is the end of it.
+      </description>
+      <arg name="mime_type" type="string"/>
+      <arg name="fd" type="fd"/>
+    </event>
+
+    <event name="drag_data" since="14">
+      <description summary="the fd to read this type of the drag from">
+        Sent to the asker, before the owner has written anything.
+      </description>
+      <arg name="mime_type" type="string"/>
+      <arg name="fd" type="fd"/>
+    </event>
+
+    <event name="drag_refused" since="14">
+      <description summary="this drag cannot serve that type">
+        The answer that is not silence: there is no drag, or the drag does not offer the type.
+      </description>
+      <arg name="mime_type" type="string"/>
+      <arg name="reason" type="uint"/>
+    </event>
+  
   </interface>
 
   <interface name="agora_dock_menu" version="1">

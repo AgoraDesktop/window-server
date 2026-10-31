@@ -523,6 +523,15 @@ struct aws_server {
 	struct wl_resource *selection_owner;
 	char *selection_types[32];
 	int selection_type_count;
+	/* **AND THE DRAG, WHICH IS A SEPARATE CLAIM FROM THE SELECTION AND NOT A COPY OF ONE.** A person dragging a file has
+	 * copied nothing, so a drag that rode the clipboard would take the clipboard away for the length of the gesture. It is
+	 * the same SHAPE as the selection — an owner, a vocabulary, an fd for the payload — with a different subject: the owner
+	 * is the shell resource that called `start_drag`, and `drag_surface` is the OTHER client's surface the pointer is over
+	 * right now (nil when the gesture is over the source's own windows or the desktop, which is the source's business). */
+	struct wl_resource *drag_owner;
+	char *drag_types[32];
+	int drag_type_count;
+	struct aws_surface *drag_surface;
 	/* **AND THE MENUS A DOCK IS WAITING FOR.** One node per `get_dock_menu`, keyed by the window it asked about; see
 	 * `struct aws_dock_menu`. Walked when an application answers, and by nothing else. */
 	struct wl_list dock_menus;
@@ -858,6 +867,24 @@ int aws_surface_drawn_with_parent(const struct aws_surface *surface);
 
 /* The packing of the status area, which a client adding or removing an item has just invalidated. */
 void aws_shell_place_status_items(struct aws_server *server);
+
+/* **THE DRAG'S TWO HALVES: THE PAYLOAD IS THE SHELL'S, THE GESTURE IS THE SEAT'S.** The shell owns the claim and the fd
+ * path (`aws_shell_drag_clear` ends it, and `drag_refused` is answered from here); the seat owns where the pointer is, so
+ * routing, enter/leave and the drop come from `seat.c`. The binding lookup is the shell's because the list of bound
+ * shells is. */
+void aws_shell_drag_clear(struct aws_server *server);
+struct wl_resource *aws_shell_binding_for_client(struct aws_server *server, struct wl_client *client);
+/* **AND THE FIVE EVENTS AS DOORS OF THEIR OWN, SO THE SEAT NAMES A SURFACE AND THE SHELL DOES THE WIRE.** The seat knows
+ * which surface the drag is over and where the pointer is; the shell knows which resource a client's events go to and how
+ * the protocol spells them. A unit test of the seat interposes these five, which it could not do with the generated
+ * `static inline` senders the shell uses. */
+void aws_shell_send_drag_enter(struct aws_server *server, struct aws_surface *surface, int x, int y);
+void aws_shell_send_drag_motion(struct aws_server *server, struct aws_surface *surface, int x, int y);
+void aws_shell_send_drag_leave(struct aws_server *server, struct aws_surface *surface);
+void aws_shell_send_drag_drop(struct aws_server *server, struct aws_surface *surface, int x, int y);
+void aws_shell_send_drag_finished(struct aws_server *server);
+void aws_seat_drag_track(struct aws_server *server, int x, int y);
+void aws_seat_drag_finish(struct aws_server *server);
 
 /* **ONE NODE PER BOUND `agora_shell`, AND IT OWNS NOTHING BUT ITS PLACE IN THE LIST.** The selection is announced
  * unsolicited, so the list is the only way to reach a client that never asked; the resource is kept beside it because a
