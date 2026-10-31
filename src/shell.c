@@ -1319,6 +1319,18 @@ static int fn_types_from_array(struct wl_array *types, char **list, int limit)
 	return count;
 }
 
+/* **THE GESTURE ENDS AND THE CLAIM DOES NOT.** The routing state goes — no more enter/motion to anyone — and the owner
+ * keeps answering `request_drag_data` until it says `finish_drag`, because the destination's drop handler is exactly
+ * where the payload gets read. */
+void aws_shell_drag_end(struct aws_server *server)
+{
+	if (server == NULL) {
+		return;
+	}
+	server->drag_active = 0;
+	server->drag_surface = NULL;
+}
+
 void aws_shell_drag_clear(struct aws_server *server)
 {
 	int i;
@@ -1331,12 +1343,14 @@ void aws_shell_drag_clear(struct aws_server *server)
 		server->drag_types[i] = NULL;
 	}
 	server->drag_type_count = 0;
+	server->drag_mask = 0;
+	server->drag_active = 0;
 	server->drag_owner = NULL;
 	server->drag_surface = NULL;
 }
 
 static void shell_start_drag(struct wl_client *client, struct wl_resource *resource, uint32_t serial,
-			     struct wl_array *types)
+			     struct wl_array *types, uint32_t source_mask)
 {
 	struct aws_server *server = wl_resource_get_user_data(resource);
 	char *list[32];
@@ -1359,6 +1373,26 @@ static void shell_start_drag(struct wl_client *client, struct wl_resource *resou
 		}
 	}
 	server->drag_owner = resource;
+	server->drag_mask = source_mask;
+	server->drag_active = 1;
+	if (getenv("AGORA_DRAG_DIAG") != NULL) {
+		fprintf(stderr, "  DIAG drag: start from client, %d type(s), mask %u\n", count, source_mask);
+	}
+}
+
+static void shell_finish_drag(struct wl_client *client, struct wl_resource *resource)
+{
+	struct aws_server *server = wl_resource_get_user_data(resource);
+
+	(void)client;
+	if (server == NULL) {
+		return;
+	}
+	/* Only the client that owns the claim can end it; a destination that asked would otherwise be able to take a payload
+	 * away from the source of a drag it is still receiving. */
+	if (server->drag_owner == resource) {
+		aws_shell_drag_clear(server);
+	}
 }
 
 static void shell_cancel_drag(struct wl_client *client, struct wl_resource *resource)
@@ -1442,7 +1476,8 @@ static void fn_announce_types(struct aws_server *server, struct wl_resource *bin
 			memcpy(slot, server->drag_types[i], length);
 		}
 	}
-	agora_shell_send_drag_enter(binding, surface->id, x - surface->x, y - surface->y, &types);
+	agora_shell_send_drag_enter(binding, surface->resource, x - surface->x, y - surface->y, &types,
+				    server->drag_mask);
 	wl_array_release(&types);
 }
 
@@ -1567,6 +1602,7 @@ static const struct agora_shell_interface agora_shell_implementation = {
 	shell_activate_application,
 	shell_start_drag,
 	shell_cancel_drag,
+	shell_finish_drag,
 	shell_request_drag_data,
 };
 

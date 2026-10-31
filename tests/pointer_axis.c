@@ -77,6 +77,13 @@ void aws_shell_drag_clear(struct aws_server *server)
 	(void)server;
 }
 
+/* **AND THE END OF THE GESTURE, WHICH LEAVES THE CLAIM STANDING** — see `aws_shell_drag_end`; a probe that never drags
+ * only ever needs the symbol. */
+void aws_shell_drag_end(struct aws_server *server)
+{
+	(void)server;
+}
+
 /* **AND THE FIVE EVENTS, WHICH THE SEAT ASKS FOR ON A PATH WITH NO DRAG IN FLIGHT.** A drag owner of nil means none of
  * them is reached, but the symbols have to exist for the file to link — the same reason the other stand-ins are here. */
 void aws_shell_send_drag_enter(struct aws_server *server, struct aws_surface *surface, int x, int y)

@@ -36,7 +36,7 @@
     Copyright © 2026 Kyle J. Cardoza.
   </copyright>
 
-  <interface name="agora_shell" version="14">
+  <interface name="agora_shell" version="17">
     <description summary="the window server's own window management">
       One global. It hands out the three objects above it: a window, which is what a surface becomes, an output,
       which is where the work area comes from, and a window list, which is what a shell component asks for.
@@ -358,7 +358,7 @@
       <arg name="id" type="uint" summary="any window of the application, from the window list"/>
     </request>
 
-    <request name="start_drag" since="14">
+    <request name="start_drag" since="15">
       <description summary="this client is dragging, and these are the types it can serve">
         **A DRAG IS NOT A COPY, SO IT IS NOT THE SELECTION.** A person dragging a file has copied nothing, and a drag
         that went through the clipboard would take the clipboard away from them for the length of the gesture. This is
@@ -373,9 +373,26 @@
         in the DESTINATION's own surface coordinates, which is what a view needs to hit-test with.
 
         `serial` is the press that began the drag, for a client that wants to correlate it; the server does not read it.
+
+        `source_mask` IS THE SOURCE'S OWN ANSWER TO WHAT THE DESTINATION MAY DO WITH IT — `NSDraggingSource`'s operation
+        mask, as `NSDragOperation`'s bits. It is carried because a destination cannot invent it: it decides whether a
+        drop is a copy or a move, and a destination left to guess would either refuse a legitimate move or claim the
+        right to make one it was never granted.
       </description>
       <arg name="serial" type="uint"/>
       <arg name="types" type="array" summary="MIME types this client can serve, each NUL-terminated, back to back"/>
+      <arg name="source_mask" type="uint" summary="the NSDragOperation bits the source permits"/>
+    </request>
+
+    <request name="finish_drag" since="17">
+      <description summary="the gesture is over; the claim may go">
+        **THE CLAIM OUTLIVES THE GESTURE BY AS MUCH TIME AS A DESTINATION NEEDS TO READ THE PAYLOAD.** A drop is delivered
+        to a destination that then asks for a type — so clearing the source's claim the instant the button came up would
+        refuse the read that the drop exists to make. The source says when it is done, which is after its own session has
+        ended; `cancel_drag` remains the answer for a gesture abandoned before a release.
+
+        Sending this when no drag is claimed is not an error.
+      </description>
     </request>
 
     <request name="cancel_drag" since="14">
@@ -394,15 +411,20 @@
       <arg name="mime_type" type="string" summary="the type wanted, exactly as it was offered"/>
     </request>
 
-    <event name="drag_enter" since="14">
+    <event name="drag_enter" since="16">
       <description summary="a drag from another client is over one of your windows">
-        `window` is the id the window list uses, so a client finds the window it owns without a proxy for it. The
-        coordinates are in that window's surface space.
+        **THE SURFACE IS AN OBJECT, BECAUSE A CLIENT CAN ONLY RESOLVE WHAT IT MADE.** The window list's `uint` id is the
+        compositor's own handle: a client has never been told its own, so an id would name a window the client cannot
+        find. A `wl_surface` is the object the client created for that window, and the wire carries it as the object it
+        is — the same argument `wl_pointer.enter` takes, and the reason it takes it.
+
+        The coordinates are in that surface's space, which is what a view hit-tests with.
       </description>
-      <arg name="window" type="uint"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
       <arg name="x" type="int"/>
       <arg name="y" type="int"/>
       <arg name="types" type="array"/>
+      <arg name="source_mask" type="uint" summary="what the source permits, in NSDragOperation's bits"/>
     </event>
 
     <event name="drag_motion" since="14">

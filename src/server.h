@@ -532,6 +532,14 @@ struct aws_server {
 	char *drag_types[32];
 	int drag_type_count;
 	struct aws_surface *drag_surface;
+	/* **WHAT THE SOURCE SAID A DESTINATION MAY DO WITH ITS DRAG**, in `NSDragOperation`'s bits — a copy, a move, a link.
+	 * Carried to every `drag_enter` because a destination that had to invent it would either refuse a legitimate move or
+	 * claim a right it was never granted. */
+	uint32_t drag_mask;
+	/* **AND WHETHER THE GESTURE IS STILL GOING.** The CLAIM (owner, types, mask) outlives the drop, because a destination
+	 * asks for the payload from its drop handler; the GESTURE does not, and a motion after the button came up must route
+	 * nowhere. Two facts, two fields. */
+	int drag_active;
 	/* **AND THE MENUS A DOCK IS WAITING FOR.** One node per `get_dock_menu`, keyed by the window it asked about; see
 	 * `struct aws_dock_menu`. Walked when an application answers, and by nothing else. */
 	struct wl_list dock_menus;
@@ -873,6 +881,7 @@ void aws_shell_place_status_items(struct aws_server *server);
  * routing, enter/leave and the drop come from `seat.c`. The binding lookup is the shell's because the list of bound
  * shells is. */
 void aws_shell_drag_clear(struct aws_server *server);
+void aws_shell_drag_end(struct aws_server *server);
 struct wl_resource *aws_shell_binding_for_client(struct aws_server *server, struct wl_client *client);
 /* **AND THE FIVE EVENTS AS DOORS OF THEIR OWN, SO THE SEAT NAMES A SURFACE AND THE SHELL DOES THE WIRE.** The seat knows
  * which surface the drag is over and where the pointer is; the shell knows which resource a client's events go to and how

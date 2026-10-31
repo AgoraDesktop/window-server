@@ -846,10 +846,13 @@ void aws_seat_drag_track(struct aws_server *server, int x, int y)
 	struct aws_surface *under;
 	struct aws_surface *destination = NULL;
 
-	if (server == NULL || server->drag_owner == NULL) {
+	if (server == NULL || server->drag_owner == NULL || !server->drag_active) {
 		return;
 	}
 	under = aws_surface_at(server, x, y);
+	if (getenv("AGORA_DRAG_DIAG") != NULL) {
+		fprintf(stderr, "  DIAG drag: track (%d,%d) under %p\n", x, y, (void *)under);
+	}
 	if (under != NULL && under->resource != NULL
 	    && wl_resource_get_client(under->resource) != wl_resource_get_client(server->drag_owner)) {
 		destination = under;
@@ -865,7 +868,12 @@ void aws_seat_drag_track(struct aws_server *server, int x, int y)
 	}
 	server->drag_surface = destination;
 	if (destination != NULL) {
+		if (getenv("AGORA_DRAG_DIAG") != NULL) {
+			fprintf(stderr, "  DIAG drag: ENTER surface %u\n", destination->id);
+		}
 		aws_shell_send_drag_enter(server, destination, x, y);
+	} else if (getenv("AGORA_DRAG_DIAG") != NULL) {
+		fprintf(stderr, "  DIAG drag: over nobody\n");
 	}
 }
 
@@ -877,11 +885,15 @@ void aws_seat_drag_finish(struct aws_server *server)
 	if (server == NULL || server->drag_owner == NULL) {
 		return;
 	}
+	if (getenv("AGORA_DRAG_DIAG") != NULL) {
+		fprintf(stderr, "  DIAG drag: finish, destination %p\n", (void *)server->drag_surface);
+	}
 	if (server->drag_surface != NULL) {
 		aws_shell_send_drag_drop(server, server->drag_surface, server->pointer_x, server->pointer_y);
 	}
 	aws_shell_send_drag_finished(server);
-	aws_shell_drag_clear(server);
+	/* **THE ROUTING ENDS AND THE CLAIM STAYS**: the destination is about to ask for the payload it was just dropped. */
+	aws_shell_drag_end(server);
 }
 
 /* **HOW LONG AN AXIS HAS TO BE QUIET BEFORE ITS SCROLL IS OVER.** The protocol names the event and not the number:
