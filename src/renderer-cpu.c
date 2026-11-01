@@ -305,10 +305,13 @@ static void aws_output_draw_shadow(struct aws_backend *output, int x, int y, int
  * IT IS THE SAME RADIUS THE SHADOW IS DRAWN WITH (`AWS_SHADOW_RADIUS`), which is what makes the two agree: a shadow
  * cut to six points around a window whose corners are six points is one shape; two radii would be two.
  *
- * AND A CORNER IS ROUNDED ONLY WHERE THE WINDOW IS NOT FLUSH WITH THE OUTPUT. A maximised window, and the menu bar
- * itself, span the screen's edges — rounding their corners would cut notches out of the desktop's own edge. Each of
- * the four is decided by the two edges that meet at it, so a window flush on one side keeps its two corners there
- * and its two free ones elsewhere.
+ * AND A CORNER IS SQUARE ONLY WHERE THE WINDOW'S EDGE *IS* THE OUTPUT'S — WHICH IS NOT THE SAME AS TOUCHING IT. The
+ * desktop, the menu bar and a maximised window run the length of an edge, and rounding their corners would cut notches
+ * out of the screen's own edge; a window merely pushed against an edge does not, and the Mac rounds those. MEASURED
+ * with the other rule (flush was enough): a window at the screen's left edge had its corner squared here while the
+ * client's own chrome drew a rounded six-point outline inside it, so the arc was painted in a square corner — the
+ * corner looks like it was not rounded off, which is what sent the owner looking. Each of the four is the two edges
+ * that meet at it, so a corner stays square when EITHER of its edges is a screen edge in that sense.
  *
  * A SURFACE THAT LIVES IN THE MENU BAR IS NOT A WINDOW'S SHAPE AT ALL (`AWS_MENU_BAR_HEIGHT`, the test the shadow
  * uses): the bar is flush and square, and a status item is a piece of the bar, not a pane on the desktop.
@@ -374,31 +377,39 @@ static unsigned shape_coverage(const struct aws_backend *output, const struct aw
 	if (row >= radius && row < height - radius) {
 		return 255;
 	}
-	/* WHICH CORNER, AND MAY IT BE ROUNDED AT ALL. */
-	if (column < radius && row < radius) {
-		if (!(sx > 0 && sy > 0) || hangs_from_titlebar) {
-			return 255;
+	/* WHICH CORNER, AND MAY IT BE ROUNDED AT ALL. **AN EDGE IS THE SCREEN'S ONLY WHEN THE SURFACE RUNS THE LENGTH OF IT**:
+	 * touching an edge is not spanning it, and a window against an edge keeps the corners the Mac gives it. */
+	{
+		int edge_left = (sx == 0) && (sw >= output->width);
+		int edge_right = (sx + sw >= output->width) && (sw >= output->width);
+		int edge_top = (sy == 0) && (sh >= output->height);
+		int edge_bottom = (sy + sh >= output->height) && (sh >= output->height);
+
+		if (column < radius && row < radius) {
+			if (edge_left || edge_top || hangs_from_titlebar) {
+				return 255;
+			}
+			cx = radius;
+			cy = radius;
+		} else if (column >= width - radius && row < radius) {
+			if (edge_right || edge_top || hangs_from_titlebar) {
+				return 255;
+			}
+			cx = width - radius;
+			cy = radius;
+		} else if (column < radius && row >= height - radius) {
+			if (edge_left || edge_bottom) {
+				return 255;
+			}
+			cx = radius;
+			cy = height - radius;
+		} else {
+			if (edge_right || edge_bottom) {
+				return 255;
+			}
+			cx = width - radius;
+			cy = height - radius;
 		}
-		cx = radius;
-		cy = radius;
-	} else if (column >= width - radius && row < radius) {
-		if (!(sx + width < output->width && sy > 0) || hangs_from_titlebar) {
-			return 255;
-		}
-		cx = width - radius;
-		cy = radius;
-	} else if (column < radius && row >= height - radius) {
-		if (!(sx > 0 && sy + height < output->height)) {
-			return 255;
-		}
-		cx = radius;
-		cy = height - radius;
-	} else {
-		if (!(sx + width < output->width && sy + height < output->height)) {
-			return 255;
-		}
-		cx = width - radius;
-		cy = height - radius;
 	}
 	/* **FROM THE PIXEL'S CENTRE, BECAUSE THAT IS WHAT A PIXEL IS.** A pixel at column `c` covers the square
 	 * `[c, c+1]`, so its centre is `c + 0.5`; measuring from the corner instead biases the whole shape half a point
