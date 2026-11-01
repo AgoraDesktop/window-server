@@ -154,12 +154,22 @@ static void window_pointer_global(void *data, struct agora_window *window, int32
 	(void)y;
 }
 
+/* **`open_file` IS THE ONE EVENT THIS PROBE DOES NOT ASK FOR**, and the table is positional — a slot left out would
+ * shift every handler after it onto the wrong event. So the slot is here, counting what arrives or ignoring it. */
+static void window_open_file(void *data, struct agora_window *window, const char *path)
+{
+	(void)data;
+	(void)window;
+	(void)path;
+}
+
 static const struct agora_window_listener window_listener = {
 	window_ignored,           /* close */
 	window_work_area_changed,
 	window_pointer_global,
 	window_ignored,           /* reopen */
 	window_ignored,           /* dock_menu_requested */
+	window_open_file,          /* open_file */
 	window_item_ignored,      /* dock_menu_action */
 };
 

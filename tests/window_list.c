@@ -210,6 +210,15 @@ static void window_dock_menu_action(void *data, struct agora_window *window, int
 	state->last_action_item = (int)item;
 }
 
+/* **`open_file` IS THE ONE EVENT THIS PROBE DOES NOT ASK FOR**, and the table is positional — a slot left out would
+ * shift every handler after it onto the wrong event. So the slot is here, counting what arrives or ignoring it. */
+static void window_open_file(void *data, struct agora_window *window, const char *path)
+{
+	(void)data;
+	(void)window;
+	(void)path;
+}
+
 /* IN THE PROTOCOL'S OWN ORDER: `close`, `work_area_changed`, `pointer_global`, `reopen`, `dock_menu_requested`,
  * `dock_menu_action`, `quit`. */
 static const struct agora_window_listener window_listener = {
@@ -218,6 +227,7 @@ static const struct agora_window_listener window_listener = {
 	window_pointer_global,
 	window_reopen,
 	window_dock_menu_requested,
+	window_open_file,
 	window_dock_menu_action,
 	window_quit,
 };

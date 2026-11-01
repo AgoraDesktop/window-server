@@ -36,7 +36,7 @@
     Copyright © 2026 Kyle J. Cardoza.
   </copyright>
 
-  <interface name="agora_shell" version="17">
+  <interface name="agora_shell" version="18">
     <description summary="the window server's own window management">
       One global. It hands out the three objects above it: a window, which is what a surface becomes, an output,
       which is where the work area comes from, and a window list, which is what a shell component asks for.
@@ -384,6 +384,21 @@
       <arg name="source_mask" type="uint" summary="the NSDragOperation bits the source permits"/>
     </request>
 
+    <request name="open_file" since="18">
+      <description summary="ask an application to open a path — a folder, or a document">
+        **A DOCK CLICK THAT MEANS "SHOW ME THIS", WITH THE PATH TO SHOW.** `reopen_window` is the same question with
+        no subject: the application is asked what a click on its tile should do, and answers for itself. This is the
+        other half — the trash tile, a recent item, a path a shell has in hand — and the window is the ADDRESS, not
+        the subject, exactly as `reopen_window`'s is: both sides name each other by window id and nothing else.
+
+        The application hears `agora_window.open_file` and decides: a folder is a window on it, a document is opened
+        by whatever owns it. A path the application cannot use is the application's to refuse, silently, because a
+        shell cannot know what an application can show.
+      </description>
+      <arg name="id" type="uint" summary="any window of the application, from the window list"/>
+      <arg name="path" type="string" summary="an absolute path, in the application's own file system"/>
+    </request>
+
     <request name="finish_drag" since="17">
       <description summary="the gesture is over; the claim may go">
         **THE CLAIM OUTLIVES THE GESTURE BY AS MUCH TIME AS A DESTINATION NEEDS TO READ THE PAYLOAD.** A drop is delivered
@@ -629,7 +644,7 @@
     </event>
   </interface>
 
-  <interface name="agora_window" version="13">
+  <interface name="agora_window" version="14">
     <description summary="a window, placed and sized by its application">
       **THE APPLICATION IS HONOURED.** Every set_ here is a DEMAND the server writes down and acts on, not a
       request it may refuse or adjust — which is the inversion of `xdg_toplevel` and the whole point of this
@@ -914,6 +929,18 @@
         that never answers leaves the Dock to its timeout, which is the only thing a shell can do about an
         application that has stopped reading its own events.
       </description>
+    </event>
+
+    <event name="open_file" since="14">
+      <description summary="a shell asking this application to open a path">
+        The answer to `open_file`, delivered to a window of the application it names. THE APPLICATION DECIDES what
+        opening means — a folder is a window on it, a document goes to its owner — and a path it cannot use is
+        ignored, because the shell that asked could not know.
+
+        It is delivered to a window because window ids are the only names the two sides share; the window itself is
+        not opened, closed, raised or focused by it.
+      </description>
+      <arg name="path" type="string"/>
     </event>
 
     <request name="set_dock_menu" since="6">

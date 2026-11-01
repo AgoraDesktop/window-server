@@ -998,6 +998,25 @@ static void shell_reopen_window(struct wl_client *client, struct wl_resource *re
 	agora_window_send_reopen(surface->agora_window);
 }
 
+/* **AND THE SAME ADDRESS WITH A SUBJECT: THE PATH A SHELL WANTS SHOWN.** A trash tile, a recent item — the shell has
+ * the path and the application is the one that knows what opening it means. The window is the ADDRESS again, so this
+ * is `shell_reopen_window`'s shape with one more argument, and the version guard is the same rule for the same reason:
+ * an event a client never declared would be a protocol error on its connection rather than a request it ignored. */
+static void shell_open_file(struct wl_client *client, struct wl_resource *resource, uint32_t id, const char *path)
+{
+	struct aws_server *server = wl_resource_get_user_data(resource);
+	struct aws_surface *surface = surface_for_id(server, id);
+
+	(void)client;
+	if (surface == NULL || surface->agora_window == NULL || path == NULL) {
+		return;
+	}
+	if (wl_resource_get_version(surface->agora_window) < 14) {
+		return;
+	}
+	agora_window_send_open_file(surface->agora_window, path);
+}
+
 /* ===================================================================================================
  * THE DOCK MENU: ONE QUESTION, ONE ANSWER, AND ONE CHOICE SENT HOME.
  *
@@ -1601,6 +1620,7 @@ static const struct agora_shell_interface agora_shell_implementation = {
 	shell_quit_window,
 	shell_activate_application,
 	shell_start_drag,
+	shell_open_file,
 	shell_cancel_drag,
 	shell_finish_drag,
 	shell_request_drag_data,
