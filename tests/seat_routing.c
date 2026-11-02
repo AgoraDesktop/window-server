@@ -265,6 +265,30 @@ int main(void)
 	aws_seat_pointer_button(&server, 0x110, 0);
 	check(server.pointer_capture == NULL, "and the RELEASE gives the pointer back — the server does not trust the client to");
 
+	/* 7b. **A PRESS HOLDS THE POINTER UNTIL THE LAST BUTTON COMES UP, FOCUS INCLUDED.** This is the implicit grab, and
+	 * the reported bug it answers is "it keeps moving files on its own": a press inside a window, the hand leaving it,
+	 * the release landing over a neighbour — the window never heard the release because a `leave` had told it the
+	 * pointer was not its any more, so it went on believing the button was down. Every later motion over it arrived as
+	 * a drag, and the click after that was a drop onto whatever was under the pointer. */
+	reset(&server);
+	server.display = display;
+	s_under_pointer = &s_a;
+	aws_seat_pointer_button(&server, 0x110, 1);
+	check(server.pointer_focus == &s_a && server.pointer_press_surface == &s_a,
+	      "a press records the surface it landed on");
+	s_under_pointer = &s_b;
+	aws_seat_pointer_motion(&server, 300, 300);
+	check(server.pointer_focus == &s_a,
+	      "and the hand moving onto a NEIGHBOUR does not take the pointer from it — no leave reaches the window");
+	aws_seat_pointer_recheck(&server);
+	check(server.pointer_focus == &s_a, "a recheck agrees, so a surface appearing under the hand cannot steal it either");
+	aws_seat_pointer_button(&server, 0x110, 0);
+	check(server.pointer_press_surface == NULL && server.pointer_buttons == 0,
+	      "the last release ends the hold, and the next motion goes back to what is under the pointer");
+	s_under_pointer = &s_b;
+	aws_seat_pointer_motion(&server, 300, 300);
+	check(server.pointer_focus == &s_b, "which is the neighbour now");
+
 	/* 8. **AND THE FALLBACK IS UNTOUCHED BY ANY OF IT.** A menu's grab survives a press and a release with no capture
 	 * in sight, which is what keeps the two doors from becoming one. */
 	reset(&server);

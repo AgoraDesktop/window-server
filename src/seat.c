@@ -359,6 +359,17 @@ struct aws_surface *aws_seat_pointer_target(struct aws_server *server, struct aw
 	if (server->pointer_capture != NULL) {
 		return server->pointer_capture;
 	}
+	/* **AND A PRESS HOLDS THE POINTER UNTIL THE LAST BUTTON COMES UP**, which is the implicit grab every desktop has
+	 * and the one thing the three answers above were missing. It is not only where the events GO: the pointer's FOCUS
+	 * has to stay too, because a `leave` is what tells the client the pointer is no longer its — and a client that was
+	 * told that drops the release it is owed. MEASURED as the whole of "it keeps moving files on its own": a press
+	 * inside a window, the hand leaving it, the release landing outside — the window never heard the release, its
+	 * next motion arrived as a drag, and the click after that was a drop onto whatever was under the pointer.
+	 *
+	 * The record is dropped with the last button, so this holds for exactly the length of the gesture. */
+	if (server->pointer_press_surface != NULL && server->pointer_buttons != 0) {
+		return server->pointer_press_surface;
+	}
 	if (under != NULL) {
 		return under;
 	}
@@ -406,6 +417,10 @@ void aws_seat_surface_gone(struct aws_server *server, struct aws_surface *surfac
 	/* AND AN INTERACTIVE CAPTURE, or a window destroyed mid-drag would keep the whole desktop's pointer. */
 	if (server->pointer_capture == surface) {
 		server->pointer_capture = NULL;
+	}
+	/* AND A PRESS THAT HAS NOT COME UP YET: the surface it would have been released into is gone. */
+	if (server->pointer_press_surface == surface) {
+		server->pointer_press_surface = NULL;
 	}
 	/* **AND THE KEYBOARD GOES SOMEWHERE ELSE RATHER THAN NOWHERE.** The window that had it is gone; a desktop with
 	 * no key window can offer no menu bar, so the focus moves to the topmost window that is left. */
@@ -653,6 +668,15 @@ void aws_seat_pointer_leave(struct aws_server *server)
 	/* **THE FRAME THAT TAKES THE CURSOR AWAY.** A compositor-owned pointer is part of the picture, so the pixels it
 	 * occupied have to be painted over — and nothing else does. */
 	pointer_damage(server, was_inside, was_x, was_y, 0, was_x, was_y);
+	/* **BUT NOT WHILE A BUTTON IS DOWN, AND THIS IS THE HALF THAT MADE THE OTHER HALF WORK.** "The pointer left the
+	 * output" is the HOST's window saying so — the nested X window — and X (like every host) keeps delivering the
+	 * gesture to the window that took the press, so the release is still coming. Sending `leave` here took the focus
+	 * from the client that was owed that release: the client dropped it, went on believing the button was down, and
+	 * turned every later motion into a drag whose next click was a drop. The press record is what says the gesture is
+	 * unfinished; the last button clears it, and the next leave behaves as it always did. */
+	if (server->pointer_press_surface != NULL) {
+		return;
+	}
 	pointer_set_focus(server, NULL);
 }
 
@@ -769,6 +793,22 @@ void aws_seat_pointer_button(struct aws_server *server, uint32_t evdev_button, i
 	 * a window that is holding the pointer for a drag, which is how a drag hears its own release. */
 	surface = aws_seat_pointer_target(server, surface);
 	pointer_set_focus(server, surface);
+	/* **THE RELEASE GOES BACK WHERE THE PRESS WENT.** A press takes the pointer for its surface until the last button
+	 * comes up, so a hand that presses inside a window and lets go outside it — the ordinary way a drag leaves one — is
+	 * heard by the window that started the gesture. Without this the release went to whatever was under the pointer, the
+	 * pressed window never saw it, and its `-mouseDown:`-without-`-mouseUp:` state turned the NEXT motion over it into a
+	 * drag whose next click was a drop. That is a file manager moving files nobody dragged.
+	 *
+	 * The press is recorded here rather than at the top of this function because the answer is the surface that
+	 * actually received it, capture and fallback included. A capture keeps its own surface for the whole press, so the
+	 * two agree; the record is what survives the pointer leaving. */
+	if (pressed) {
+		if (server->pointer_press_surface == NULL) {
+			server->pointer_press_surface = surface;
+		}
+	} else if (server->pointer_press_surface != NULL) {
+		surface = server->pointer_press_surface;
+	}
 	/* CLICK-TO-FOCUS, AND IT HAPPENS ON THE WAY DOWN: the window being clicked is the window the keyboard
 	 * should be talking to, and a client that heard the button before the focus would be drawing a focused
 	 * control in an unfocused window.
@@ -810,6 +850,9 @@ void aws_seat_pointer_button(struct aws_server *server, uint32_t evdev_button, i
 		server->pointer_buttons |= 1u << (evdev_button & 31u);
 	} else {
 		server->pointer_buttons &= ~(1u << (evdev_button & 31u));
+		if (server->pointer_buttons == 0) {
+			server->pointer_press_surface = NULL;
+		}
 		if (server->pointer_buttons == 0 && server->pointer_capture != NULL) {
 			/* BOTH COPIES, so the surface's own flag does not say it still holds a pointer it has lost. */
 			server->pointer_capture->pointer_capture = 0;

@@ -563,6 +563,12 @@ struct aws_server {
 	struct aws_surface *pointer_focus;	/* the surface the pointer is over, or NULL */
 	struct aws_surface *pointer_grab;	/* the surface that takes the pointer over NO surface, or NULL */
 	struct aws_surface *pointer_capture;	/* the surface that takes the pointer WHEREVER it is, or NULL */
+	/* **WHERE THE BUTTON WENT DOWN.** A press belongs to the surface it landed on until the last button comes up, and
+	 * the RELEASE is delivered there even if the pointer has since left it — the implicit grab every desktop has, as
+	 * much as it is needed for a hand that drags a window's edge. Without it the surface that got the press never heard
+	 * the release, went on believing the button was down, and turned every later motion over it into a drag whose next
+	 * click completed a DROP: MEASURED in Workspace as "it keeps moving files on its own". */
+	struct aws_surface *pointer_press_surface;
 	uint32_t pointer_buttons;		/* the pointer's buttons that are down, as a bit per evdev code */
 	struct aws_surface *keyboard_focus;	/* the surface the keyboard goes to, or NULL */
 	/* **AND WHETHER A SHELL PUT IT THERE ON PURPOSE.** A window that says `set_activatable 0` never takes the
