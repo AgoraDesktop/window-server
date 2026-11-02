@@ -658,7 +658,7 @@ window-server: the host display is 1080 px on 286 mm (96 dpi), so its scale is 1
 window-server: the pointer is left_ptr from the cursor theme at /home/you/.icons/Vimix (24 points)
 ```
 
-**THE THEME IS INSTALLED, NOT ASSUMED.** `cmake --install` puts it at `<prefix>/share/icons/Vimix`, beside Frost and
+**THE THEME IS INSTALLED, NOT ASSUMED.** `cmake --install` puts it at `<prefix>/share/icons/Vimix`, beside the icon themes and
 inside the freedesktop theme directories, so the compositor finds it AND any other Xcursor-aware program on the machine
 does (`XCURSOR_THEME=Vimix`); that path is compiled in as the default. `AGORA_CURSOR_THEME` (or
 `--cursor-theme`) points the server at any other theme directory, `AGORA_CURSOR_SIZE` (or `--cursor-size`) changes the

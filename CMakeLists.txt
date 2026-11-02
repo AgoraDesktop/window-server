@@ -227,7 +227,7 @@ endif()
 #
 # The vendored Vimix theme (GPL-3.0, `assets/cursors/Vimix`) is installed as an ordinary freedesktop cursor theme
 # and its location is compiled in as the default, the same way `libagora-iconservices` installs and defaults to
-# Frost. `AGORA_CURSOR_THEME` overrides it at run time, and a machine with no theme at all still gets a pointer:
+# the desktop theme. `AGORA_CURSOR_THEME` overrides it at run time, and a machine with no theme at all still gets a pointer:
 # `src/cursor.c` draws one. The path is the INSTALL prefix's, from CMake's own datadir, so a relocatable install
 # finds its own theme.
 # ---------------------------------------------------------------------------
@@ -279,7 +279,7 @@ install(TARGETS window-server
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # THE POINTER'S ARTWORK, INSTALLED WHERE AN XCURSOR THEME BELONGS (`share/icons/Vimix/cursors/*`) — the same
-# freedesktop theme directory Frost installs into, so the compositor's compiled default finds it AND so does any
+# freedesktop theme directory the icon themes install into, so the compositor's compiled default finds it AND so does any
 # other Xcursor-aware program on the machine (`XCURSOR_THEME=Vimix`).
 install(DIRECTORY assets/cursors/Vimix
     DESTINATION ${CMAKE_INSTALL_DATADIR}/icons)
