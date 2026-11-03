@@ -1075,10 +1075,16 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 	/* **THE FOUR CORNER DECISIONS, WHICH ARE `shape_coverage`'S AND NOT A SECOND OPINION.** A corner is rounded
 	 * only where the window is free of the output's own edges; a menu hanging from the bar keeps its top corners
 	 * square; a surface entirely inside the bar is a piece of the bar and is square all round. The comparison is
-	 * LOGICAL on both sides — `gl->width` is the framebuffer in device pixels, and comparing a logical window edge
-	 * with it would round the corners of a window that reaches the screen edge on any scaled output. */
+	 * DEVICE on all four sides, the same numbers `shape_coverage` rounds — `gl->width` is the framebuffer, and a
+	 * logical window edge compared with it would round the corners of a window that reaches the screen edge on any
+	 * scaled output. **AND AN EDGE IS THE SCREEN'S ONLY WHEN THE SURFACE RUNS THE LENGTH OF IT**: touching an edge is
+	 * not spanning it, and a window merely against an edge keeps the corners the Mac gives it. The flush test this
+	 * replaced squared those corners here while the client's chrome drew a rounded outline inside them. */
 	in_bar = surface->y >= 0 && surface->y + surface->frame_height <= AWS_MENU_BAR_HEIGHT;	/* logical, both sides */
-	hangs_from_bar = surface->y == AWS_MENU_BAR_HEIGHT;
+	/* **AND A MENU IS A PIECE OF THE BAR BY ITS LEVEL, NOT BY ITS y.** The work area begins at the bar's bottom edge,
+	 * so an ordinary window placed at the top of it has the menu's y exactly — squaring its top corners is the
+	 * "corner was never rounded" the CPU rule records; see `shape_coverage`. */
+	hangs_from_bar = surface->y == AWS_MENU_BAR_HEIGHT && surface->level >= AWS_MENU_BAR_LEVEL;
 	squares_top = hangs_from_bar || surface->sheet_parent != NULL;
 	radius = (float)AWS_SHADOW_RADIUS;
 	if (radius > (float)width / 2.0f) {
@@ -1087,11 +1093,22 @@ static void gl_draw_surface(struct aws_server *server, struct aws_surface *surfa
 	if (radius > (float)height / 2.0f) {
 		radius = (float)height / 2.0f;
 	}
-	tl = (!in_bar && !squares_top && surface->x > 0 && surface->y > 0) ? 1.0f : 0.0f;
-	tr = (!in_bar && !squares_top && surface->x + width < aws_output_width(server) && surface->y > 0) ? 1.0f : 0.0f;
-	bl = (!in_bar && surface->x > 0 && surface->y + height < aws_output_height(server)) ? 1.0f : 0.0f;
-	br = (!in_bar && surface->x + width < aws_output_width(server) &&
-	      surface->y + height < aws_output_height(server)) ? 1.0f : 0.0f;
+	{
+		double edge_scale = aws_output_scale(server);
+		int sx = (int)gl_round((double)surface->x * edge_scale);
+		int sy = (int)gl_round((double)surface->y * edge_scale);
+		int sw = (int)gl_round((double)surface->frame_width * edge_scale);
+		int sh = (int)gl_round((double)surface->frame_height * edge_scale);
+		int edge_left = (sx == 0) && (sw >= gl->width);
+		int edge_right = (sx + sw >= gl->width) && (sw >= gl->width);
+		int edge_top = (sy == 0) && (sh >= gl->height);
+		int edge_bottom = (sy + sh >= gl->height) && (sh >= gl->height);
+
+		tl = (!in_bar && !squares_top && !edge_left && !edge_top) ? 1.0f : 0.0f;
+		tr = (!in_bar && !squares_top && !edge_right && !edge_top) ? 1.0f : 0.0f;
+		bl = (!in_bar && !edge_left && !edge_bottom) ? 1.0f : 0.0f;
+		br = (!in_bar && !edge_right && !edge_bottom) ? 1.0f : 0.0f;
+	}
 
 	/* THE SHADOW FIRST, because it is a shadow on the things behind. */
 	if (!in_bar) {

@@ -204,6 +204,14 @@ add_test(NAME window-server-damage
 	  "$<TARGET_FILE:window-server>" "$<TARGET_FILE:window-server-test-client>"
 	  "${PYTHON3}" "${CMAKE_CURRENT_SOURCE_DIR}/check_damage.py")
 
+# **AND THE CORNER A WINDOW KEEPS WHEN IT SITS AT THE TOP OF THE WORK AREA.** A window and a menu start at the same
+# y — the bar's bottom edge — so which of them is square is a question about the surface's LEVEL, and the answer is
+# only visible as pixels.
+add_test(NAME window-server-corners
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-corners.sh"
+	  "$<TARGET_FILE:window-server>" "$<TARGET_FILE:window-server-test-client>"
+	  "${PYTHON3}" "${CMAKE_CURRENT_SOURCE_DIR}/check_corners.py")
+
 # **AND THE WORK AREA AS A CLIENT SEES IT.** The headless suite above photographs windows; this one asks the server
 # what is LEFT of the screen after a client reserves a strip — the arithmetic a Dock depends on and the one thing a
 # frame cannot show.

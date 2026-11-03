@@ -360,7 +360,12 @@ static unsigned shape_coverage(const struct aws_backend *output, const struct aw
 	/* **EXACT, IN DEVICE TERMS: the surface's top edge IS the bar's bottom edge.** Written as a rounded comparison
 	 * rather than a fuzzy one because a fuzz of half a device pixel already catches a surface that is INSIDE the bar
 	 * — and one row inside the bar is a status item, whose corners are the bar's business and must stay square. */
-	hangs_from_bar = (surface->y >= 0) && (cpu_device_edge(surface->y, scale) == bar_height);
+	/* **AND IT HAS TO BE A PIECE OF THE BAR, WHICH THE LEVEL IS AND THE GEOMETRY IS NOT.** The work area begins at the
+	 * bar's bottom edge, so a window placed at the top of it has exactly the menu's y — MEASURED, that squared the top
+	 * corners of every window dragged to the top of the screen, which looks like a window that was never rounded. A
+	 * menu is at the pop-up level and a status item above the bar's own; an ordinary window is not. */
+	hangs_from_bar = (surface->y >= 0) && (cpu_device_edge(surface->y, scale) == bar_height)
+		&& (surface->level >= AWS_MENU_BAR_LEVEL);
 	hangs_from_titlebar = hangs_from_bar || (surface->sheet_parent != NULL);
 	if (radius > width / 2) {
 		radius = width / 2;
