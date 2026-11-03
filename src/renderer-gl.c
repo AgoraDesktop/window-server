@@ -599,15 +599,22 @@ static void upload_coverage(struct gl_state *gl, struct aws_system_icon *icon, i
  * the box, which changes only with the scale. */
 static void gl_draw_system_menu_chip(struct gl_state *gl, float s)
 {
-	float width = gl_round((double)AWS_SYSTEM_MENU_WIDTH * (double)s);
-	float height = gl_round((double)AWS_MENU_BAR_HEIGHT * (double)s);
+	/* **THE CHIP IS BUILT AROUND THE MARK, NOT AROUND THE SQUARE** — the CPU renderer's rule and the same arithmetic: the
+	 * mark sits at `AWS_SYSTEM_MENU_LEFT_MARGIN` rather than centred in the square, so a chip filling the square left the
+	 * highlight flush against the mark's right edge. Equal padding on every side is the whole of a highlight. */
 	int inset = (int)gl_round((double)AWS_SYSTEM_MENU_CHIP_INSET * (double)s);
+	int glyph = (int)gl_round((double)AWS_SYSTEM_MENU_GLYPH_WIDTH * (double)s);
+	float x = gl_round((double)AWS_SYSTEM_MENU_LEFT_MARGIN * (double)s) - (float)inset;
+	float y = gl_round((double)AWS_SYSTEM_MENU_GLYPH_TOP * (double)s) - (float)inset;
+	/* THE MARK'S BOX GROWN BY `inset` ON EVERY SIDE — a rounded SQUARE, because the box is square. */
+	float width = (float)(glyph + 2 * inset);
+	float height = width;
 	int radius = (int)gl_round((double)AWS_SYSTEM_MENU_CHIP_RADIUS * (double)s);
 	int box_w = (int)width;
 	int box_h = (int)height;
 	uint8_t *coverage;
 
-	if (box_w < 1 || box_h < 1) {
+	if (box_w < 1 || box_h < 1 || x < 0.0f || y < 0.0f) {
 		return;
 	}
 	if (!gl->chip_ready || gl->chip_width != box_w || gl->chip_height != box_h) {
@@ -616,7 +623,7 @@ static void gl_draw_system_menu_chip(struct gl_state *gl, float s)
 		if (coverage == NULL) {
 			return;
 		}
-		aws_system_chip_coverage(coverage, box_w, box_h, inset, radius);
+		aws_system_chip_coverage(coverage, box_w, box_h, 0, radius);
 		glBindTexture(GL_TEXTURE_2D, gl->chip_texture);
 		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, box_w, box_h, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE,
@@ -626,7 +633,7 @@ static void gl_draw_system_menu_chip(struct gl_state *gl, float s)
 		gl->chip_height = box_h;
 		gl->chip_ready = 1;
 	}
-	gl_textured(gl, &gl->texture, GL_TEXTURE_2D, gl->chip_texture, 0.0f, 0.0f, width, height,
+	gl_textured(gl, &gl->texture, GL_TEXTURE_2D, gl->chip_texture, x, y, width, height,
 		    (float)box_w, (float)box_h, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1, 0,
 		    AWS_SYSTEM_MENU_CHIP_COLOUR, 1);
 }

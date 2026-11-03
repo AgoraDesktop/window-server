@@ -63,19 +63,30 @@ _Static_assert(AWS_SYSTEM_MENU_GLYPH_WIDTH == AWS_SYSTEM_MENU_GLYPH_HEIGHT,
 	       "the System menu's mark is a square box, and its coverage grid is square too");
 
 /* **THE CHIP UNDER THE MARK, WHILE THE SYSTEM MENU IS UP.** The square is a bar TITLE and lights up like one: the
- * accent, inset and rounded by the AppKit's own numbers (`server.h`'s AWS_SYSTEM_MENU_CHIP_*). The coverage grid is
- * cached per size — a menu is opened by a click, so this is not a per-frame cost. */
+ * accent, inset and rounded by the AppKit's own numbers (`server.h`'s AWS_SYSTEM_MENU_CHIP_*).
+ *
+ * **AND IT IS BUILT AROUND THE MARK RATHER THAN AROUND THE SQUARE.** The mark is NOT centred in the square — it sits at
+ * `AWS_SYSTEM_MENU_LEFT_MARGIN` so the air before it equals the air after the square, which is what makes it read as the
+ * bar's first title — so a chip filling the square had 8 points of air on the mark's left and NONE on its right.
+ * MEASURED in a session and reported: the highlight looked shifted. Equal padding is the whole of a highlight, so the
+ * chip is `inset` larger than the mark on every side and the square never enters the arithmetic. */
 static void cpu_draw_system_menu_chip(struct aws_backend *backend, double scale, const struct aws_box *clip)
 {
 	static uint8_t *chip;
 	static int chip_width, chip_height;
-	int width = cpu_device_edge(AWS_SYSTEM_MENU_WIDTH, scale);
-	int height = cpu_device_edge(AWS_MENU_BAR_HEIGHT, scale);
 	int inset = cpu_device_edge(AWS_SYSTEM_MENU_CHIP_INSET, scale);
+	int glyph = cpu_device_edge(AWS_SYSTEM_MENU_GLYPH_WIDTH, scale);
+	int left = cpu_device_edge(AWS_SYSTEM_MENU_LEFT_MARGIN, scale) - inset;
+	int top = cpu_device_edge(AWS_SYSTEM_MENU_GLYPH_TOP, scale) - inset;
+	/* THE CHIP IS THE MARK'S OWN BOX MADE BIGGER BY `inset` ON EVERY SIDE, so the four paddings are one number and the
+	 * shape is a rounded SQUARE — the mark's box is square (`AWS_SYSTEM_MENU_GLYPH_WIDTH == _HEIGHT`), which is what
+	 * `renderer-cpu.c` already asserts for the glyph grid. */
+	int width = glyph + 2 * inset;
+	int height = width;
 	int radius = cpu_device_edge(AWS_SYSTEM_MENU_CHIP_RADIUS, scale);
 	int row, column;
 
-	if (width < 1 || height < 1) {
+	if (width < 1 || height < 1 || left < 0 || top < 0) {
 		return;
 	}
 	if (chip == NULL || chip_width != width || chip_height != height) {
@@ -87,23 +98,32 @@ static void cpu_draw_system_menu_chip(struct aws_backend *backend, double scale,
 		chip = grown;
 		chip_width = width;
 		chip_height = height;
-		aws_system_chip_coverage(chip, width, height, inset, radius);
+		aws_system_chip_coverage(chip, width, height, 0, radius);
 	}
-	for (row = 0; row < height && row < backend->height; row++) {
-		if (clip != NULL && (row < clip->y || row >= clip->y + clip->height)) {
+	for (row = 0; row < height; row++) {
+		int y = top + row;
+
+		if (y < 0 || y >= backend->height) {
 			continue;
 		}
-		for (column = 0; column < width && column < backend->width; column++) {
+		if (clip != NULL && (y < clip->y || y >= clip->y + clip->height)) {
+			continue;
+		}
+		for (column = 0; column < width; column++) {
 			unsigned alpha = chip[row * width + column];
 			uint32_t *pixel;
+			int x = left + column;
 
 			if (alpha == 0) {
 				continue;
 			}
-			if (clip != NULL && (column < clip->x || column >= clip->x + clip->width)) {
+			if (x < 0 || x >= backend->width) {
 				continue;
 			}
-			pixel = &backend->pixels[(size_t)row * (size_t)backend->width + (size_t)column];
+			if (clip != NULL && (x < clip->x || x >= clip->x + clip->width)) {
+				continue;
+			}
+			pixel = &backend->pixels[(size_t)y * (size_t)backend->width + (size_t)x];
 			if (alpha == 255u) {
 				*pixel = AWS_SYSTEM_MENU_CHIP_COLOUR;
 			} else {
