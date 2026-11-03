@@ -603,12 +603,13 @@ static void gl_draw_system_menu_chip(struct gl_state *gl, float s)
 	 * mark sits at `AWS_SYSTEM_MENU_LEFT_MARGIN` rather than centred in the square, so a chip filling the square left the
 	 * highlight flush against the mark's right edge. Equal padding on every side is the whole of a highlight. */
 	int inset = (int)gl_round((double)AWS_SYSTEM_MENU_CHIP_INSET * (double)s);
+	int padding = (int)gl_round((double)AWS_SYSTEM_MENU_CHIP_PADDING * (double)s);
 	int glyph = (int)gl_round((double)AWS_SYSTEM_MENU_GLYPH_WIDTH * (double)s);
-	float x = gl_round((double)AWS_SYSTEM_MENU_LEFT_MARGIN * (double)s) - (float)inset;
+	float x = gl_round((double)AWS_SYSTEM_MENU_LEFT_MARGIN * (double)s) - (float)padding;
 	float y = gl_round((double)AWS_SYSTEM_MENU_GLYPH_TOP * (double)s) - (float)inset;
-	/* THE MARK'S BOX GROWN BY `inset` ON EVERY SIDE — a rounded SQUARE, because the box is square. */
-	float width = (float)(glyph + 2 * inset);
-	float height = width;
+	/* THE SAME RECTANGLE THE CPU RENDERER BUILDS: the mark's box, `PADDING` either side and `INSET` above and below. */
+	float width = (float)(glyph + 2 * padding);
+	float height = (float)(glyph + 2 * inset);
 	int radius = (int)gl_round((double)AWS_SYSTEM_MENU_CHIP_RADIUS * (double)s);
 	int box_w = (int)width;
 	int box_h = (int)height;

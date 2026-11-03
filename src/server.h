@@ -842,9 +842,16 @@ int aws_backend_drm_start(struct aws_server *server);
 #define AWS_SYSTEM_MENU_WIDTH 28
 /* **AND THE CHIP THAT LIGHTS THE SQUARE WHILE ITS MENU IS UP, WHICH IS A BAR TITLE'S OWN HIGHLIGHT.** An application's
  * menu title wears one because the title and the menu are one process's; the System menu's square wears the same shape
- * for the same reason, so the numbers are `NSMenuView.m`'s `APPKIT_MENU_HIGHLIGHT_INSET`/`_RADIUS` and the colour is
- * `+[NSColor cg_accentColor]` — the desktop's sampled periwinkle, 164,154,255. */
+ * for the same reason — a RECTANGLE around its mark, with the air a bar title gets either side of its text and the
+ * `NSMenuView.m` inset above and below it. The colour is `+[NSColor cg_accentColor]`, the desktop's sampled
+ * periwinkle, 164,154,255; the radius is that view's `APPKIT_MENU_HIGHLIGHT_RADIUS`.
+ *
+ * **TWO NUMBERS, BECAUSE THE AIR IS NOT THE SAME IN BOTH DIRECTIONS.** Vertically the chip stops short of the bar's
+ * edges by `INSET`; horizontally it has `PADDING` either side of the mark, which is what makes it a rectangle around an
+ * icon rather than a box hugging it — 6 points is half the bar's own title padding, and it keeps the chip inside the
+ * 28-point square's space with the gap after it still visible. */
 #define AWS_SYSTEM_MENU_CHIP_INSET   2
+#define AWS_SYSTEM_MENU_CHIP_PADDING 6
 #define AWS_SYSTEM_MENU_CHIP_RADIUS  3
 #define AWS_SYSTEM_MENU_CHIP_COLOUR  0xFFA49AFFu
 #define AWS_SYSTEM_MENU_GLYPH_WIDTH 16

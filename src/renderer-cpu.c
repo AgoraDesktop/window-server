@@ -75,14 +75,16 @@ static void cpu_draw_system_menu_chip(struct aws_backend *backend, double scale,
 	static uint8_t *chip;
 	static int chip_width, chip_height;
 	int inset = cpu_device_edge(AWS_SYSTEM_MENU_CHIP_INSET, scale);
+	int padding = cpu_device_edge(AWS_SYSTEM_MENU_CHIP_PADDING, scale);
 	int glyph = cpu_device_edge(AWS_SYSTEM_MENU_GLYPH_WIDTH, scale);
-	int left = cpu_device_edge(AWS_SYSTEM_MENU_LEFT_MARGIN, scale) - inset;
+	int left = cpu_device_edge(AWS_SYSTEM_MENU_LEFT_MARGIN, scale) - padding;
 	int top = cpu_device_edge(AWS_SYSTEM_MENU_GLYPH_TOP, scale) - inset;
-	/* THE CHIP IS THE MARK'S OWN BOX MADE BIGGER BY `inset` ON EVERY SIDE, so the four paddings are one number and the
-	 * shape is a rounded SQUARE — the mark's box is square (`AWS_SYSTEM_MENU_GLYPH_WIDTH == _HEIGHT`), which is what
-	 * `renderer-cpu.c` already asserts for the glyph grid. */
-	int width = glyph + 2 * inset;
-	int height = width;
+	/* **A RECTANGLE, CENTRED ON THE MARK, WITH ITS AIR STATED FOR EACH DIRECTION.** `PADDING` either side of the mark's
+	 * box and `INSET` above and below it, so the horizontal air is the bar's own title padding halved and the vertical
+	 * air is a title's chip inset. The two are deliberately different numbers: an icon gets more air at its sides than
+	 * above it, which is what makes the highlight read as a bar title's rather than as a box around a mark. */
+	int width = glyph + 2 * padding;
+	int height = glyph + 2 * inset;
 	int radius = cpu_device_edge(AWS_SYSTEM_MENU_CHIP_RADIUS, scale);
 	int row, column;
 
