@@ -6,6 +6,32 @@ by.
 Agora is an installable desktop environment for Linux and BSD; see the project README in the parent directory
 (`../README.md`). This is the bottom of the desktop: above it are the AppKit, and the applications.
 
+## The System menu
+
+The bar's global portion is the server's: the strip, the **System menu's square** and the OS mark inside it are furniture
+no application owns. The **menu** is not: a menu is text, a highlight chip and a tracking loop, and those are the
+AppKit's — so the menu is a client's window at the pop-up level, drawn by the system UI process (`../systemui`), and the
+server's half of the bargain is one forwarded click.
+
+```
+agora_shell.claim_system_menu            (19)  "I am the system UI" — the last claimant wins while none is live
+agora_shell.system_menu_invoked x y w h  (19)  the square was clicked; open the menu hanging from its bottom edge
+agora_shell.set_system_menu_open o x y w h (20) the menu is up (and where), or has gone
+agora_shell.system_menu_dismissed        (20)  a click outside: end your session, the press went where it was aimed
+```
+
+Three behaviours come out of that pair, and each is a rule:
+
+- **the square wears the highlight chip** (`AWS_SYSTEM_MENU_CHIP_*`, the AppKit's own inset/radius and the desktop's
+  accent) while its menu is up — the square is a bar title, and a bar title lights up while its menu is down;
+- **a press inside the panel is the menu's own**, so the menu picks or dismisses it;
+- **a press outside it is two things**: the System UI is told to end its session, and the press is routed as though no
+  menu were open — the click still does what it was aimed at, which is Apple's answer to the same click. The press and
+  its release are kept together, so no window sees half a click.
+
+A press on the square itself is consumed (press and release) and never reaches a window: the square is the one piece of
+the bar no client owns.
+
 ## System menu identity
 
 The server detects the running OS once, at startup, and resolves it to an exact mark: Debian, Ubuntu, Linux Mint,

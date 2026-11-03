@@ -1261,6 +1261,10 @@ static void shell_clear_selection(struct wl_client *client, struct wl_resource *
 	if (server->selection_owner == resource) {
 		selection_replace(server, NULL, NULL, 0);
 	}
+	if (server->system_menu_ui == resource) {
+		server->system_menu_ui = NULL;
+		server->system_menu_open = 0;
+	}
 	/* AND A DRAG DIES WITH THE CLIENT THAT STARTED IT: there is nobody left to serve its payload, so the claim goes and
 	 * the destination's insertion mark with it. */
 	if (server->drag_owner == resource) {
@@ -1605,6 +1609,86 @@ static void agora_shell_destroy_resource(struct wl_resource *resource)
 	}
 }
 
+/* **THE CLAIM: THIS CLIENT DRAWS THE SYSTEM MENU.** One at a time, and the last one wins — a system UI that crashed is
+ * replaced by its successor, and a stale resource is cleared when it is destroyed (see the destroy handler), so a
+ * session whose helper died has an inert square rather than one pointing at a socket nobody reads. */
+static void shell_claim_system_menu(struct wl_client *client, struct wl_resource *resource)
+{
+	struct aws_server *server = wl_resource_get_user_data(resource);
+
+	(void)client;
+	if (server == NULL) {
+		return;
+	}
+	/* **ONE CLAIMANT AT A TIME, AND THE REFUSAL IS SILENT.** A second system UI would mean a second menu that could be
+	 * opened over the first, and the square is one click: there is nothing to arbitrate. The refusal needs no error
+	 * code because there is no round trip to answer — the claim is a statement, and a client that did not become the
+	 * claimant simply never hears `system_menu_invoked`. A claim is cleared when its resource is destroyed (see the
+	 * destroy handler), so the process that died has gone away and its successor's claim is the only one. */
+	if (server->system_menu_ui != NULL && server->system_menu_ui != resource) {
+		return;
+	}
+	server->system_menu_ui = resource;
+}
+
+/* **AND THE STATE OF ITS MENU, WHICH THE CLIENT OWNS BECAUSE THE MENU IS ITS WINDOW.** Two things need it: the chip the
+ * server draws on the square while the menu is up, and the rectangle that tells a press INSIDE the menu (the menu's own)
+ * from one that DISMISSES it. Only the claimant may say it — a second process cannot light somebody else's square. */
+static void shell_set_system_menu_open(struct wl_client *client, struct wl_resource *resource, int32_t open,
+				       int32_t x, int32_t y, int32_t width, int32_t height)
+{
+	struct aws_server *server = wl_resource_get_user_data(resource);
+	int was_open;
+
+	(void)client;
+	if (server == NULL || server->system_menu_ui != resource) {
+		return;
+	}
+	was_open = server->system_menu_open;
+	server->system_menu_open = (open != 0);
+	server->system_menu_rect.x = x;
+	server->system_menu_rect.y = y;
+	server->system_menu_rect.width = width;
+	server->system_menu_rect.height = height;
+	/* THE CHIP IS PIXELS THE SERVER OWNS, so the frame that light it is the server's to ask for. */
+	if (was_open != server->system_menu_open) {
+		aws_damage_full(server, server->system_menu_open ? "the System menu opened"
+								  : "the System menu closed");
+	}
+}
+
+/* **AND THE SQUARE'S CLICK, IN THE ONE PLACE THAT KNOWS WHO THE SYSTEM UI IS.** The geometry is the square's own —
+ * `AWS_SYSTEM_MENU_WIDTH` by `AWS_MENU_BAR_HEIGHT` at the output's top-left — and the event carries it so the client
+ * hangs its panel under the square without a second question. */
+int aws_shell_system_menu_press(struct aws_server *server, int x, int y)
+{
+	if (server == NULL || server->system_menu_ui == NULL) {
+		return AWS_SYSTEM_MENU_PASS;
+	}
+	/* **A MENU THAT IS UP OWNS THE PRESSES OVER IT AND NOTHING ELSE.** Inside the panel the press is the menu's own — the
+	 * pointer's fallback grab or the panel's surface takes it, and the menu picks or dismisses itself. OUTSIDE it, Apple's
+	 * answer is two things at once: the menu closes, and the click does what it would have done with no menu up. So the
+	 * client is told to end its session and the caller is told to route the press as though nothing were open. */
+	if (server->system_menu_open) {
+		const struct aws_box *panel = &server->system_menu_rect;
+
+		if (x >= panel->x && x < panel->x + panel->width && y >= panel->y
+		    && y < panel->y + panel->height) {
+			return AWS_SYSTEM_MENU_PASS;
+		}
+		agora_shell_send_system_menu_dismissed(server->system_menu_ui);
+		server->system_menu_open = 0;
+		aws_damage_full(server, "the System menu closed");
+		return AWS_SYSTEM_MENU_DISMISS;
+	}
+	if (x < 0 || x >= AWS_SYSTEM_MENU_WIDTH || y < 0 || y >= AWS_MENU_BAR_HEIGHT) {
+		return AWS_SYSTEM_MENU_PASS;
+	}
+	agora_shell_send_system_menu_invoked(server->system_menu_ui, 0, 0, AWS_SYSTEM_MENU_WIDTH,
+					     AWS_MENU_BAR_HEIGHT);
+	return AWS_SYSTEM_MENU_TAKEN;
+}
+
 static const struct agora_shell_interface agora_shell_implementation = {
 	shell_get_window,
 	shell_get_output,
@@ -1624,6 +1708,8 @@ static const struct agora_shell_interface agora_shell_implementation = {
 	shell_cancel_drag,
 	shell_finish_drag,
 	shell_request_drag_data,
+	shell_claim_system_menu,
+	shell_set_system_menu_open,
 };
 
 static void bind_agora_shell(struct wl_client *client, void *data, uint32_t version, uint32_t id)

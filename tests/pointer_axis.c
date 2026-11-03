@@ -112,6 +112,16 @@ void aws_server_schedule_render(struct aws_server *server)
 	(void)server;
 }
 
+/* AND THE SYSTEM MENU'S SQUARE: `shell.c` is not linked here, so the door that forwards its click is stubbed. This file
+ * is about axis events, and a press is only what carries them. */
+int aws_shell_system_menu_press(struct aws_server *server, int x, int y)
+{
+	(void)server;
+	(void)x;
+	(void)y;
+	return 0;
+}
+
 /* **AND THE TWO THE SEAT ASKS WHEN IT DRAWS ITS OWN POINTER.** A motion damages the pointer's old and new boxes and asks
  * for a PARTIAL render (`aws_cursor_device_box`, `aws_server_schedule_render_partial`); this file is about axis events, so
  * neither is interesting here and both are stubbed. A test server has no cursor pixels to place. */

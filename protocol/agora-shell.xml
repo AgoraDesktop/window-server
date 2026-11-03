@@ -36,7 +36,7 @@
     Copyright © 2026 Kyle J. Cardoza.
   </copyright>
 
-  <interface name="agora_shell" version="18">
+  <interface name="agora_shell" version="20">
     <description summary="the window server's own window management">
       One global. It hands out the three objects above it: a window, which is what a surface becomes, an output,
       which is where the work area comes from, and a window list, which is what a shell component asks for.
@@ -487,6 +487,72 @@
       </description>
       <arg name="mime_type" type="string"/>
       <arg name="reason" type="uint"/>
+    </event>
+
+    <!-- ============================================================================================ *
+         VERSION 19: THE SYSTEM MENU'S CLICK, FORWARDED TO THE CLIENT THAT DRAWS MENUS.    *
+         * ============================================================================================ -->
+
+    <request name="claim_system_menu" since="19">
+      <description summary="say this client is the system UI, and hears the System menu's clicks">
+        **THE SQUARE IS THE SERVER'S AND THE MENU IS A CLIENT'S, WHICH IS HOW THE MAC SPLITS THE BAR.** The
+        WindowServer owns the strip, the System menu's square and the mark inside it — furniture nobody's
+        application draws. A menu, though, is text, hovering, a highlight chip and a tracking loop, and all four
+        are the AppKit's: so the menu itself belongs to a SYSTEM UI PROCESS, which draws it with the same toolkit
+        every application draws with and is composited as an ordinary window at the pop-up level. That process is
+        this request. It says "I am the system UI" once, and the server then forwards the square's clicks to it
+        with `system_menu_invoked` and does nothing else about them.
+
+        **ONE CLAIMANT AT A TIME.** A claim made while a live claimant holds the square is REFUSED — silently, because
+        the answer is the refusal itself and there is no round trip to spend on it — so the menu can never be opened by
+        two processes at once. A claim is cleared when the claiming resource is destroyed, which is what makes a
+        restart work: the process that died has gone away, so its successor's claim is the only one.
+      </description>
+    </request>
+
+    <request name="set_system_menu_open" since="20">
+      <description summary="the System menu is up, or has just gone away">
+        **THE SQUARE'S OWN CHIP IS THE SERVER'S PIXELS, SO THE CLIENT HAS TO SAY WHEN TO LIGHT IT.** An application's
+        menu title gets a highlight chip while its menu is down, because the title and the menu are one process's. The
+        System menu's square is the SERVER's and its menu is a client's, so the client says when the menu went up and
+        gives the panel's rectangle — the same rectangle the outside-click rule needs, since a press inside it is the
+        menu's and a press outside it closes the menu AND does its own work.
+
+        `open` with `x, y, width, height` is the panel in the server's own coordinates (top-down, logical); `closed` is
+        `open` = 0 and the rectangle is ignored. Sent by the claimant only, and ignored from anyone else. See the
+        System UI's side: it wraps `-popUpMenuPositioningItem:atLocation:inView:`.
+      </description>
+      <arg name="open" type="int" summary="1 while the menu is up, 0 when it has closed"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+
+    <event name="system_menu_dismissed" since="20">
+      <description summary="close the System menu, but let the press do its own work">
+        **THE CLICK OUTSIDE A MENU IS TWO THINGS, AND THIS IS THE FIRST OF THEM.** The press is routed to whatever is
+        under the pointer — the menu's fallback grab does not take it — so the click does what it would have done with no
+        menu up, and this event tells the System UI to end its tracking loop and take the chip down. Apple's answer to
+        the same click is the same pair: the menu closes and the click lands where it was aimed.
+      </description>
+    </event>
+
+    <event name="system_menu_invoked" since="19">
+      <description summary="the System menu's square was clicked; open the menu here">
+        **THE GEOMETRY, IN THE SERVER'S OWN COORDINATES (TOP-DOWN), SO THE PANEL CAN HANG FROM THE SQUARE.** A menu
+        opened from the bar hangs BELOW it, and the square is at the output's top-left, so the panel's top-left is
+        `(x, y + height)`. The rectangle is sent rather than assumed so that a later move or resize of the square —
+        or a bar on a different edge — needs no second message.
+
+        The press is CONSUMED: the click that invoked this is not delivered to any surface, which is the Mac's
+        answer too — the square is the server's, and a click on furniture belongs to the furniture. The release is
+        not delivered either, so no window sees half a click.
+      </description>
+      <arg name="x" type="int" summary="the square's left edge"/>
+      <arg name="y" type="int" summary="the square's top edge"/>
+      <arg name="width" type="int" summary="the square's width, in points"/>
+      <arg name="height" type="int" summary="the square's height, in points"/>
     </event>
   
   </interface>

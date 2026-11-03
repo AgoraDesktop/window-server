@@ -515,6 +515,16 @@ struct aws_server {
 	struct wl_list agora_outputs;
 	/* Every bound `agora_window_list`, so a window change reaches the dock that asked. */
 	struct wl_list window_lists;
+	/* **THE ONE CLIENT THAT DRAWS MENUS FOR THE SYSTEM MENU'S SQUARE.** The square's pixels are the server's — the
+	 * strip and the mark are furniture no application owns — but a MENU is text and a tracking loop, which are the
+	 * AppKit's, so the menu itself is a system UI process's window and the server forwards the square's clicks to it.
+	 * NULL until a client claims it (`agora_shell.claim_system_menu`), and cleared when that client goes away. */
+	struct wl_resource *system_menu_ui;
+	/* **AND WHETHER ITS MENU IS UP, AND WHERE.** The chip is the server's to draw — the square is furniture — and the
+	 * rectangle is what tells a press INSIDE the menu from a press that dismisses it. Both come from the client that owns
+	 * the square; see the protocol's `set_system_menu_open`. Logical, top-down, in output coordinates. */
+	int system_menu_open;
+	struct aws_box system_menu_rect;
 	/* **EVERY BOUND `agora_shell`, BECAUSE THE SELECTION IS ANNOUNCED UNSOLICITED.** A window change has a client to
 	 * tell; a selection change does not ask anybody first, so the list of bound shells is the only way to say it. */
 	struct wl_list shell_bindings;
@@ -569,6 +579,10 @@ struct aws_server {
 	 * the release, went on believing the button was down, and turned every later motion over it into a drag whose next
 	 * click completed a DROP: MEASURED in Workspace as "it keeps moving files on its own". */
 	struct aws_surface *pointer_press_surface;
+	/* **AND A PRESS THE SYSTEM MENU TOOK, WHOSE RELEASE MUST NOT GO ANYWHERE ELSE.** A window that heard a button-up
+	 * with no button-down reads it as the end of a gesture it never began — a drag it did not start, a click on
+	 * nothing — so the pair is kept together: the press was the square's, and the release is dropped at the same door. */
+	int system_menu_press_swallowed;
 	uint32_t pointer_buttons;		/* the pointer's buttons that are down, as a bit per evdev code */
 	struct aws_surface *keyboard_focus;	/* the surface the keyboard goes to, or NULL */
 	/* **AND WHETHER A SHELL PUT IT THERE ON PURPOSE.** A window that says `set_activatable 0` never takes the
@@ -826,6 +840,13 @@ int aws_backend_drm_start(struct aws_server *server);
  * (`systemicon.h`), rasterized once into coverage and blended here; its bars, curves and holes are no longer
  * arithmetic in this header. These numbers are the BOX and WHERE IT SITS, not the shape inside it. */
 #define AWS_SYSTEM_MENU_WIDTH 28
+/* **AND THE CHIP THAT LIGHTS THE SQUARE WHILE ITS MENU IS UP, WHICH IS A BAR TITLE'S OWN HIGHLIGHT.** An application's
+ * menu title wears one because the title and the menu are one process's; the System menu's square wears the same shape
+ * for the same reason, so the numbers are `NSMenuView.m`'s `APPKIT_MENU_HIGHLIGHT_INSET`/`_RADIUS` and the colour is
+ * `+[NSColor cg_accentColor]` — the desktop's sampled periwinkle, 164,154,255. */
+#define AWS_SYSTEM_MENU_CHIP_INSET   2
+#define AWS_SYSTEM_MENU_CHIP_RADIUS  3
+#define AWS_SYSTEM_MENU_CHIP_COLOUR  0xFFA49AFFu
 #define AWS_SYSTEM_MENU_GLYPH_WIDTH 16
 #define AWS_SYSTEM_MENU_GLYPH_HEIGHT 16
 #define AWS_SYSTEM_MENU_GLYPH_TOP ((AWS_MENU_BAR_HEIGHT - AWS_SYSTEM_MENU_GLYPH_HEIGHT) / 2)
@@ -919,6 +940,20 @@ struct aws_keyboard {
 	struct wl_resource *resource;
 	struct wl_list link;
 };
+
+/* **THE SQUARE'S CLICK, FORWARDED TO THE SYSTEM UI.** Answers 1 when the point was the system menu's and a claimant was
+ * told; 0 for every other point and for a session with no system UI, where the click goes on to the ordinary routing
+ * (and finds no surface, because the square is the server's and no client's window covers it). */
+/* **THE THREE ANSWERS A PRESS ON THE SERVER'S FURNITURE CAN HAVE.** `PASS` is not the square's business and goes on to the
+ * ordinary routing; `TAKEN` was the square, and the client has been told to open the menu; `DISMISS` was a press outside
+ * a menu that is up — the client has been told to end its session, and the press must be routed as though no menu were
+ * open, so the click still does its own work. */
+enum {
+	AWS_SYSTEM_MENU_PASS = 0,
+	AWS_SYSTEM_MENU_TAKEN = 1,
+	AWS_SYSTEM_MENU_DISMISS = 2
+};
+int aws_shell_system_menu_press(struct aws_server *server, int x, int y);
 
 /* seat.c — the seat: the devices, the focus, and the keymap. */
 void aws_seat_init(struct aws_server *server);

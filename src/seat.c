@@ -763,7 +763,38 @@ void aws_seat_pointer_button(struct aws_server *server, uint32_t evdev_button, i
 	struct aws_surface *surface;
 	struct aws_pointer *pointer;
 	uint32_t serial = wl_display_next_serial(server->display);
+	/* **AND A PRESS THAT IS NOT THE MENU'S EVEN THOUGH THE MENU HOLDS THE FALLBACK.** See the verdict below. */
+	int bypass_grab = 0;
 
+	/* **THE SYSTEM MENU'S SQUARE IS FURNITURE, AND ITS CLICK IS THE SYSTEM UI'S.** No client's window covers the square,
+	 * so without this the click is delivered to nobody; with it, the client that claimed the square opens the menu. **AND
+	 * ONLY WHEN NOTHING IS TRACKING**: a menu that is already up holds the pointer's fallback, and the press that
+	 * dismisses it is the menu's own — forwarding it here as well would ask the system UI to open a second menu, which is
+	 * the one thing its tracking loop refuses. The press is consumed, and its release goes nowhere either, so no window
+	 * sees half a click. */
+	if (!pressed && server->system_menu_press_swallowed) {
+		server->system_menu_press_swallowed = 0;
+		return;
+	}
+	/* **THE SQUARE'S CLICK, AND THE CLICK THAT DISMISSES ITS MENU, ARE TWO DIFFERENT ANSWERS.** The first is consumed
+	 * whole — press and release, so no window sees half a click. The second is only a DISMISSAL: the System UI is told to
+	 * end its session, and this press is routed as though no menu were open, because that is the surface the click was
+	 * aiming at. `pointer_grab == NULL` keeps a press on a menu that is already tracking out of this door: that press is
+	 * the menu's own, and asking the System UI to open a second menu is the one thing its tracking loop refuses. */
+	if (pressed) {
+		/* **A MENU THAT IS UP OWNS THE PRESSES OVER IT, AND NOTHING ELSE.** Our own menu is the case this door exists for;
+		 * ANOTHER application's menu holding the fallback is the case to leave alone — the click that dismisses it must
+		 * reach it, and opening the System menu on top of it would be a second menu nobody asked for. */
+		int verdict = (server->pointer_grab != NULL && !server->system_menu_open)
+			? AWS_SYSTEM_MENU_PASS
+			: aws_shell_system_menu_press(server, server->pointer_x, server->pointer_y);
+
+		if (verdict == AWS_SYSTEM_MENU_TAKEN) {
+			server->system_menu_press_swallowed = 1;
+			return;
+		}
+		bypass_grab = (verdict == AWS_SYSTEM_MENU_DISMISS);
+	}
 	/* **A CLICK GOES TO THE SURFACE UNDER THE POINTER, AND THAT IS ESTABLISHED HERE RATHER THAN ASSUMED.** Focus
 	 * is normally set by motion and a click is not a motion, so a surface that appeared under a stationary
 	 * pointer would otherwise have this press sent to whatever held the focus, or to nobody. `-recheck` is
@@ -791,7 +822,8 @@ void aws_seat_pointer_button(struct aws_server *server, uint32_t evdev_button, i
 	/* AND THE SAME ROUTING A MOTION USES — see `aws_seat_pointer_target`. A press on the desktop belongs to the
 	 * popup that is tracking, which is how a click outside a menu dismisses it; a press anywhere at all belongs to
 	 * a window that is holding the pointer for a drag, which is how a drag hears its own release. */
-	surface = aws_seat_pointer_target(server, surface);
+	surface = bypass_grab ? aws_surface_at(server, server->pointer_x, server->pointer_y)
+			      : aws_seat_pointer_target(server, surface);
 	pointer_set_focus(server, surface);
 	/* **THE RELEASE GOES BACK WHERE THE PRESS WENT.** A press takes the pointer for its surface until the last button
 	 * comes up, so a hand that presses inside a window and lets go outside it — the ordinary way a drag leaves one — is

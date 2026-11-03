@@ -117,6 +117,22 @@ void aws_server_schedule_render(struct aws_server *server)
 	(void)server;
 }
 
+/* **AND THE SQUARE'S CLICK, WHICH IS THE SERVER'S FURNITURE RATHER THAN A WINDOW'S.** `shell.c` is not linked here, so
+ * the door that forwards it to the system UI is stubbed and the answer is the test's. What is under test is the SEAT's
+ * half: a press the system UI takes reaches no window and starts no button state, its release is dropped with it, and a
+ * menu that is already tracking keeps its own dismissal click instead. */
+static int s_system_menu_verdict;	/* one of `enum { PASS, TAKEN, DISMISS }` from server.h */
+static int s_system_menu_calls;
+
+int aws_shell_system_menu_press(struct aws_server *server, int x, int y)
+{
+	(void)server;
+	(void)x;
+	(void)y;
+	s_system_menu_calls++;
+	return s_system_menu_verdict;
+}
+
 /* **AND THE OTHER HALF OF THE POINTER'S FRAME: a render that may be partial, and the pointer's own box.** The seat is
  * the caller here: a motion adds where the pointer was and where it is to the server's damage ledger and asks for a
  * partial render. The real `aws_cursor_device_box` is `cursor.c`'s arithmetic (device placement and hotspot), which the
@@ -183,6 +199,9 @@ static void reset(struct aws_server *server)
 	s_under_pointer = NULL;
 	s_shape_name = NULL;
 	s_shape_applies = 0;
+	s_system_menu_verdict = 0;
+	s_system_menu_calls = 0;
+	s_global_sends = 0;
 }
 
 int main(void)
@@ -299,6 +318,47 @@ int main(void)
 	check(server.pointer_grab == &s_grab, "a press with only the FALLBACK held leaves that fallback alone");
 	aws_seat_pointer_button(&server, 0x110, 0);
 	check(server.pointer_grab == &s_grab, "and its release does not give it away");
+
+	/* 8c. **THE SYSTEM MENU'S SQUARE IS THE SERVER'S, SO ITS CLICK IS NOT A WINDOW'S.** The square is the one piece of
+	 * the bar no client's window covers — a press there is forwarded to the system UI process, which is the only thing
+	 * that opens the menu — so the press reaches no window, starts no button state, and its release goes nowhere either:
+	 * a window that heard a button-up with no button-down would read it as the end of a gesture it never began. */
+	reset(&server);
+	server.display = display;
+	s_under_pointer = &s_a;
+	s_system_menu_verdict = AWS_SYSTEM_MENU_TAKEN;
+	aws_seat_pointer_button(&server, 0x110, 1);
+	check(server.pointer_press_surface == NULL && server.pointer_buttons == 0,
+	      "a press the system UI took starts no button state and belongs to no window");
+	check(s_global_sends == 0, "and the window under the pointer is not told where the hand was");
+	aws_seat_pointer_button(&server, 0x110, 0);
+	check(server.pointer_buttons == 0 && s_global_sends == 0, "and its release is dropped with it");
+	/* AND WHILE A MENU IS TRACKING, THE PRESS IS THE MENU'S DISMISSAL. A second `system_menu_invoked` would ask the
+	 * system UI to open a menu it is already tracking, which its tracking loop refuses — so the fallback keeps the click. */
+	reset(&server);
+	server.display = display;
+	server.pointer_grab = &s_grab;
+	s_under_pointer = NULL;
+	s_system_menu_verdict = AWS_SYSTEM_MENU_TAKEN;
+	aws_seat_pointer_button(&server, 0x110, 1);
+	check(s_system_menu_calls == 0,
+	      "a press while ANOTHER application's menu holds the fallback never asks the system UI to open one");
+	s_system_menu_verdict = 0;
+
+	/* 8d. **AND A PRESS OUTSIDE OUR OWN MENU IS TWO THINGS AT ONCE.** The System UI is told to end its session — the
+	 * verdict says so — and the press is routed to what the click was AIMED at rather than to the menu's fallback, which
+	 * is the half that makes "clicking outside closes the menu and does what you meant" true. */
+	reset(&server);
+	server.display = display;
+	server.system_menu_open = 1;
+	server.pointer_grab = &s_grab;
+	s_under_pointer = &s_b;
+	s_system_menu_verdict = AWS_SYSTEM_MENU_DISMISS;
+	aws_seat_pointer_button(&server, 0x110, 1);
+	check(server.pointer_focus == &s_b,
+	      "a press outside the System menu reaches the window it was aimed at, not the menu's fallback");
+	check(server.pointer_press_surface == &s_b, "and the release follows it there, so the click is whole");
+	s_system_menu_verdict = 0;
 
 	/* 8b. **AND A PRESS DURING A MENU DOES NOT MOVE THE KEYBOARD EITHER.** The fallback is what a tracking menu holds,
 	 * so a press that lands while it is held is the DISMISSAL — the click that closes the menu — and not a decision

@@ -62,9 +62,61 @@ static int cpu_device_edge(int logical, double scale)
 _Static_assert(AWS_SYSTEM_MENU_GLYPH_WIDTH == AWS_SYSTEM_MENU_GLYPH_HEIGHT,
 	       "the System menu's mark is a square box, and its coverage grid is square too");
 
-static void aws_output_draw_system_menu(struct aws_backend *backend, struct aws_system_icon *icon, double scale,
-					const struct aws_box *clip)
+/* **THE CHIP UNDER THE MARK, WHILE THE SYSTEM MENU IS UP.** The square is a bar TITLE and lights up like one: the
+ * accent, inset and rounded by the AppKit's own numbers (`server.h`'s AWS_SYSTEM_MENU_CHIP_*). The coverage grid is
+ * cached per size — a menu is opened by a click, so this is not a per-frame cost. */
+static void cpu_draw_system_menu_chip(struct aws_backend *backend, double scale, const struct aws_box *clip)
 {
+	static uint8_t *chip;
+	static int chip_width, chip_height;
+	int width = cpu_device_edge(AWS_SYSTEM_MENU_WIDTH, scale);
+	int height = cpu_device_edge(AWS_MENU_BAR_HEIGHT, scale);
+	int inset = cpu_device_edge(AWS_SYSTEM_MENU_CHIP_INSET, scale);
+	int radius = cpu_device_edge(AWS_SYSTEM_MENU_CHIP_RADIUS, scale);
+	int row, column;
+
+	if (width < 1 || height < 1) {
+		return;
+	}
+	if (chip == NULL || chip_width != width || chip_height != height) {
+		uint8_t *grown = realloc(chip, (size_t)width * (size_t)height);
+
+		if (grown == NULL) {
+			return;
+		}
+		chip = grown;
+		chip_width = width;
+		chip_height = height;
+		aws_system_chip_coverage(chip, width, height, inset, radius);
+	}
+	for (row = 0; row < height && row < backend->height; row++) {
+		if (clip != NULL && (row < clip->y || row >= clip->y + clip->height)) {
+			continue;
+		}
+		for (column = 0; column < width && column < backend->width; column++) {
+			unsigned alpha = chip[row * width + column];
+			uint32_t *pixel;
+
+			if (alpha == 0) {
+				continue;
+			}
+			if (clip != NULL && (column < clip->x || column >= clip->x + clip->width)) {
+				continue;
+			}
+			pixel = &backend->pixels[(size_t)row * (size_t)backend->width + (size_t)column];
+			if (alpha == 255u) {
+				*pixel = AWS_SYSTEM_MENU_CHIP_COLOUR;
+			} else {
+				*pixel = aws_blend_pixel(*pixel, AWS_SYSTEM_MENU_CHIP_COLOUR, alpha);
+			}
+		}
+	}
+}
+
+static void aws_output_draw_system_menu(struct aws_server *server, double scale, const struct aws_box *clip)
+{
+	struct aws_backend *backend = &server->backend;
+	struct aws_system_icon *icon = server->system_menu_icon;
 	const uint8_t *coverage;
 	int row, column;
 
@@ -80,6 +132,10 @@ static void aws_output_draw_system_menu(struct aws_backend *backend, struct aws_
 	int glyph_left = cpu_device_edge(AWS_SYSTEM_MENU_LEFT_MARGIN, scale);
 	int grid;
 
+	/* THE CHIP FIRST: it is UNDER the mark, and the mark's ink is drawn over it. */
+	if (server->system_menu_open) {
+		cpu_draw_system_menu_chip(backend, scale, clip);
+	}
 	if (glyph < 1) {
 		return;
 	}
@@ -828,7 +884,7 @@ static void aws_output_draw_menu_bar(struct aws_server *server, const struct aws
 	/* THE MARK IS INSIDE THE BAR'S ROWS, and the bar's rows are only painted when the box reaches them, so a frame that
 	 * misses the strip draws nothing here — the guard is the same one, asked once. */
 	if (clip == NULL || (clip->y < bar_height && clip->y + clip->height > 0)) {
-		aws_output_draw_system_menu(backend, server->system_menu_icon, scale, clip);
+		aws_output_draw_system_menu(server, scale, clip);
 	}
 	/* **AND THE BAR'S OWN SHADOW, WHICH FALLS BELOW IT ON WHATEVER IS UNDER IT.** The strip's rectangle is expanded
 	 * and the falloff computed the same way, and the sides that run off the top, the left and the right are dropped

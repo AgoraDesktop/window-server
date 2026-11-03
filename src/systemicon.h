@@ -104,6 +104,11 @@ struct aws_system_icon *aws_system_icon_by_name(const char *name);
 /* THE RESOLVER: exact ID, alias, each ID_LIKE token in order, family, then the hamburger. Never NULL. */
 struct aws_system_icon *aws_system_menu_icon_resolve(const struct aws_os_identity *identity);
 
+/* **THE HIGHLIGHT CHIP UNDER A MENU'S MARK, AS COVERAGE.** A rounded rectangle inset from the grid's edges, one byte
+ * per pixel, row-major — the same shape the marks are rasterized into, so a renderer that can draw a mark can draw the
+ * chip with no second path. `width`/`height` are the square it fills, in device pixels. */
+void aws_system_chip_coverage(uint8_t *coverage, int width, int height, int inset, int radius);
+
 /* THE FAMILY THE RESOLVER USED, for `--dump-os-identity`. Answers "unknown" when no family was found. */
 const char *aws_system_menu_icon_family(const struct aws_os_identity *identity);
 

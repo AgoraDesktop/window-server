@@ -293,7 +293,13 @@ struct gl_state {
 	GLuint cursor_texture;
 	unsigned cursor_generation;	/* the generation in `cursor_texture` */
 	int cursor_uploaded;		/* whether `cursor_texture` holds an image at all */
-	GLuint coverage_texture;	/* the System menu's mark, uploaded when the mark or its size changes */
+	GLuint coverage_texture;
+	/* **AND THE HIGHLIGHT CHIP'S COVERAGE, WHICH IS A DIFFERENT SHAPE AT A DIFFERENT SIZE.** Keyed on its box, because the
+	 * chip is the square and the square is a scale's own size. */
+	GLuint chip_texture;
+	int chip_width;
+	int chip_height;
+	int chip_ready;	/* the System menu's mark, uploaded when the mark or its size changes */
 	int coverage_ready;		/* whether `coverage_texture` holds anything yet */
 	int coverage_pixels;		/* the uploaded grid's side, in device pixels */
 	struct aws_system_icon *coverage_icon;	/* which mark is in the texture */
@@ -586,6 +592,43 @@ static void upload_coverage(struct gl_state *gl, struct aws_system_icon *icon, i
 	gl->coverage_icon = icon;
 	gl->coverage_pixels = pixels;
 	gl->coverage_ready = 1;
+}
+
+/* **THE CHIP UNDER THE MARK WHILE THE SYSTEM MENU IS UP** — the CPU renderer's chip, uploaded the same way the mark is:
+ * eight-bit coverage in a `GL_LUMINANCE` texture, drawn over the square's own box, with the accent as the ink. Cached on
+ * the box, which changes only with the scale. */
+static void gl_draw_system_menu_chip(struct gl_state *gl, float s)
+{
+	float width = gl_round((double)AWS_SYSTEM_MENU_WIDTH * (double)s);
+	float height = gl_round((double)AWS_MENU_BAR_HEIGHT * (double)s);
+	int inset = (int)gl_round((double)AWS_SYSTEM_MENU_CHIP_INSET * (double)s);
+	int radius = (int)gl_round((double)AWS_SYSTEM_MENU_CHIP_RADIUS * (double)s);
+	int box_w = (int)width;
+	int box_h = (int)height;
+	uint8_t *coverage;
+
+	if (box_w < 1 || box_h < 1) {
+		return;
+	}
+	if (!gl->chip_ready || gl->chip_width != box_w || gl->chip_height != box_h) {
+		coverage = calloc((size_t)box_w * (size_t)box_h, 1);
+
+		if (coverage == NULL) {
+			return;
+		}
+		aws_system_chip_coverage(coverage, box_w, box_h, inset, radius);
+		glBindTexture(GL_TEXTURE_2D, gl->chip_texture);
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, box_w, box_h, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE,
+			     coverage);
+		free(coverage);
+		gl->chip_width = box_w;
+		gl->chip_height = box_h;
+		gl->chip_ready = 1;
+	}
+	gl_textured(gl, &gl->texture, GL_TEXTURE_2D, gl->chip_texture, 0.0f, 0.0f, width, height,
+		    (float)box_w, (float)box_h, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1, 0,
+		    AWS_SYSTEM_MENU_CHIP_COLOUR, 1);
 }
 
 /* ---------------------------------------------------------------------------------------------------
@@ -933,6 +976,10 @@ static void gl_draw_menu_bar(struct aws_server *server)
 		float glyph_top = gl_round((double)AWS_SYSTEM_MENU_GLYPH_TOP * (double)s);
 
 		gl_solid(gl, 0.0f, 0.0f, (float)gl->width, bar_h, AWS_MENU_BAR_COLOUR);
+	/* THE CHIP IS UNDER THE MARK, so it is painted first — and only while the menu it belongs to is up. */
+	if (server->system_menu_open) {
+		gl_draw_system_menu_chip(gl, s);
+	}
 	upload_coverage(gl, server->system_menu_icon, grid);
 	/* **THE MARK'S QUAD AND ITS TEXTURE ARE THE SAME SIZE, SO THE SAMPLER NEVER MAGNIFIES.** A mark is a 16-point
 	 * design and a 21-pixel box needs a 21-pixel raster, which the icon keeps for that size; the uv divisor is the
@@ -1777,7 +1824,7 @@ int aws_renderer_gl_create(struct aws_server *server)
 		goto fail;
 	}
 	if (make_texture(gl, &gl->client_texture) != 0 || make_texture(gl, &gl->coverage_texture) != 0 ||
-	    make_texture(gl, &gl->cursor_texture) != 0) {
+	    make_texture(gl, &gl->chip_texture) != 0 || make_texture(gl, &gl->cursor_texture) != 0) {
 		goto fail;
 	}
 	glDisable(GL_DEPTH_TEST);

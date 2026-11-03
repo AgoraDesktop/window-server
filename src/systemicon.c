@@ -18,6 +18,7 @@
 #include "systemicon.h"
 
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -611,4 +612,71 @@ const uint8_t *aws_system_icon_coverage_at(struct aws_system_icon *icon, int pix
 	icon->grids[icon->grid_count].coverage = grid;
 	icon->grid_count++;
 	return grid;
+}
+
+/* ============================================================================================ *
+ * THE HIGHLIGHT CHIP
+ *                                                                                                *
+ * **A ROUNDED RECTANGLE, MEASURED THE WAY THE MARKS' ARCS ARE.** The coverage is the same
+ * `clamp(0.5 - d)` a mark's edge gets, where `d` is the signed distance from the pixel's centre to
+ * the shape: negative inside, positive outside, so a pixel the curve passes through is blended and
+ * every other one is 0 or 255. It is written as one expression for all four corners because the
+ * shape is symmetric — the same reason `shape_coverage` in the compositor has no per-corner copy.
+ *
+ * The radius is CLAMPED to half the smaller side, so a chip asked to round more than it can keeps
+ * its shape rather than turning into a circle or a negative extent.
+ * ============================================================================================ */
+void aws_system_chip_coverage(uint8_t *coverage, int width, int height, int inset, int radius)
+{
+	double left, top, right, bottom, mx, my, hx, hy;
+	double limit;
+	int x, y;
+
+	if (coverage == NULL || width <= 0 || height <= 0) {
+		return;
+	}
+	if (inset < 0) {
+		inset = 0;
+	}
+	left = (double)inset;
+	top = (double)inset;
+	right = (double)(width - inset);
+	bottom = (double)(height - inset);
+	if (right <= left || bottom <= top) {
+		memset(coverage, 0, (size_t)width * (size_t)height);
+		return;
+	}
+	mx = (left + right) / 2.0;
+	my = (top + bottom) / 2.0;
+	hx = (right - left) / 2.0;
+	hy = (bottom - top) / 2.0;
+	limit = (hx < hy) ? hx : hy;
+	if ((double)radius > limit) {
+		radius = (int)limit;
+	}
+	if (radius < 0) {
+		radius = 0;
+	}
+	for (y = 0; y < height; y++) {
+		for (x = 0; x < width; x++) {
+			double px = (double)x + 0.5;
+			double py = (double)y + 0.5;
+			double qx = fabs(px - mx) - (hx - (double)radius);
+			double qy = fabs(py - my) - (hy - (double)radius);
+			double ax = (qx > 0.0) ? qx : 0.0;
+			double ay = (qy > 0.0) ? qy : 0.0;
+			double inside = (qx > qy) ? qx : qy;
+			double distance = sqrt(ax * ax + ay * ay) + ((inside < 0.0) ? inside : 0.0)
+				- (double)radius;
+			double cover = 0.5 - distance;
+
+			if (cover <= 0.0) {
+				coverage[y * width + x] = 0;
+			} else if (cover >= 1.0) {
+				coverage[y * width + x] = 255;
+			} else {
+				coverage[y * width + x] = (uint8_t)(cover * 255.0);
+			}
+		}
+	}
 }
