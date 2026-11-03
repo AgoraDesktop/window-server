@@ -212,6 +212,20 @@ add_test(NAME window-server-corners
 	  "$<TARGET_FILE:window-server>" "$<TARGET_FILE:window-server-test-client>"
 	  "${PYTHON3}" "${CMAKE_CURRENT_SOURCE_DIR}/check_corners.py")
 
+# **AND THE SQUARE'S HIGHLIGHT CHIP, WHICH IS THE SERVER'S PIXELS AND NOBODY ELSE'S.** A probe claims the System menu and
+# reports it up; the frame that follows carries the chip the square wears while its menu is down. The checker measures the
+# rectangle against `server.h`'s constants at two scales, so a chip built around the SQUARE instead of the MARK — the bug
+# this exists for — fails on its unequal air rather than on taste.
+add_executable(window-server-system-menu-probe system_menu.c "${_generated}/agora-shell-protocol.c")
+add_dependencies(window-server-system-menu-probe agora-shell-bindings)
+target_include_directories(window-server-system-menu-probe PRIVATE "${_generated}")
+target_link_libraries(window-server-system-menu-probe PRIVATE PkgConfig::WAYLAND_CLIENT)
+
+add_test(NAME window-server-system-menu-chip
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run-system-menu.sh"
+	  "$<TARGET_FILE:window-server>" "$<TARGET_FILE:window-server-system-menu-probe>"
+	  "${PYTHON3}" "${CMAKE_CURRENT_SOURCE_DIR}/check_system_menu.py")
+
 # **AND THE WORK AREA AS A CLIENT SEES IT.** The headless suite above photographs windows; this one asks the server
 # what is LEFT of the screen after a client reserves a strip — the arithmetic a Dock depends on and the one thing a
 # frame cannot show.

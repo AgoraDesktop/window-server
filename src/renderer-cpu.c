@@ -74,20 +74,19 @@ static void cpu_draw_system_menu_chip(struct aws_backend *backend, double scale,
 {
 	static uint8_t *chip;
 	static int chip_width, chip_height;
-	int inset = cpu_device_edge(AWS_SYSTEM_MENU_CHIP_INSET, scale);
-	int padding = cpu_device_edge(AWS_SYSTEM_MENU_CHIP_PADDING, scale);
-	int glyph = cpu_device_edge(AWS_SYSTEM_MENU_GLYPH_WIDTH, scale);
-	int left = cpu_device_edge(AWS_SYSTEM_MENU_LEFT_MARGIN, scale) - padding;
-	int top = cpu_device_edge(AWS_SYSTEM_MENU_GLYPH_TOP, scale) - inset;
-	/* **A RECTANGLE, CENTRED ON THE MARK, WITH ITS AIR STATED FOR EACH DIRECTION.** `PADDING` either side of the mark's
-	 * box and `INSET` above and below it, so the horizontal air is the bar's own title padding halved and the vertical
-	 * air is a title's chip inset. The two are deliberately different numbers: an icon gets more air at its sides than
-	 * above it, which is what makes the highlight read as a bar title's rather than as a box around a mark. */
-	int width = glyph + 2 * padding;
-	int height = glyph + 2 * inset;
+	/* **A RECTANGLE, CENTRED ON THE MARK, WITH ITS AIR STATED FOR EACH DIRECTION** — see `aws_system_menu_chip_box`, which
+	 * is where the arithmetic lives so the GL renderer and the test cannot disagree with this one. */
+	struct aws_box box;
+	int width, height;
+	int left, top;
 	int radius = cpu_device_edge(AWS_SYSTEM_MENU_CHIP_RADIUS, scale);
 	int row, column;
 
+	aws_system_menu_chip_box(scale, &box);
+	left = box.x;
+	top = box.y;
+	width = box.width;
+	height = box.height;
 	if (width < 1 || height < 1 || left < 0 || top < 0) {
 		return;
 	}

@@ -15,6 +15,9 @@
  * and the exact OS marks all use the same path format.
  */
 
+/* THE CHIP'S RECTANGLE IS `server.h`'S SHAPE AND `server.h`'S CONSTANTS, so this file takes the server's own header —
+ * the include is a cycle the guards make legal, and the alternative is the two renderers each building the box. */
+#include "server.h"
 #include "systemicon.h"
 
 #include <ctype.h>
@@ -679,4 +682,23 @@ void aws_system_chip_coverage(uint8_t *coverage, int width, int height, int inse
 			}
 		}
 	}
+}
+
+void aws_system_menu_chip_box(double scale, struct aws_box *box)
+{
+	int inset, padding, glyph;
+
+	if (box == NULL) {
+		return;
+	}
+	if (!(scale > 0.0)) {
+		scale = 1.0;
+	}
+	inset = aws_device_edge_of(AWS_SYSTEM_MENU_CHIP_INSET, scale);
+	padding = aws_device_edge_of(AWS_SYSTEM_MENU_CHIP_PADDING, scale);
+	glyph = aws_device_edge_of(AWS_SYSTEM_MENU_GLYPH_WIDTH, scale);
+	box->x = aws_device_edge_of(AWS_SYSTEM_MENU_LEFT_MARGIN, scale) - padding;
+	box->y = aws_device_edge_of(AWS_SYSTEM_MENU_GLYPH_TOP, scale) - inset;
+	box->width = glyph + 2 * padding;
+	box->height = glyph + 2 * inset;
 }

@@ -106,6 +106,14 @@ static inline int aws_edge_floor(double value)
 	return ((double)truncated > value) ? truncated - 1 : truncated;
 }
 
+/* **ONE LOGICAL EDGE, AS A DEVICE PIXEL.** Half away from zero, which is the rounding every device edge in this
+ * server uses — the bar's rows, a window's frame, the System menu's mark. It lives here because the chip's rectangle
+ * (below) is computed in one place for both renderers and in the tests. */
+static inline int aws_device_edge_of(double logical, double scale)
+{
+	return (int)(logical * scale + 0.5);
+}
+
 static inline int aws_edge_ceil(double value)
 {
 	int truncated = (int)value;
@@ -854,6 +862,11 @@ int aws_backend_drm_start(struct aws_server *server);
 #define AWS_SYSTEM_MENU_CHIP_PADDING 6
 #define AWS_SYSTEM_MENU_CHIP_RADIUS  3
 #define AWS_SYSTEM_MENU_CHIP_COLOUR  0xFFA49AFFu
+/* **THE CHIP'S RECTANGLE, IN DEVICE PIXELS, COMPUTED ONCE FOR BOTH RENDERERS AND FOR THE TEST.** It is the mark's box
+ * grown by `AWS_SYSTEM_MENU_CHIP_PADDING` either side and `AWS_SYSTEM_MENU_CHIP_INSET` above and below — a rectangle
+ * centred on the mark, which is the shape a bar title's highlight has. A renderer that computed its own would be the
+ * second opinion this file exists to prevent. */
+void aws_system_menu_chip_box(double scale, struct aws_box *box);
 #define AWS_SYSTEM_MENU_GLYPH_WIDTH 16
 #define AWS_SYSTEM_MENU_GLYPH_HEIGHT 16
 #define AWS_SYSTEM_MENU_GLYPH_TOP ((AWS_MENU_BAR_HEIGHT - AWS_SYSTEM_MENU_GLYPH_HEIGHT) / 2)

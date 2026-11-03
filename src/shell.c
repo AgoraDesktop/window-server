@@ -1652,8 +1652,13 @@ static void shell_set_system_menu_open(struct wl_client *client, struct wl_resou
 	server->system_menu_rect.height = height;
 	/* THE CHIP IS PIXELS THE SERVER OWNS, so the frame that light it is the server's to ask for. */
 	if (was_open != server->system_menu_open) {
+		/* **AND A FRAME IS ASKED FOR, WHICH IS NOT THE SAME AS ASKING FOR A FULL REPAINT.** `aws_damage_full` records
+		 * what the next frame must paint; `aws_server_schedule_render` is what makes there BE a next frame. MEASURED by
+		 * the chip test: without the second call a session whose only change is the square's highlight composited
+		 * nothing at all, and the headless screenshot said "0 frame(s)". */
 		aws_damage_full(server, server->system_menu_open ? "the System menu opened"
 								  : "the System menu closed");
+		aws_server_schedule_render(server);
 	}
 }
 
@@ -1679,6 +1684,7 @@ int aws_shell_system_menu_press(struct aws_server *server, int x, int y)
 		agora_shell_send_system_menu_dismissed(server->system_menu_ui);
 		server->system_menu_open = 0;
 		aws_damage_full(server, "the System menu closed");
+		aws_server_schedule_render(server);
 		return AWS_SYSTEM_MENU_DISMISS;
 	}
 	if (x < 0 || x >= AWS_SYSTEM_MENU_WIDTH || y < 0 || y >= AWS_MENU_BAR_HEIGHT) {

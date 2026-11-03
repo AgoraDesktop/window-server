@@ -602,19 +602,21 @@ static void gl_draw_system_menu_chip(struct gl_state *gl, float s)
 	/* **THE CHIP IS BUILT AROUND THE MARK, NOT AROUND THE SQUARE** — the CPU renderer's rule and the same arithmetic: the
 	 * mark sits at `AWS_SYSTEM_MENU_LEFT_MARGIN` rather than centred in the square, so a chip filling the square left the
 	 * highlight flush against the mark's right edge. Equal padding on every side is the whole of a highlight. */
-	int inset = (int)gl_round((double)AWS_SYSTEM_MENU_CHIP_INSET * (double)s);
-	int padding = (int)gl_round((double)AWS_SYSTEM_MENU_CHIP_PADDING * (double)s);
-	int glyph = (int)gl_round((double)AWS_SYSTEM_MENU_GLYPH_WIDTH * (double)s);
-	float x = gl_round((double)AWS_SYSTEM_MENU_LEFT_MARGIN * (double)s) - (float)padding;
-	float y = gl_round((double)AWS_SYSTEM_MENU_GLYPH_TOP * (double)s) - (float)inset;
-	/* THE SAME RECTANGLE THE CPU RENDERER BUILDS: the mark's box, `PADDING` either side and `INSET` above and below. */
-	float width = (float)(glyph + 2 * padding);
-	float height = (float)(glyph + 2 * inset);
+	/* THE SAME RECTANGLE THE CPU RENDERER BUILDS — `aws_system_menu_chip_box` is the one arithmetic, and the test asks it
+	 * the same question the two renderers do. */
+	struct aws_box device;
+	float x, y, width, height;
 	int radius = (int)gl_round((double)AWS_SYSTEM_MENU_CHIP_RADIUS * (double)s);
-	int box_w = (int)width;
-	int box_h = (int)height;
+	int box_w, box_h;
 	uint8_t *coverage;
 
+	aws_system_menu_chip_box((double)s, &device);
+	x = (float)device.x;
+	y = (float)device.y;
+	width = (float)device.width;
+	height = (float)device.height;
+	box_w = device.width;
+	box_h = device.height;
 	if (box_w < 1 || box_h < 1 || x < 0.0f || y < 0.0f) {
 		return;
 	}
