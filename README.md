@@ -154,8 +154,14 @@ and not yet run against a picture; the CPU fallback is what drives a real DRM sc
 **AND THE TWO RENDERERS ARE CHECKED AGAINST EACH OTHER, NOT AGAINST A FEELING.** Both answer `--screenshot`; the GL
 one reads its frame back with `glReadPixels` before it swaps. A CPU frame and a GL frame of the same scene differ
 in **at most 2 of 255 per channel, and only on shadow falloff edges** (float blend against integer division); every
-window, corner, bar and menu pixel is identical. That measurement is what caught a real bug: the shadow shader was
-sampling from pixel centres, painting a dark line at row 24 where the CPU painted nothing.
+window, corner, bar and menu pixel is identical. **AND BOTH NOW MEASURE A SHADOW FROM THE PIXEL'S CENTRE**, because
+that is where the window's own shape is measured — `shape_coverage` asks at `column + 0.5`, and the shadow's inner
+boundary has to be that same silhouette. The first CPU/GL comparison caught them disagreeing about it, and the CPU
+was the one that was wrong: measuring from the pixel's INDEX puts the point half a pixel out from the shape in every
+direction, so the ring began on the window's edge along the left and top and one pixel OUTSIDE it along the right and
+bottom — a column of bare desktop between a window and its own shadow — and left a crescent of desktop under every
+antialiased corner arc, which reads as two mismatched layers at the corner. `tests/check_corners.py` asserts that no
+edge and no corner square shows desktop, so it cannot come back quietly.
 
 **A SHAPE IS A CORNER DECISION, AND TWO OF THEM ARE NOT THE WINDOW'S OWN.** Every window is clipped to a rounded
 rectangle at the same radius its shadow uses — the client is opaque on the wire, so it cannot round its own corners —

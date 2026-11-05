@@ -159,11 +159,12 @@ static const char *const blit_source =
 	"}\n";
 
 /* **AND THE SHADOW IS THE SAME DISTANCE, WITH THE SAME FALLOFF, MEASURED FROM THE SAME PLACE.** `renderer-cpu.c`
- * computes it from the pixel's INDEX (`row`, `column`) and its integer half-size, not from its centre — so the
- * shader floors `v_pos` back to that index before measuring. That half-pixel is the difference between a shadow
- * that starts one row under the menu bar and one that starts on it: MEASURED, comparing a CPU frame and a GL frame
- * of the same scene, the centre-sampled version painted a dark line at row 24 where the CPU painted nothing. The
- * falloff below is `t = 1 - distance / DEPTH; alpha = SHADOW_ALPHA * t * t` verbatim. */
+ * computes it from the pixel's CENTRE — `column + 0.5` — which is where the window's own shape is measured, and
+ * `v_pos` is already that centre, so the distance is taken from it directly. It used to floor `v_pos` back to the
+ * pixel's index to match a CPU renderer that did the same; that index is the pixel's CORNER, half a pixel out from
+ * the shape in every direction, and it left the pixel the window's antialiased edge passes through with no shadow
+ * behind it. The falloff below is `t = 1 - distance / DEPTH; alpha = SHADOW_ALPHA * t * t` verbatim, with a
+ * distance inside the shape clamped to zero — the half pixel that overlaps the window's edge is the peak of it. */
 static const char *const shadow_source =
 	"precision mediump float;\n"
 	"varying vec2 v_pos;\n"
@@ -172,14 +173,13 @@ static const char *const shadow_source =
 	"uniform float u_alpha;\n"
 	"uniform float u_depth;\n"
 	"void main() {\n"
-	"    vec2 pixel = floor(v_pos);\n"
 	"    vec2 half_size = floor(u_rect.zw * 0.5);\n"
 	"    vec2 center = u_rect.xy + half_size;\n"
 	"    vec2 inner = half_size - vec2(u_radius);\n"
-	"    vec2 d2 = max(abs(pixel - center) - inner, vec2(0.0));\n"
-	"    float d = floor(sqrt(dot(d2, d2))) - u_radius;\n"
-	"    float t = 1.0 - d / u_depth;\n"
-	"    if (d <= 0.0 || t <= 0.0) { discard; }\n"
+	"    vec2 d2 = max(abs(v_pos - center) - inner, vec2(0.0));\n"
+	"    float d = sqrt(dot(d2, d2)) - u_radius;\n"
+	"    if (d > u_depth || d <= -0.5) { discard; }\n"
+	"    float t = 1.0 - max(d, 0.0) / u_depth;\n"
 	"    gl_FragColor = vec4(0.0, 0.0, 0.0, u_alpha * t * t);\n"
 	"}\n";
 

@@ -17,6 +17,7 @@ WINDOW_AT = (100, 24, 200, 150)     # x, y, w, h — run-corners.sh's first clie
 MENU_AT = (360, 24, 200, 150)       # the second, at NSPopUpMenuWindowLevel
 RADIUS = 6                          # server.h's AWS_SHADOW_RADIUS
 TOLERANCE = 24                      # the shadow darkens the corner, so "not this colour" is the claim, not a value
+DESKTOP = (168, 222, 217)           # server.h's AWS_BACKGROUND — what a pixel no shadow reaches is
 
 
 def main():
@@ -40,6 +41,37 @@ def main():
 
     # A PIXEL INSIDE THE ARC IS THE WINDOW'S; the corner pixel itself is outside the curve, so what is there is the
     # desktop (and the shadow over it) — anything but the window's colour.
+    # **AND THERE IS NO BARE DESKTOP BETWEEN THE WINDOW AND ITS SHADOW.** That is the other half of a corner looking
+    # like two mismatched layers, and it was MEASURED at 1.0 and at 1.33203: the shadow's ring was measured from the
+    # pixel's corner instead of its centre, so its inner boundary landed one pixel OUTSIDE the window along the right
+    # and bottom edges (a column of desktop in between) and cut a crescent of desktop out of every corner arc. These
+    # two checks are the shape of that: the pixel past each edge is darkened, and the corner square holds no desktop.
+    def bare_desktop(p):
+        return all(abs(a - b) <= 4 for a, b in zip(p, DESKTOP))
+
+    def darkened(p):
+        return not bare_desktop(p)
+
+    edge_probes = [
+        (f"the pixel past the right edge ({wx + ww},{y + wh // 2}) is shadowed, not bare desktop",
+         darkened(px[(wx + ww, y + wh // 2)])),
+        (f"the pixel past the left edge ({wx - 1},{y + wh // 2}) is shadowed, not bare desktop",
+         darkened(px[(wx - 1, y + wh // 2)])),
+        (f"the pixel past the bottom edge ({wx + ww // 2},{y + wh}) is shadowed, not bare desktop",
+         darkened(px[(wx + ww // 2, y + wh)])),
+        (f"the pixel past the top edge ({wx + ww // 2},{y - 1}) is shadowed, not bare desktop",
+         darkened(px[(wx + ww // 2, y - 1)])),
+    ]
+    bare = []
+    for cx, cy, sx, sy in ((wx, y, 1, 1), (wx + ww - 1, y, -1, 1),
+                           (wx, y + wh - 1, 1, -1), (wx + ww - 1, y + wh - 1, -1, -1)):
+        for dy in range(RADIUS):
+            for dx in range(RADIUS):
+                if bare_desktop(px[(cx + dx * sx, cy + dy * sy)]):
+                    bare.append((cx + dx * sx, cy + dy * sy))
+    edge_probes.append(
+        (f"no corner square holds a desktop pixel the shadow missed (found {len(bare)}: {bare[:4]})", not bare))
+
     checks = [
         (f"the output is 640x400", im.size == (640, 400)),
         (f"the window's corner at ({wx},{y}) is NOT the window's colour (rounded)",
@@ -54,7 +86,7 @@ def main():
          near(px[(mx + RADIUS, y + RADIUS)], cmenu)),
         (f"the menu's width is its own to the last column ({mx + mw - 1})",
          near(px[(mx + mw - 1, y + RADIUS)], cmenu)),
-    ]
+    ] + edge_probes
 
     failures = 0
     for what, ok in checks:

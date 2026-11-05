@@ -252,7 +252,7 @@ static void shadow_span(struct aws_backend *output, int row, int from, int to,
 			int cx, int cy, int innerW, int innerH, int radius, int depth, int clip_top,
 			const struct aws_box *clip)
 {
-	int dy;
+	double dy;
 	int column;
 
 	if (row < clip_top || row >= output->height) {
@@ -278,26 +278,36 @@ static void shadow_span(struct aws_backend *output, int row, int from, int to,
 			to = clip->x + clip->width;
 		}
 	}
-	dy = (row > cy ? row - cy : cy - row) - innerH;
-	if (dy < 0) {
-		dy = 0;
+	/* **MEASURED FROM THE PIXEL'S CENTRE, WHICH IS WHERE THE WINDOW'S SHAPE IS MEASURED FROM.** `shape_coverage` asks
+	 * its question at `column + 0.5` — the middle of the square a pixel covers — and the two answers have to describe
+	 * ONE shape, because the pixel the window's curve passes through is blended with whatever is behind it. That makes
+	 * the shadow's inner boundary the window's own silhouette. MEASURED with the pixel's INDEX instead (and with
+	 * `int(sqrt(...))`, which rounds the point rather than the distance): the shadow began ON the window's edge along
+	 * the left and top and ONE PIXEL OUTSIDE it along the right and bottom — a whole column of bare desktop between a
+	 * window and its own shadow — and at 1.33203 a pale crescent of desktop along every corner arc, where the window's
+	 * antialiased edge was blended toward the desktop because no shadow had been painted under it. That crescent, with
+	 * the ink arc inside it, is the "two mismatched layers" a corner looks like. */
+	dy = fabs((double)row + 0.5 - (double)cy) - (double)innerH;
+	if (dy < 0.0) {
+		dy = 0.0;
 	}
 	for (column = from; column < to; column++) {
-		int dx, distance;
-		double t, falloff;
+		double dx, distance, t, falloff;
 		uint32_t alpha;
 
-		dx = (column > cx ? column - cx : cx - column) - innerW;
-		if (dx < 0) {
-			dx = 0;
+		dx = fabs((double)column + 0.5 - (double)cx) - (double)innerW;
+		if (dx < 0.0) {
+			dx = 0.0;
 		}
-		/* THE INTEGER SQUARE ROOT IS ENOUGH: a distance in pixels is the unit a falloff wants, and
-		 * `sqrt` here would be the only double in the compositor's inner loop. */
-		distance = (int)sqrt((double)(dx * dx + dy * dy)) - radius;
-		if (distance <= 0 || distance > depth) {
-			continue;	/* inside the frame, or past the shadow's reach */
+		distance = sqrt(dx * dx + dy * dy) - (double)radius;
+		/* **AND THE HALF PIXEL THAT OVERLAPS THE WINDOW'S OWN EDGE IS THE PEAK OF THE FALLOFF, NOT A HOLE IN THE
+		 * RING.** A pixel whose centre is less than half a pixel inside the silhouette is still partly showing the
+		 * desktop through the window's antialiasing, so the shadow behind it is at full strength; only a pixel the
+		 * window covers WHOLE is skipped. */
+		if (distance > (double)depth || distance <= -0.5) {
+			continue;	/* past the shadow's reach, or under a window that covers it whole */
 		}
-		t = 1.0 - (double)distance / (double)depth;
+		t = 1.0 - (distance > 0.0 ? distance : 0.0) / (double)depth;
 		falloff = t * t;
 		alpha = (uint32_t)((double)AWS_SHADOW_ALPHA * falloff);
 		if (alpha == 0) {
