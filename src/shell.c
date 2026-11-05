@@ -269,6 +269,10 @@ static void window_set_frame(struct wl_client *client, struct wl_resource *resou
 	if (surface == NULL) {
 		return;
 	}
+	if (getenv("AWS_INPUT_DIAG") != NULL) {
+		fprintf(stderr, "  DIAG set_frame (%d,%d) %dx%d (was (%d,%d))\n", (int)x, (int)y,
+		        (int)width, (int)height, surface->x, surface->y);
+	}
 	surface->x = (int)x;
 	surface->y = (int)y;
 	surface->frame_width = (int)width;
